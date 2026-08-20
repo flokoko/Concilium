@@ -33,6 +33,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Nur Datensnapshot + Report ohne LLM-Agenten (kein API-Aufruf)",
     )
     parser.add_argument(
+        "--peers",
+        type=str,
+        default=None,
+        help="Kommagetrennte Peer-Ticker für Vergleich (z. B. RWE.DE,SHEL.L)",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Ausführliche Logging-Ausgabe",
@@ -46,9 +52,16 @@ def main(argv: list[str] | None = None) -> int:
     # LLM-Client erstellen (oder None für --no-llm)
     llm = None if args.no_llm else LLMClient()
 
+    # Peers-Liste parsen (kommagetrennt)
+    peers_list: list[str] | None = None
+    if args.peers:
+        peers_list = [p.strip() for p in args.peers.split(",") if p.strip()]
+
     try:
         # Pipeline ausführen
-        result = run_pipeline(args.ticker, llm=llm, backtest=args.backtest)
+        result = run_pipeline(
+            args.ticker, llm=llm, backtest=args.backtest, peers=peers_list
+        )
 
         # Report generieren
         report = generate_report(result)

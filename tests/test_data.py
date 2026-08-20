@@ -19,6 +19,7 @@ from tradingagents_light.data import (  # noqa: E402
     _fetch_google_news,
     collect_ticker_data,
 )
+from tradingagents_light.journal import append_decision
 
 
 def _has_network() -> bool:
@@ -311,3 +312,175 @@ class TestSentimentWeighted:
         assert result["dominant"] == "neutral"
         assert result["sample_size"] == 0
         assert result["weighted"] is True
+
+
+# ---------------------------------------------------------------------------
+# Feature 1-3: Neue Datenerfassungs-Tests
+# ---------------------------------------------------------------------------
+
+
+class TestAnalystFields:
+    """Feature 1: Analysten-Erwartungen in fundamentals."""
+
+    @pytest.fixture(scope="class")
+    def rwe_data(self):
+        """Sammelt RWE.DE-Daten einmal für alle Tests."""
+        return collect_ticker_data("RWE.DE")
+
+    def test_analyst_fields_present(self, rwe_data):
+        """fundamentals hat analyst_target_mean (Float oder None) und analyst_upside_pct Schlüssel."""
+        f = rwe_data["fundamentals"]
+        assert "analyst_target_mean" in f
+        assert "analyst_upside_pct" in f
+        # analyst_target_mean sollte float oder None sein
+        assert f["analyst_target_mean"] is None or isinstance(f["analyst_target_mean"], float)
+        # analyst_upside_pct sollte float oder None sein
+        assert f["analyst_upside_pct"] is None or isinstance(f["analyst_upside_pct"], float)
+
+    def test_recommendation_fields_present(self, rwe_data):
+        """recommendation_key und analyst_count sollten als Schlüssel existieren."""
+        f = rwe_data["fundamentals"]
+        assert "recommendation_key" in f
+        assert "analyst_count" in f
+        assert "recommendation_mean" in f
+
+
+class TestMacroFields:
+    """Feature 2: Makro/Zins-Daten."""
+
+    @pytest.fixture(scope="class")
+    def rwe_data(self):
+        return collect_ticker_data("RWE.DE")
+
+    def test_macro_keys_present(self, rwe_data):
+        """data['macro'] hat die erwarteten Keys."""
+        macro = rwe_data["macro"]
+        assert "us_10y_yield" in macro
+        assert "us_10y_yield_1m_ago" in macro
+        assert "us_10y_trend" in macro
+        assert "sp500_pe" in macro
+        assert "sp500_market_cap" in macro
+
+
+class TestPeersOptional:
+    """Feature 3: Peer-Vergleich (optionaler Parameter)."""
+
+    def test_peers_optional(self):
+        """collect_ticker_data('RWE.DE', peers=['SHEL.L']) → data['peers'] ist eine Liste."""
+        data = collect_ticker_data("RWE.DE", peers=["SHEL.L"])
+        assert "peers" in data
+        assert isinstance(data["peers"], list)
+        # Best effort: wenn Netz verfügbar, sollte mindestens 1 Eintrag drin sein
+        # Wenn Netz ausfällt → leere Liste (nicht failen)
+        for entry in data["peers"]:
+            assert "ticker" in entry
+            assert "pe_ratio" in entry
+            assert "market_cap" in entry
+            assert "name" in entry
+
+    def test_peers_default_empty(self):
+        """Ohne peers-Parameter ist data['peers'] eine leere Liste."""
+        data = collect_ticker_data("AAPL")
+        assert "peers" in data
+        assert isinstance(data["peers"], list)
+        assert len(data["peers"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: Entscheidungs-Journal Tests
+# ---------------------------------------------------------------------------
+
+
+class TestAppendDecision:
+    """Feature 4: append_decision schreibt CSV-Journal."""
+
+    def test_append_decision_creates_file(self, tmp_path):
+        """append_decision mit Mock-result → Datei/Ordner entsteht + Header vorhanden."""
+        mock_result = {
+            "ticker": "TEST.DE",
+            "trade": {
+                "aktion": "KAUFEN",
+                "zielkurs": 150.0,
+                "stop_loss": 130.0,
+                "positionsanteil": 5,
+            },
+            "final": {
+                "entscheidung": "GENEHMIGT",
+                "confidence": 4,
+            },
+            "debate": {
+                "bull": {"_raw": '{"confidence": 4, "name": "Bull"}\nSteigt!'},
+                "bear": {"_raw": '{"confidence": 2, "name": "Bear"}\nFällt!'},
+            },
+        }
+
+        journal_file = str(tmp_path / "journal" / "decisions.csv")
+        append_decision(mock_result, journal_file=journal_file)
+
+        # Datei sollte existieren
+        import os
+
+        assert os.path.isfile(journal_file)
+
+        # Header und Daten prüfen
+        import csv as csv_mod
+
+        with open(journal_file, encoding="utf-8") as fh:
+            reader = csv_mod.DictReader(fh)
+            rows = list(reader)
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["ticker"] == "TEST.DE"
+        assert row["action"] == "KAUFEN"
+        assert row["target"] == "150.0"
+        assert row["stop"] == "130.0"
+        assert row["position_pct"] == "5"
+        assert row["final_decision"] == "GENEHMIGT"
+        assert row["confidence"] == "4"
+        assert row["bull_confidence"] == "4"
+        assert row["bear_confidence"] == "2"
+
+    def test_append_decision_empty_fields(self, tmp_path):
+        """Bei leerem result werden Felder leer gelassen (nicht crashen)."""
+        mock_result: dict = {}
+
+        journal_file = str(tmp_path / "journal_empty" / "decisions.csv")
+        append_decision(mock_result, journal_file=journal_file)
+
+        import os
+
+        assert os.path.isfile(journal_file)
+
+        import csv as csv_mod
+
+        with open(journal_file, encoding="utf-8") as fh:
+            reader = csv_mod.DictReader(fh)
+            rows = list(reader)
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["ticker"] == ""
+        assert row["action"] == ""
+
+    def test_append_decision_appends(self, tmp_path):
+        """Mehrere Aufrufe anhängen an dieselbe Datei."""
+        journal_file = str(tmp_path / "journal_append" / "decisions.csv")
+
+        for i in range(3):
+            mock_result = {
+                "ticker": f"TEST{i}.DE",
+                "trade": {"aktion": "KAUFEN"},
+                "final": {"entscheidung": "GENEHMIGT", "confidence": 3},
+            }
+            append_decision(mock_result, journal_file=journal_file)
+
+        import csv as csv_mod
+
+        with open(journal_file, encoding="utf-8") as fh:
+            reader = csv_mod.DictReader(fh)
+            rows = list(reader)
+
+        assert len(rows) == 3
+        assert rows[0]["ticker"] == "TEST0.DE"
+        assert rows[2]["ticker"] == "TEST2.DE"

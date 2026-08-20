@@ -16,6 +16,7 @@ def run_pipeline(
     ticker: str,
     llm: LLMClient | None = None,
     backtest: bool = False,
+    peers: list[str] | None = None,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -28,6 +29,12 @@ def run_pipeline(
       6. Portfolio-Manager finale Entscheidung (1 LLM-Call) — nur wenn llm gegeben
       7. Optional: Backtest-Signalproxy
 
+    Args:
+        ticker: Ticker-Symbol.
+        llm: LLMClient oder None für --no-llm Modus.
+        backtest: Ob Backtest-Signalproxy ausgeführt werden soll.
+        peers: Optionale Liste von Peer-Ticker-Symbolen für den Vergleich.
+
     Returns:
         dict mit allen Zwischenergebnissen.
     """
@@ -35,7 +42,7 @@ def run_pipeline(
 
     # --- 1. Daten sammeln ---
     logger.info("Schritt 1: Sammle Marktdaten für %s", ticker)
-    data = collect_ticker_data(ticker)
+    data = collect_ticker_data(ticker, peers=peers)
     result["data"] = data
     result["ticker"] = data["ticker"]
 
@@ -78,5 +85,16 @@ def run_pipeline(
     logger.info("Schritt 6: Portfolio-Manager trifft finale Entscheidung")
     final = portfolio_manager(trade, risk, llm)
     result["final"] = final
+
+    # --- Feature 4: Entscheidungs-Journal ---
+    # Nur im LLM-Modus (llm nicht None) und wenn final existiert
+    try:
+        from .journal import append_decision
+
+        append_decision(result)
+        result["_journal_written"] = True
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("Entscheidung konnte nicht ins Journal geschrieben werden: %s", exc)
+        result["_journal_written"] = False
 
     return result

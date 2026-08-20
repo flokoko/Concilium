@@ -205,6 +205,8 @@ def _build_data_text(data: dict[str, Any]) -> str:
     t = data.get("technicals", {})
     s = data.get("sentiment", {})
     news = data.get("news", [])
+    macro = data.get("macro", {})
+    peers = data.get("peers", [])
 
     lines = [
         f"Aktie: {data.get('ticker', '?')} ({f.get('name', 'N/A')})",
@@ -222,6 +224,14 @@ def _build_data_text(data: dict[str, Any]) -> str:
         f"  Beta: {_fmt_num(f.get('beta'))}",
         f"  52W Hoch: {_fmt_num(f.get('fifty_two_week_high'))}",
         f"  52W Tief: {_fmt_num(f.get('fifty_two_week_low'))}",
+        # Feature 1: Analysten-Erwartungen
+        f"  Analysten-Konsens: {f.get('recommendation_key', 'N/A')}",
+        f"  Analysten-Mean (Skala 1=strong buy … 5=sell): {_fmt_num(f.get('recommendation_mean'))}",
+        f"  Anzahl Analysten: {f.get('analyst_count', 'N/A')}",
+        f"  Zielkurs Ø: {_fmt_num(f.get('analyst_target_mean'))}",
+        f"  Zielkurs hoch: {_fmt_num(f.get('analyst_target_high'))}",
+        f"  Zielkurs tief: {_fmt_num(f.get('analyst_target_low'))}",
+        f"  Upside (geschätzt): {_fmt_num(f.get('analyst_upside_pct'))} %",
         "",
         "=== TECHNIK ===",
         f"  Aktueller Kurs: {_fmt_num(t.get('current_price'))}",
@@ -233,12 +243,40 @@ def _build_data_text(data: dict[str, Any]) -> str:
         f"  Bollinger-Position: {_fmt_num(t.get('bollinger', {}).get('position'))} (0=unteres Band, 1=oberes Band)",
         f"  Volumen: {_fmt_num(t.get('current_volume'), ' ')}",
         f"  Ø Volumen 30T: {_fmt_num(t.get('avg_volume_30d'), ' ')}",
-        "",
-        "=== SENTIMENT ===",
-        f"  Positive Headlines: {s.get('positiv', 0)}",
-        f"  Negative Headlines: {s.get('negativ', 0)}",
-        f"  Neutrale Headlines: {s.get('neutral', 0)}",
     ]
+
+    # Feature 2: Makro/Zins-Daten
+    if macro:
+        lines.append("")
+        lines.append("=== MAKRO / ZINSEN ===")
+        lines.append(f"  10y US Treasury Yield: {_fmt_num(macro.get('us_10y_yield'))} %")
+        lines.append(f"  10y Yield vor 1 Monat: {_fmt_num(macro.get('us_10y_yield_1m_ago'))} %")
+        lines.append(f"  10y Zinstrend: {macro.get('us_10y_trend', 'N/A')}")
+        lines.append(f"  S&P 500 KGV: {_fmt_num(macro.get('sp500_pe'))}")
+        lines.append(f"  S&P 500 Marktkap: {_fmt_num(macro.get('sp500_market_cap'), ' ')}")
+        lines.append(
+            "  Hinweis: Hohe/steigende Zinsen belasten kapitalintensive "
+            "und erneuerbare Sektoren."
+        )
+
+    # Feature 3: Peer-Vergleich
+    if peers:
+        lines.append("")
+        lines.append("=== PEER-VERGLEICH ===")
+        lines.append(f"  Eigener KGV: {_fmt_num(f.get('pe_ratio'))}")
+        for p in peers:
+            lines.append(
+                f"  {p.get('ticker', '?')}: KGV {_fmt_num(p.get('pe_ratio'))}, "
+                f"Marktkap {_fmt_num(p.get('market_cap'), ' ')} ({p.get('name', 'N/A')})"
+            )
+        if macro:
+            lines.append(f"  S&P 500 KGV (Benchmark): {_fmt_num(macro.get('sp500_pe'))}")
+
+    lines.append("")
+    lines.append("=== SENTIMENT ===")
+    lines.append(f"  Positive Headlines: {s.get('positiv', 0)}")
+    lines.append(f"  Negative Headlines: {s.get('negativ', 0)}")
+    lines.append(f"  Neutrale Headlines: {s.get('neutral', 0)}")
 
     # Zeitgewichtete / dominante Stimmung hinzufügen, falls verfügbar
     is_weighted = s.get("weighted", False)

@@ -101,6 +101,29 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
     lines.append(f"| 52W Tief | {_fmt(f.get('fifty_two_week_low'))} |")
     lines.append("")
 
+    # === Analysten-Erwartungen (Feature 1) ===
+    has_analyst = any(
+        k in f and f.get(k) is not None
+        for k in ("analyst_target_mean", "analyst_target_high", "analyst_target_low",
+                  "recommendation_key", "analyst_count", "recommendation_mean",
+                  "analyst_upside_pct")
+    )
+    if has_analyst:
+        lines.append("## 1b. Analysten-Erwartungen")
+        lines.append("")
+        lines.append("| Kennzahl | Wert |")
+        lines.append("|---|---|")
+        lines.append(f"| Konsens-Empfehlung | {f.get('recommendation_key', 'N/A')} |")
+        lines.append(f"| Recommendation Mean (1=stark kaufen … 5=verkaufen) | {_fmt(f.get('recommendation_mean'))} |")
+        lines.append(f"| Anzahl Analysten | {_fmt(f.get('analyst_count'))} |")
+        lines.append(f"| Zielkurs Ø (12M) | {_fmt(f.get('analyst_target_mean'))} |")
+        lines.append(f"| Zielkurs Hoch | {_fmt(f.get('analyst_target_high'))} |")
+        lines.append(f"| Zielkurs Tief | {_fmt(f.get('analyst_target_low'))} |")
+        if f.get("analyst_upside_pct") is not None:
+            lines.append(f"| Upside zum Zielkurs | {_fmt(f.get('analyst_upside_pct'))} % |")
+        lines.append("")
+
+
     # === Technische Indikatoren ===
     lines.append("## 2. Technische Indikatoren")
     lines.append("")
@@ -161,6 +184,48 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append("")
         for h in news[:15]:
             lines.append(f"- {h}")
+        lines.append("")
+
+    # === Makro / Zinsen (Feature 2) ===
+    macro = data.get("macro", {})
+    if macro and any(v is not None for v in macro.values()):
+        lines.append("## Makro / Zinsen")
+        lines.append("")
+        lines.append("| Kennzahl | Wert |")
+        lines.append("|---|---|")
+        lines.append(f"| 10y US Treasury Yield | {_fmt(macro.get('us_10y_yield'))} % |")
+        lines.append(f"| 10y Yield vor 1 Monat | {_fmt(macro.get('us_10y_yield_1m_ago'))} % |")
+        lines.append(f"| 10y Zinstrend | {macro.get('us_10y_trend', 'N/A')} |")
+        lines.append(f"| S&P 500 KGV | {_fmt(macro.get('sp500_pe'))} |")
+        lines.append(f"| S&P 500 Marktkap | {_fmt(macro.get('sp500_market_cap'))} |")
+        lines.append("")
+        lines.append(
+            "> Hinweis: Hohe/steigende Zinsen belasten kapitalintensive "
+            "und erneuerbare Sektoren."
+        )
+        lines.append("")
+
+    # === Peer-Vergleich (Feature 3) ===
+    peers = data.get("peers", [])
+    if peers:
+        lines.append("## Peer-Vergleich")
+        lines.append("")
+        lines.append("| Ticker | KGV | Marktkap | Name |")
+        lines.append("|---|---|---|---|")
+        lines.append(
+            f"| **{ticker}** | **{_fmt(f.get('pe_ratio'))}** | "
+            f"**{_fmt(f.get('market_cap'))}** | **{f.get('name', 'N/A')}** |"
+        )
+        for p in peers:
+            lines.append(
+                f"| {p.get('ticker', '?')} | {_fmt(p.get('pe_ratio'))} | "
+                f"{_fmt(p.get('market_cap'))} | {p.get('name', 'N/A')} |"
+            )
+        if macro.get("sp500_pe") is not None:
+            lines.append(
+                f"| ^GSPC (Benchmark) | {_fmt(macro.get('sp500_pe'))} | "
+                f"{_fmt(macro.get('sp500_market_cap'))} | S&P 500 |"
+            )
         lines.append("")
 
     # === Backtest (falls vorhanden) ===
@@ -272,5 +337,10 @@ Obiger Report zeigt nur den Datensnapshot._")
     # --- Footer ---
     lines.append("---")
     lines.append("*Erstellt von TradingAgents-Light · Keine Anlageberatung*")
+
+    # Feature 4: Journal-Hinweis (nur im LLM-Modus, wenn Eintrag geschrieben)
+    if not no_llm and result.get("_journal_written"):
+        lines.append("")
+        lines.append("Entscheidung im Journal gespeichert: journal/decisions.csv")
 
     return "\n".join(lines)

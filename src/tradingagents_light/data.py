@@ -345,11 +345,102 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
-def collect_ticker_data(ticker: str) -> dict[str, Any]:
-    """Sammelt alle Marktdaten für einen Ticker via yfinance.
+def _fetch_macro_data() -> dict[str, Any]:
+    """Holt Makro/Zins-Daten (10y US Treasury, S&P 500) — best effort, nie crashen.
 
     Returns:
-        dict mit Schlüsseln: ticker, fundamentals, technicals, history, sentiment, news
+        dict mit us_10y_yield, us_10y_yield_1m_ago, us_10y_trend,
+        sp500_pe, sp500_market_cap (alle None bei Fehler).
+    """
+    result: dict[str, Any] = {
+        "us_10y_yield": None,
+        "us_10y_yield_1m_ago": None,
+        "us_10y_trend": None,
+        "sp500_pe": None,
+        "sp500_market_cap": None,
+    }
+
+    # --- 10y US Treasury Yield (^TNX) ---
+    try:
+        tnx = yf.Ticker("^TNX")
+        tnx_hist = tnx.history(period="1mo")
+        if tnx_hist is not None and not tnx_hist.empty:
+            close_col = tnx_hist["Close"]
+            current_yield = _safe_float(close_col.iloc[-1])
+            old_yield = _safe_float(close_col.iloc[0]) if len(close_col) >= 1 else None
+            result["us_10y_yield"] = current_yield
+            result["us_10y_yield_1m_ago"] = old_yield
+            if current_yield is not None and old_yield is not None:
+                diff = current_yield - old_yield
+                if abs(diff) < 0.05:
+                    result["us_10y_trend"] = "flach"
+                elif diff > 0:
+                    result["us_10y_trend"] = "steigend"
+                else:
+                    result["us_10y_trend"] = "fallend"
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.warning("Makrodaten ^TNX konnten nicht abgerufen werden: %s", exc)
+
+    # --- S&P 500 Benchmark (^GSPC) ---
+    try:
+        sp500 = yf.Ticker("^GSPC")
+        sp500_info = sp500.info or {}
+        result["sp500_pe"] = _safe_float(sp500_info.get("trailingPE"))
+        result["sp500_market_cap"] = _safe_float(sp500_info.get("marketCap"))
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.warning("Makrodaten ^GSPC konnten nicht abgerufen werden: %s", exc)
+
+    return result
+
+
+def _fetch_peer_data(peers: list[str]) -> list[dict[str, Any]]:
+    """Holt KGV/Marktkapitalisierung für Peer-Ticker — best effort, nie crashen.
+
+    Args:
+        peers: Liste von Ticker-Symbolen.
+
+    Returns:
+        Liste von dicts mit ticker, pe_ratio, market_cap, name.
+        Bei Fehler/leer → leere Liste.
+    """
+    result: list[dict[str, Any]] = []
+    for peer_ticker in peers:
+        peer_ticker = peer_ticker.strip().upper()
+        if not peer_ticker:
+            continue
+        try:
+            pt = yf.Ticker(peer_ticker)
+            pinfo = pt.info or {}
+            result.append({
+                "ticker": peer_ticker,
+                "pe_ratio": _safe_float(pinfo.get("trailingPE")),
+                "market_cap": _safe_float(pinfo.get("marketCap")),
+                "name": pinfo.get("longName") or pinfo.get("shortName") or peer_ticker,
+            })
+        except Exception as exc:  # noqa: BLE001 — best effort
+            logger.warning("Peer-Daten für '%s' konnten nicht abgerufen werden: %s", peer_ticker, exc)
+            result.append({
+                "ticker": peer_ticker,
+                "pe_ratio": None,
+                "market_cap": None,
+                "name": peer_ticker,
+            })
+    return result
+
+
+def collect_ticker_data(
+    ticker: str,
+    peers: list[str] | None = None,
+) -> dict[str, Any]:
+    """Sammelt alle Marktdaten für einen Ticker via yfinance.
+
+    Args:
+        ticker: Ticker-Symbol (z. B. AAPL, RWE.DE).
+        peers: Optionale Liste von Peer-Ticker-Symbolen für den Vergleich.
+
+    Returns:
+        dict mit Schlüsseln: ticker, fundamentals, technicals, history, sentiment,
+        news, macro, peers
 
     Raises:
         ValueError: bei ungültigem Ticker (keine Daten von yfinance).
@@ -392,6 +483,20 @@ def collect_ticker_data(ticker: str) -> dict[str, Any]:
     industry = info.get("industry", "N/A")
     long_name = info.get("longName") or info.get("shortName") or ticker
 
+    # --- Feature 1: Analysten-Erwartungen ---
+    analyst_target_mean = _safe_float(info.get("targetMeanPrice"))
+    analyst_target_high = _safe_float(info.get("targetHighPrice"))
+    analyst_target_low = _safe_float(info.get("targetLowPrice"))
+    recommendation_key = info.get("recommendationKey")  # String, kein float
+    analyst_count = _safe_float(info.get("numberOfAnalystOpinions"))
+    recommendation_mean = _safe_float(info.get("recommendationMean"))
+    current_price_info = _safe_float(info.get("currentPrice"))
+
+    # Upside berechnen (currentPrice als Basis)
+    analyst_upside_pct: float | None = None
+    if analyst_target_mean is not None and current_price_info is not None and current_price_info > 0:
+        analyst_upside_pct = (analyst_target_mean - current_price_info) / current_price_info * 100.0
+
     fundamentals = {
         "name": long_name,
         "sector": sector,
@@ -408,6 +513,14 @@ def collect_ticker_data(ticker: str) -> dict[str, Any]:
         "beta": beta,
         "fifty_two_week_high": fifty_two_week_high,
         "fifty_two_week_low": fifty_two_week_low,
+        # Feature 1: Analysten-Erwartungen
+        "analyst_target_mean": analyst_target_mean,
+        "analyst_target_high": analyst_target_high,
+        "analyst_target_low": analyst_target_low,
+        "recommendation_key": recommendation_key,
+        "analyst_count": int(analyst_count) if analyst_count is not None else None,
+        "recommendation_mean": recommendation_mean,
+        "analyst_upside_pct": analyst_upside_pct,
     }
 
     # --- Technische Indikatoren aus Historie ---
@@ -434,6 +547,14 @@ def collect_ticker_data(ticker: str) -> dict[str, Any]:
         "current_volume": current_volume,
         "avg_volume_30d": avg_volume_30d,
     }
+
+    # --- Feature 2: Makro/Zins-Daten ---
+    macro = _fetch_macro_data()
+
+    # --- Feature 3: Peer-Vergleich ---
+    peers_data: list[dict[str, Any]] = []
+    if peers:
+        peers_data = _fetch_peer_data(peers)
 
     # --- Sentiment aus News ---
     news_list = None
@@ -499,4 +620,8 @@ def collect_ticker_data(ticker: str) -> dict[str, Any]:
         "news": headlines[:20],  # neueste 20 Headlines
         "news_with_dates": news_with_dates[:20] if news_with_dates else [],
         "news_source": news_source,  # "yfinance" | "google_news" | "none"
+        # Feature 2: Makro/Zins-Daten
+        "macro": macro,
+        # Feature 3: Peer-Vergleich
+        "peers": peers_data,
     }
