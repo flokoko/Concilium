@@ -43,6 +43,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Ausführliche Logging-Ausgabe",
     )
+    parser.add_argument(
+        "--no-ensemble",
+        action="store_true",
+        help="Ensemble-Trader deaktivieren (nur Single-Run). Standard: Ensemble aktiv (3 Runs).",
+    )
+    parser.add_argument(
+        "--ensemble-runs",
+        type=int,
+        default=3,
+        help="Anzahl der Ensemble-Runs für den Trader (Default: 3). "
+        "Wird ignoriert, wenn --no-ensemble gesetzt ist.",
+    )
     args = parser.parse_args(argv)
 
     # Logging konfigurieren
@@ -60,7 +72,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Pipeline ausführen
         result = run_pipeline(
-            args.ticker, llm=llm, backtest=args.backtest, peers=peers_list
+            args.ticker,
+            llm=llm,
+            backtest=args.backtest,
+            peers=peers_list,
+            ensemble=not args.no_ensemble,
+            ensemble_runs=args.ensemble_runs,
         )
 
         # Report generieren

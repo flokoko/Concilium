@@ -28,6 +28,7 @@ JOURNAL_HEADER = [
     "confidence",
     "bull_confidence",
     "bear_confidence",
+    "ensemble_confidence",
 ]
 
 
@@ -51,6 +52,29 @@ def _parse_confidence_from_debate(agent: dict[str, Any]) -> str:
         except (json.JSONDecodeError, TypeError):
             pass
     return ""
+
+
+def _rewrite_journal_with_header(journal_file: str, existing_fields: list[str]) -> None:
+    """Schreibt eine bestehende Journal-CSV neu mit dem erweiterten Header.
+
+    Liest alle Zeilen der alten Datei, fügt die neue Spalte ensemble_confidence
+    (leer) zu jeder Zeile hinzu und schreibt die Datei neu mit JOURNAL_HEADER.
+    """
+    try:
+        with open(journal_file, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            rows = list(reader)
+        with open(journal_file, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=JOURNAL_HEADER)
+            writer.writeheader()
+            for row in rows:
+                # Fehlende Spalten als leer auffüllen
+                for field in JOURNAL_HEADER:
+                    if field not in row:
+                        row[field] = ""
+                writer.writerow({k: row.get(k, "") for k in JOURNAL_HEADER})
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.warning("Journal-Header-Erweiterung fehlgeschlagen: %s", exc)
 
 
 def append_decision(
@@ -90,6 +114,12 @@ def append_decision(
         ticker = result.get("ticker", "")
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # Ensemble-Konfidenz aus trade._ensemble extrahieren
+        ensemble_info = trade.get("_ensemble", {}) or {}
+        ensemble_confidence = ensemble_info.get("ensemble_confidence", "")
+        if isinstance(ensemble_confidence, float):
+            ensemble_confidence = f"{ensemble_confidence:.2f}"
+
         row = {
             "timestamp": timestamp,
             "ticker": ticker,
@@ -101,10 +131,24 @@ def append_decision(
             "confidence": final.get("confidence", ""),
             "bull_confidence": _parse_confidence_from_debate(bull),
             "bear_confidence": _parse_confidence_from_debate(bear),
+            "ensemble_confidence": ensemble_confidence,
         }
 
         # Datei existiert? → Header nur schreiben wenn neu
         file_exists = os.path.isfile(journal_file)
+
+        # Bei bestehender Datei ohne ensemble_confidence-Spalte:
+        # Header ergänzen, indem wir die Datei neu schreiben mit Header.
+        if file_exists:
+            try:
+                with open(journal_file, encoding="utf-8") as fh_check:
+                    reader = csv.DictReader(fh_check)
+                    existing_fields = reader.fieldnames or []
+                if "ensemble_confidence" not in existing_fields:
+                    # Datei hat alten Header → neu schreiben mit erweitertem Header
+                    _rewrite_journal_with_header(journal_file, list(existing_fields))
+            except Exception as exc:  # noqa: BLE001 — best effort
+                logger.warning("Journal-Header-Check fehlgeschlagen: %s", exc)
 
         with open(journal_file, "a", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=JOURNAL_HEADER)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .agents import analyst_team, debate, portfolio_manager, risk_manager, trader
+from .agents import analyst_team, debate, ensemble_trader, portfolio_manager, risk_manager, trader
 from .data import collect_ticker_data
 from .llm import LLMClient
 
@@ -17,6 +17,8 @@ def run_pipeline(
     llm: LLMClient | None = None,
     backtest: bool = False,
     peers: list[str] | None = None,
+    ensemble: bool = True,
+    ensemble_runs: int = 3,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -24,7 +26,7 @@ def run_pipeline(
       1. Datensammlung (yfinance)
       2. Analysten-Team (3 LLM-Calls) — nur wenn llm gegeben
       3. Bull/Bear-Debatte (2 LLM-Calls) — nur wenn llm gegeben
-      4. Trade-Vorschlag (1 LLM-Call) — nur wenn llm gegeben
+      4. Trade-Vorschlag (1 LLM-Call oder Ensemble) — nur wenn llm gegeben
       5. Risk-Manager (1 LLM-Call) — nur wenn llm gegeben
       6. Portfolio-Manager finale Entscheidung (1 LLM-Call) — nur wenn llm gegeben
       7. Optional: Backtest-Signalproxy
@@ -34,6 +36,8 @@ def run_pipeline(
         llm: LLMClient oder None für --no-llm Modus.
         backtest: Ob Backtest-Signalproxy ausgeführt werden soll.
         peers: Optionale Liste von Peer-Ticker-Symbolen für den Vergleich.
+        ensemble: Ob der Trader als Ensemble (Mehrere Runs) ausgeführt wird.
+        ensemble_runs: Anzahl der Ensemble-Runs (nur relevant wenn ensemble=True).
 
     Returns:
         dict mit allen Zwischenergebnissen.
@@ -71,9 +75,13 @@ def run_pipeline(
     debate_result = debate(analysts, llm)
     result["debate"] = debate_result
 
-    # --- 4. Trader ---
-    logger.info("Schritt 4: Trader erstellt Trade-Vorschlag")
-    trade = trader(analysts, debate_result, llm)
+    # --- 4. Trader (oder Ensemble-Trader) ---
+    if ensemble:
+        logger.info("Schritt 4: Ensemble-Trader (%d Runs) erstellt Trade-Vorschlag", ensemble_runs)
+        trade = ensemble_trader(analysts, debate_result, llm, runs=ensemble_runs)
+    else:
+        logger.info("Schritt 4: Trader erstellt Trade-Vorschlag (Single-Run)")
+        trade = trader(analysts, debate_result, llm)
     result["trade"] = trade
 
     # --- 5. Risk-Manager ---

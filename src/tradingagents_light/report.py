@@ -196,7 +196,9 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(f"| 10y US Treasury Yield | {_fmt(macro.get('us_10y_yield'))} % |")
         lines.append(f"| 10y Yield vor 1 Monat | {_fmt(macro.get('us_10y_yield_1m_ago'))} % |")
         lines.append(f"| 10y Zinstrend | {macro.get('us_10y_trend', 'N/A')} |")
-        lines.append(f"| S&P 500 KGV | {_fmt(macro.get('sp500_pe'))} |")
+        sp500_source = macro.get("sp500_source", "none")
+        source_label = f" ({sp500_source})" if sp500_source and sp500_source != "none" else ""
+        lines.append(f"| S&P 500 KGV{source_label} | {_fmt(macro.get('sp500_pe'))} |")
         lines.append(f"| S&P 500 Marktkap | {_fmt(macro.get('sp500_market_cap'))} |")
         lines.append("")
         lines.append(
@@ -222,8 +224,10 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
                 f"{_fmt(p.get('market_cap'))} | {p.get('name', 'N/A')} |"
             )
         if macro.get("sp500_pe") is not None:
+            sp500_src = macro.get("sp500_source", "none")
+            src_label = f" ({sp500_src})" if sp500_src and sp500_src != "none" else ""
             lines.append(
-                f"| ^GSPC (Benchmark) | {_fmt(macro.get('sp500_pe'))} | "
+                f"| S&P 500 (Benchmark){src_label} | {_fmt(macro.get('sp500_pe'))} | "
                 f"{_fmt(macro.get('sp500_market_cap'))} | S&P 500 |"
             )
         lines.append("")
@@ -301,6 +305,19 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(f"**Zeithorizont:** {trade.get('zeithorizont', 'N/A')}")
         lines.append(f"**Begründung:** {trade.get('begründung', 'N/A')}")
         lines.append("")
+
+        # Ensemble-Info anzeigen (falls vorhanden)
+        ensemble_info = trade.get("_ensemble")
+        if ensemble_info:
+            ens_runs = ensemble_info.get("runs", "?")
+            ens_aktion = ensemble_info.get("mehrheits_aktion", "N/A")
+            ens_conf = ensemble_info.get("ensemble_confidence", 0)
+            ens_conf_pct = int(ens_conf * 100) if isinstance(ens_conf, float | int) else 0
+            lines.append(
+                f"_Ensemble: {ens_runs} Runs, Aktion {ens_aktion} "
+                f"(Konfidenz {ens_conf_pct}%)_"
+            )
+            lines.append("")
 
         # Risk
         section_num += 1

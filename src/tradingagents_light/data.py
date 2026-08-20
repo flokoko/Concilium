@@ -381,14 +381,60 @@ def _fetch_macro_data() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — best effort
         logger.warning("Makrodaten ^TNX konnten nicht abgerufen werden: %s", exc)
 
-    # --- S&P 500 Benchmark (^GSPC) ---
+    # --- S&P 500 Benchmark (^GSPC mit SPY-Fallback) ---
+    sp500 = _get_sp500_benchmark()
+    result["sp500_pe"] = sp500["sp500_pe"]
+    result["sp500_market_cap"] = sp500["sp500_market_cap"]
+    result["sp500_source"] = sp500["sp500_source"]
+
+    return result
+
+
+def _get_sp500_benchmark() -> dict[str, Any]:
+    """Holt S&P 500 Benchmark-KGV — zuerst ^GSPC, bei None Fallback auf SPY (ETF).
+
+    Liefert ein dict mit:
+      sp500_pe: float | None — das KGV (trailingPE)
+      sp500_market_cap: float | None — Marktkapitalisierung
+      sp500_source: str — "GSPC" oder "SPY" (je nach Quelle) oder "none"
+
+    Robust: bei Fehler/kein Netz → Werte None, sp500_source="none". Nie crashen.
+    """
+    result: dict[str, Any] = {
+        "sp500_pe": None,
+        "sp500_market_cap": None,
+        "sp500_source": "none",
+    }
+
+    # 1. Versuch: ^GSPC (S&P 500 Index)
     try:
         sp500 = yf.Ticker("^GSPC")
         sp500_info = sp500.info or {}
-        result["sp500_pe"] = _safe_float(sp500_info.get("trailingPE"))
-        result["sp500_market_cap"] = _safe_float(sp500_info.get("marketCap"))
+        pe = _safe_float(sp500_info.get("trailingPE"))
+        if pe is not None:
+            result["sp500_pe"] = pe
+            result["sp500_market_cap"] = _safe_float(sp500_info.get("marketCap"))
+            result["sp500_source"] = "GSPC"
+            return result
+        logger.info("^GSPC lieferte kein trailingPE — versuche SPY-Fallback …")
     except Exception as exc:  # noqa: BLE001 — best effort
         logger.warning("Makrodaten ^GSPC konnten nicht abgerufen werden: %s", exc)
+
+    # 2. Fallback: SPY (S&P 500 ETF) — liefert zuverlässig trailingPE
+    try:
+        spy = yf.Ticker("SPY")
+        spy_info = spy.info or {}
+        pe = _safe_float(spy_info.get("trailingPE"))
+        if pe is not None:
+            result["sp500_pe"] = pe
+            # SPY hat keine S&P 500 Marktkap, aber ggf. eigene marketCap
+            result["sp500_market_cap"] = _safe_float(spy_info.get("marketCap"))
+            result["sp500_source"] = "SPY"
+            logger.info("SPY-Fallback erfolgreich: trailingPE=%s", pe)
+        else:
+            logger.warning("SPY lieferte ebenfalls kein trailingPE — S&P 500 KGV bleibt None.")
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.warning("SPY-Fallback fehlgeschlagen: %s", exc)
 
     return result
 

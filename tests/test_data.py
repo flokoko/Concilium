@@ -360,6 +360,7 @@ class TestMacroFields:
         assert "us_10y_trend" in macro
         assert "sp500_pe" in macro
         assert "sp500_market_cap" in macro
+        assert "sp500_source" in macro
 
 
 class TestPeersOptional:

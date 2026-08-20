@@ -252,7 +252,9 @@ def _build_data_text(data: dict[str, Any]) -> str:
         lines.append(f"  10y US Treasury Yield: {_fmt_num(macro.get('us_10y_yield'))} %")
         lines.append(f"  10y Yield vor 1 Monat: {_fmt_num(macro.get('us_10y_yield_1m_ago'))} %")
         lines.append(f"  10y Zinstrend: {macro.get('us_10y_trend', 'N/A')}")
-        lines.append(f"  S&P 500 KGV: {_fmt_num(macro.get('sp500_pe'))}")
+        source = macro.get("sp500_source", "")
+        source_label = f" ({source})" if source and source != "none" else ""
+        lines.append(f"  S&P 500 KGV{source_label}: {_fmt_num(macro.get('sp500_pe'))}")
         lines.append(f"  S&P 500 Marktkap: {_fmt_num(macro.get('sp500_market_cap'), ' ')}")
         lines.append(
             "  Hinweis: Hohe/steigende Zinsen belasten kapitalintensive "
@@ -370,6 +372,224 @@ def trader(analysts: dict[str, Any], debate_result: dict[str, Any], llm: LLMClie
         f"Bear-Argumentation:\n{bear_text}"
     )
     return _call_agent(llm, SYSTEM_TRADER, user_text)
+
+
+# ---------------------------------------------------------------------------
+# Ensemble-Trader — mehrere Runs mit Mehrheitsabstimmung + Plausibilitäts-Check
+# ---------------------------------------------------------------------------
+
+# Standard-Temperatur-Spread für Ensemble-Runs (leicht variierend)
+_DEFAULT_TEMPERATURES: list[float] = [0.3, 0.5, 0.7]
+
+
+def _extract_current_price(analysts: dict[str, Any]) -> float | None:
+    """Versucht, den aktuellen Kurs aus den Analysten-Daten zu extrahieren.
+
+    Durchsucht technicals-Subdicts und rohe Analysten-Antworten nach current_price.
+    """
+    # Direkt aus technicals (wenn analysts ein erweitertes dict ist)
+    technicals = analysts.get("technicals", {})
+    if isinstance(technicals, dict):
+        price = technicals.get("current_price")
+        if price is not None:
+            try:
+                return float(price)
+            except (TypeError, ValueError):
+                pass
+    # Fallback: in rohen Analysten-Antworten suchen
+    for key in ("fundamental", "technical", "sentiment"):
+        a = analysts.get(key, {})
+        raw = str(a.get("_raw", ""))
+        # Suche nach "Aktueller Kurs: 123.45" im Daten-Text
+        match = re.search(r"Aktueller Kurs:\s*([\d.,]+)", raw)
+        if match:
+            try:
+                return float(match.group(1).replace(",", ""))
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _is_plausible_kauf(trade: dict[str, Any], current_price: float | None) -> bool:
+    """Prüft, ob ein KAUFEN-Trade plausible Ziel-/Stop-Werte hat.
+
+    Für KAUFEN: zielkurs > current_price und stop_loss < current_price (falls angegeben).
+    """
+    if current_price is None:
+        return True  # Ohne current_price können wir nicht prüfen
+    try:
+        ziel = trade.get("zielkurs")
+        if ziel is not None:
+            ziel_f = float(ziel)
+            if ziel_f <= current_price:
+                return False
+    except (TypeError, ValueError):
+        pass
+    try:
+        stop = trade.get("stop_loss")
+        if stop is not None:
+            stop_f = float(stop)
+            if stop_f >= current_price:
+                return False
+    except (TypeError, ValueError):
+        pass
+    return True
+
+
+def _fix_implausible_trade(trade: dict[str, Any], current_price: float | None) -> dict[str, Any]:
+    """Korrigiert unplausible Ziel-/Stop-Werte bei KAUFEN.
+
+    - zielkurs <= current_price → None (nicht vertrauenswürdig)
+    - stop_loss >= current_price → None
+    Bei anderen Aktionen wird nichts geändert.
+    """
+    if current_price is None:
+        return trade
+    if str(trade.get("aktion", "")).upper() != "KAUFEN":
+        return trade
+
+    fixed = dict(trade)
+    try:
+        ziel = fixed.get("zielkurs")
+        if ziel is not None and float(ziel) <= current_price:
+            fixed["zielkurs"] = None
+    except (TypeError, ValueError):
+        pass
+    try:
+        stop = fixed.get("stop_loss")
+        if stop is not None and float(stop) >= current_price:
+            fixed["stop_loss"] = None
+    except (TypeError, ValueError):
+        pass
+    return fixed
+
+
+def ensemble_trader(
+    analysts: dict[str, Any],
+    debate_result: dict[str, Any],
+    llm: LLMClient,
+    runs: int = 3,
+    temperature_range: list[float] | None = None,
+) -> dict[str, Any]:
+    """Führt den Trader mehrfach aus (Ensemble) und aggregiert per Mehrheitsentscheid.
+
+    Args:
+        analysts: Analysten-Ergebnisse (wie bei trader()).
+        debate_result: Bull/Bear-Debatte-Ergebnis.
+        llm: LLMClient.
+        runs: Anzahl der Ensemble-Runs (Default 3).
+        temperature_range: Temperaturen pro Run (Default [0.3, 0.5, 0.7]).
+            Bei weniger/mehr Runs wird zyklisch verwendet bzw. abgeschnitten.
+
+    Returns:
+        dict mit dem gewählten Trade plus _ensemble-Metadaten:
+          _ensemble: {runs, mehrheits_aktion, ensemble_confidence, alle_aktionen}
+    """
+    if temperature_range is None:
+        temperature_range = _DEFAULT_TEMPERATURES
+
+    current_price = _extract_current_price(analysts)
+
+    # Temperatur-Spread an Anzahl der Runs anpassen
+    temps = []
+    for i in range(runs):
+        temps.append(temperature_range[i % len(temperature_range)])
+
+    # Mehrere Trader-Runs ausführen
+    all_runs: list[dict[str, Any]] = []
+    for temp in temps:
+        try:
+            run = trader(analysts, debate_result, llm)
+            all_runs.append(run)
+        except Exception as exc:  # noqa: BLE001 — nie crashen
+            logger.warning("Ensemble-Run fehlgeschlagen (temp=%.1f): %s", temp, exc)
+
+    # Robust: wenn gar kein Run erfolgreich war
+    if not all_runs:
+        logger.error("Ensemble: Alle %d Runs fehlgeschlagen — gebe leeres dict zurück.", runs)
+        return {
+            "rolle": "Trader",
+            "aktion": "HALTEN",
+            "zielkurs": None,
+            "stop_loss": None,
+            "positionsanteil": 0,
+            "begründung": "Ensemble: Alle Runs fehlgeschlagen.",
+            "zeithorizont": "N/A",
+            "_raw": "",
+            "_ensemble": {
+                "runs": runs,
+                "mehrheits_aktion": "HALTEN",
+                "ensemble_confidence": 0.0,
+                "alle_aktionen": [],
+            },
+        }
+
+    # Single-Fallback: nur 1 erfolgreicher Run → direkt übernehmen
+    if len(all_runs) == 1:
+        result = dict(all_runs[0])
+        aktion = str(result.get("aktion", "HALTEN")).upper()
+        result["_ensemble"] = {
+            "runs": 1,
+            "mehrheits_aktion": aktion,
+            "ensemble_confidence": 1.0,
+            "alle_aktionen": [aktion],
+        }
+        return result
+
+    # Mehrheitsabstimmung über aktion
+    aktionen = [str(r.get("aktion", "HALTEN")).upper() for r in all_runs]
+    aktion_counts: dict[str, int] = {}
+    for a in aktionen:
+        aktion_counts[a] = aktion_counts.get(a, 0) + 1
+
+    mehrheits_aktion = max(aktion_counts, key=lambda k: aktion_counts[k])
+    confidence = aktion_counts[mehrheits_aktion] / len(all_runs)
+
+    # Den ersten Run mit der Mehrheits-Aktion als Basis wählen
+    basis_run = None
+    for r in all_runs:
+        if str(r.get("aktion", "")).upper() == mehrheits_aktion:
+            basis_run = r
+            break
+
+    # Fallback (sollte nie passieren, aber sicherheitshalber)
+    if basis_run is None:
+        basis_run = all_runs[0]
+
+    result = dict(basis_run)
+
+    # Plausibilitäts-Check für den gewählten Trade
+    if mehrheits_aktion == "KAUFEN" and not _is_plausible_kauf(result, current_price):
+        # Versuche, einen plausiblen Zielkurs aus anderen Runs zu übernehmen
+        for r in all_runs:
+            if str(r.get("aktion", "")).upper() != "KAUFEN":
+                continue
+            if _is_plausible_kauf(r, current_price):
+                # Plausible Werte übernehmen
+                try:
+                    ziel = r.get("zielkurs")
+                    if ziel is not None and result.get("zielkurs") is None:
+                        result["zielkurs"] = ziel
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    stop = r.get("stop_loss")
+                    if stop is not None and result.get("stop_loss") is None:
+                        result["stop_loss"] = stop
+                except (TypeError, ValueError):
+                    pass
+                break
+        # Falls immer noch unplausibel: Werte auf None setzen
+        result = _fix_implausible_trade(result, current_price)
+
+    result["_ensemble"] = {
+        "runs": len(all_runs),
+        "mehrheits_aktion": mehrheits_aktion,
+        "ensemble_confidence": round(confidence, 2),
+        "alle_aktionen": aktionen,
+    }
+
+    return result
 
 
 def risk_manager(trade: dict[str, Any], data: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
