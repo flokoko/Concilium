@@ -6,18 +6,18 @@ Benötigt Netzwerkzugriff für yfinance. Falls kein Netz verfügbar, wird der Te
 from __future__ import annotations
 
 import os
-
-# src zum Pfad hinzufügen
 import sys
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+# src zum Pfad hinzufügen
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from tradingagents_light.data import (
-    _fetch_google_news,  # noqa: E402
-    collect_ticker_data,  # noqa: E402
+from tradingagents_light.data import (  # noqa: E402
+    _fetch_google_news,
+    collect_ticker_data,
 )
 
 
@@ -120,8 +120,27 @@ _MOCK_RSS_XML = """<?xml version="1.0" encoding="UTF-8"?>
   <channel>
     <title>Google News</title>
     <item><title>Top Stories</title></item>
-    <item><title>NVIDIA surges to record high on AI demand</title></item>
-    <item><title>Chip stocks rally as NVDA beats earnings</title></item>
+    <item>
+      <title>NVIDIA surges to record high on AI demand</title>
+      <pubDate>Wed, 20 Aug 2026 08:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Chip stocks rally as NVDA beats earnings</title>
+      <pubDate>Tue, 19 Aug 2026 14:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+# Mini-RSS-XML mit dc:date statt pubDate
+_MOCK_RSS_DC_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Google News</title>
+    <item>
+      <title>Apple announces new product line</title>
+      <dc:date>2026-08-18T10:00:00Z</dc:date>
+    </item>
   </channel>
 </rss>
 """
@@ -131,7 +150,7 @@ class TestGoogleNewsFallback:
     """Tests für _fetch_google_news — ohne echtes Netzwerk."""
 
     def test_returns_headlines_from_mock_xml(self):
-        """Mock liefert Mini-XML mit 2 echten Items → Funktion gibt 2 Headlines zurück."""
+        """Mock liefert Mini-XML mit 2 echten Items → Funktion gibt 2 dicts zurück."""
         mock_response = MagicMock()
         mock_response.text = _MOCK_RSS_XML
         mock_response.raise_for_status = MagicMock()
@@ -139,10 +158,11 @@ class TestGoogleNewsFallback:
         with patch("tradingagents_light.data.requests.get", return_value=mock_response):
             result = _fetch_google_news("NVDA", company_name="NVIDIA")
 
-        # "Top Stories" wird übersprungen → 2 echte Headlines
+        # "Top Stories" wird übersprungen → 2 echte Items
         assert len(result) == 2
-        assert "NVIDIA surges to record high on AI demand" in result
-        assert "Chip stocks rally as NVDA beats earnings" in result
+        assert isinstance(result[0], dict)
+        assert result[0]["title"] == "NVIDIA surges to record high on AI demand"
+        assert result[1]["title"] == "Chip stocks rally as NVDA beats earnings"
 
     def test_returns_empty_on_connection_error(self):
         """Bei requests.ConnectionError → leere Liste, kein Crash."""
@@ -150,3 +170,144 @@ class TestGoogleNewsFallback:
             result = _fetch_google_news("NVDA")
 
         assert result == []
+
+    def test_pubdate_parsing(self):
+        """pubDate (RFC-822) wird korrekt zu datetime geparst."""
+        mock_response = MagicMock()
+        mock_response.text = _MOCK_RSS_XML
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("tradingagents_light.data.requests.get", return_value=mock_response):
+            result = _fetch_google_news("NVDA")
+
+        assert len(result) == 2
+        # Erste Headline: "Wed, 20 Aug 2026 08:30:00 GMT"
+        pub = result[0]["published"]
+        assert isinstance(pub, datetime)
+        assert pub.tzinfo is not None
+        assert pub.year == 2026
+        assert pub.month == 8
+        assert pub.day == 20
+
+    def test_dc_date_parsing(self):
+        """dc:date (ISO-8601) wird korrekt geparst, wenn kein pubDate vorhanden."""
+        mock_response = MagicMock()
+        mock_response.text = _MOCK_RSS_DC_XML
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("tradingagents_light.data.requests.get", return_value=mock_response):
+            result = _fetch_google_news("AAPL")
+
+        assert len(result) == 1
+        pub = result[0]["published"]
+        assert isinstance(pub, datetime)
+        assert pub.tzinfo is not None
+        assert pub.year == 2026
+        assert pub.month == 8
+        assert pub.day == 18
+
+    def test_missing_date_fallbacks_to_now(self):
+        """Items ohne pubDate/dc:date → published wird auf aktuelle Zeit gesetzt."""
+        rss_no_date = """<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <item><title>Some headline without date</title></item>
+</channel></rss>
+"""
+        mock_response = MagicMock()
+        mock_response.text = rss_no_date
+        mock_response.raise_for_status = MagicMock()
+
+        before = datetime.now(timezone.utc)
+        with patch("tradingagents_light.data.requests.get", return_value=mock_response):
+            result = _fetch_google_news("TEST")
+        after = datetime.now(timezone.utc)
+
+        assert len(result) == 1
+        pub = result[0]["published"]
+        assert pub.tzinfo is not None
+        # Sollte etwa jetzt sein (innerhalb des before/after-Zeitfensters)
+        assert before <= pub <= after
+
+
+class TestSentimentWeighted:
+    """Tests für zeitgewichtete Sentiment-Zählung."""
+
+    def test_recent_headline_weights_more_than_old(self):
+        """Eine heutige positive Headline soll mehr Gewicht haben als eine 14 Tage alte."""
+        from tradingagents_light.data import _count_sentiment_weighted
+
+        now = datetime.now(timezone.utc)
+        headlines = [
+            # Positive Headline von heute → Gewicht ≈ 1.0
+            {"title": "Company surges to record high", "published": now},
+            # Positive Headline von vor 14 Tagen → Gewicht ≈ 2^(-14/7) = 0.25
+            {"title": "Company surges on strong growth", "published": now - timedelta(days=14)},
+        ]
+
+        result = _count_sentiment_weighted(headlines, now=now)
+
+        # Beide sind positiv → gesamte gewichtete Summe sollte > 0 sein
+        assert result["positiv"] > 0
+        assert result["weighted"] is True
+        assert result["sample_size"] == 2
+
+        # Die heutige Headline wiegt ~1.0, die alte ~0.25 → Summe ~1.25
+        # Die heutige allein (1.0) ist größer als der Beitrag der alten (0.25)
+        recent_weight = 2.0 ** (0.0 / 7.0)  # age=0 → 1.0
+        old_weight = 2.0 ** (-14.0 / 7.0)   # age=14 → 0.25
+        assert recent_weight > old_weight
+        # Die gewichtete Summe sollte etwa recent + old entsprechen
+        assert abs(result["positiv"] - (recent_weight + old_weight)) < 0.01
+
+    def test_dominant_sentiment(self):
+        """Die dominante Stimmung wird korrekt ermittelt."""
+        from tradingagents_light.data import _count_sentiment_weighted
+
+        now = datetime.now(timezone.utc)
+        headlines = [
+            # Neu und positiv → hohes Gewicht
+            {"title": "Stock surges on record profit", "published": now},
+            # Alt und negativ → geringes Gewicht
+            {"title": "Stock plunges on weak earnings", "published": now - timedelta(days=30)},
+        ]
+
+        result = _count_sentiment_weighted(headlines, now=now)
+
+        # Positiv sollte dominieren (Gewicht 1.0 vs. 2^(-30/7) ≈ 0.052)
+        assert result["dominant"] == "positiv"
+        assert result["positiv"] > result["negativ"]
+
+    def test_old_negative_can_outweigh_new_positive(self):
+        """Wenn mehrere alte negative Headlines vs. eine neue positive → negativ dominiert."""
+        from tradingagents_light.data import _count_sentiment_weighted
+
+        now = datetime.now(timezone.utc)
+        headlines = [
+            # Eine neue positive Headline
+            {"title": "Company surges", "published": now},
+            # Eine neue negative Headline
+            {"title": "Company plunges", "published": now},
+            # Drei weitere neue negative Headlines
+            {"title": "Company falls on weak data", "published": now - timedelta(hours=1)},
+            {"title": "Company drops after lawsuit", "published": now - timedelta(hours=2)},
+            {"title": "Company decline on risk warning", "published": now - timedelta(hours=3)},
+        ]
+
+        result = _count_sentiment_weighted(headlines, now=now)
+
+        # Negativ sollte dominieren (4 negative vs. 1 positive, alle etwa gleich alt)
+        assert result["dominant"] == "negativ"
+        assert result["negativ"] > result["positiv"]
+        assert result["sample_size"] == 5
+
+    def test_empty_headlines(self):
+        """Leere Liste → alle Werte 0, dominant neutral."""
+        from tradingagents_light.data import _count_sentiment_weighted
+
+        result = _count_sentiment_weighted([])
+        assert result["positiv"] == 0.0
+        assert result["negativ"] == 0.0
+        assert result["neutral"] == 0.0
+        assert result["dominant"] == "neutral"
+        assert result["sample_size"] == 0
+        assert result["weighted"] is True

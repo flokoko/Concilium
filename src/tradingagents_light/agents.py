@@ -240,6 +240,17 @@ def _build_data_text(data: dict[str, Any]) -> str:
         f"  Neutrale Headlines: {s.get('neutral', 0)}",
     ]
 
+    # Zeitgewichtete / dominante Stimmung hinzufügen, falls verfügbar
+    is_weighted = s.get("weighted", False)
+    if is_weighted:
+        lines.append("  Zeitgewichtung: ja (Halbwertszeit 7 Tage)")
+        lines.append(f"  Dominante Stimmung: {s.get('dominant', 'N/A')}")
+    else:
+        lines.append("  Zeitgewichtung: nein (ungewichtete Zählung)")
+        if s.get("dominant"):
+            lines.append(f"  Dominante Stimmung: {s.get('dominant', 'N/A')}")
+    lines.append(f"  Sample-Größe: {s.get('sample_size', len(news))}")
+
     if news:
         lines.append("  Headlines (neueste):")
         for h in news[:10]:

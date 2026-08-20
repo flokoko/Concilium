@@ -125,11 +125,35 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
     # === Sentiment ===
     lines.append("## 3. Sentiment-Heuristik")
     lines.append("")
-    lines.append("| Kategorie | Anzahl |")
-    lines.append("|---|---|")
-    lines.append(f"| Positiv | {s.get('positiv', 0)} |")
-    lines.append(f"| Negativ | {s.get('negativ', 0)} |")
-    lines.append(f"| Neutral | {s.get('neutral', 0)} |")
+
+    is_weighted = s.get("weighted", False)
+    methode_hinweis = "zeitgewichtet" if is_weighted else "ungewichtet"
+
+    if is_weighted:
+        # Zeitgewichtete Werte (Gleitkommazahlen)
+        lines.append(f"_Methode: {methode_hinweis} (Halbwertszeit 7 Tage, exponentieller Zerfall)_")
+        lines.append("")
+        lines.append("| Kategorie | Gewichtung |")
+        lines.append("|---|---|")
+        lines.append(f"| Positiv | {s.get('positiv', 0):.2f} |")
+        lines.append(f"| Negativ | {s.get('negativ', 0):.2f} |")
+        lines.append(f"| Neutral | {s.get('neutral', 0):.2f} |")
+        lines.append("")
+        lines.append(f"**Dominante Stimmung:** {s.get('dominant', 'N/A')}")
+        lines.append(f"**Anzahl Headlines (Sample):** {s.get('sample_size', 0)}")
+    else:
+        # Ungewichtete Werte (ganze Zahlen)
+        lines.append(f"_Methode: {methode_hinweis}_")
+        lines.append("")
+        lines.append("| Kategorie | Anzahl |")
+        lines.append("|---|---|")
+        lines.append(f"| Positiv | {s.get('positiv', 0)} |")
+        lines.append(f"| Negativ | {s.get('negativ', 0)} |")
+        lines.append(f"| Neutral | {s.get('neutral', 0)} |")
+        lines.append("")
+        lines.append(f"**Dominante Stimmung:** {s.get('dominant', 'N/A')}")
+        lines.append(f"**Anzahl Headlines (Sample):** {s.get('sample_size', 0)}")
+
     lines.append("")
 
     if news:

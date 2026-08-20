@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import pandas as pd
@@ -21,6 +23,12 @@ _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
+
+# Halbwertszeit für zeitgewichtete Sentiment-Zählung (Tage)
+HALF_LIFE_DAYS = 7.0
+
+# Dublin Core Namespace für <dc:date> in RSS-Feeds
+_DC_NAMESPACE = "{http://purl.org/dc/elements/1.1/}"
 
 # ---------------------------------------------------------------------------
 # Sentiment-Heuristik — einfache keyword-basierte Zählung
@@ -41,23 +49,107 @@ _NEGATIVE_WORDS = {
 }
 
 
+def _classify_headline(headline: str) -> str:
+    """Klassifiziert eine einzelne Headline als 'positiv', 'negativ' oder 'neutral'.
+
+    Wird von _count_sentiment und _count_sentiment_weighted gemeinsam genutzt.
+    """
+    text = headline.lower()
+    found_pos = any(w in text for w in _POSITIVE_WORDS)
+    found_neg = any(w in text for w in _NEGATIVE_WORDS)
+    if found_pos and not found_neg:
+        return "positiv"
+    if found_neg and not found_pos:
+        return "negativ"
+    # Gemischte Headline (pos+neg) oder gar keine Keywords → neutral
+    return "neutral"
+
+
 def _count_sentiment(headlines: list[str]) -> dict[str, int]:
     """Zählt positive/negative/neutral-Schlagzeilen anhand von Keywords."""
     pos = neg = neu = 0
     for headline in headlines:
-        text = headline.lower()
-        found_pos = any(w in text for w in _POSITIVE_WORDS)
-        found_neg = any(w in text for w in _NEGATIVE_WORDS)
-        if found_pos and not found_neg:
+        label = _classify_headline(headline)
+        if label == "positiv":
             pos += 1
-        elif found_neg and not found_pos:
+        elif label == "negativ":
             neg += 1
-        elif found_pos and found_neg:
-            # Gemischte Headline → neutral
-            neu += 1
         else:
             neu += 1
     return {"positiv": pos, "negativ": neg, "neutral": neu}
+
+
+def _count_sentiment_weighted(
+    headlines_with_dates: list[dict[str, Any]],
+    *,
+    half_life_days: float = HALF_LIFE_DAYS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Zeitgewichtete Sentiment-Zählung — neuere Headlines zählen mehr.
+
+    Gewicht pro Headline: 2 ** (-age_days / half_life_days)
+    (exponentieller Zerfall, Halbwertszeit = half_life_days).
+
+    Args:
+        headlines_with_dates: Liste von dicts mit "title" (str) und
+            "published" (timezone-aware datetime).
+        half_life_days: Halbwertszeit in Tagen (Default: 7 Tage).
+        now: Referenzzeitpunkt (Default: datetime.now(timezone.utc)).
+
+    Returns:
+        dict mit "positiv", "negativ", "neutral" (float, gewichtete Summen),
+        "dominant" (str: positiv/negativ/neutral), "sample_size" (int),
+        "weighted" (bool, immer True).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    # Sicherstellen, dass 'now' timezone-aware ist
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    weighted = {"positiv": 0.0, "negativ": 0.0, "neutral": 0.0}
+    count = 0
+
+    for item in headlines_with_dates:
+        title = item.get("title", "") if isinstance(item, dict) else ""
+        if not title:
+            continue
+        published = item.get("published") if isinstance(item, dict) else None
+        if published is None:
+            # Kein Datum → neutral mit Gewicht 1.0 (entspricht "jetzt")
+            weight = 1.0
+        else:
+            # Sicherstellen, dass published timezone-aware ist
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=timezone.utc)
+            age_delta = now - published
+            age_days = age_delta.total_seconds() / 86400.0
+            # Negatives Alter (Zukunft) auf 0 clampen
+            age_days = max(age_days, 0.0)
+            weight = 2.0 ** (-age_days / half_life_days)
+
+        label = _classify_headline(title)
+        weighted[label] += weight
+        count += 1
+
+    # Dominante Stimmung ermitteln (bei Gleichstand → neutral)
+    max_val = max(weighted["positiv"], weighted["negativ"], weighted["neutral"])
+    if weighted["positiv"] == max_val and weighted["positiv"] > weighted["negativ"]:
+        dominant = "positiv"
+    elif weighted["negativ"] == max_val and weighted["negativ"] > weighted["positiv"]:
+        dominant = "negativ"
+    else:
+        dominant = "neutral"
+
+    return {
+        "positiv": round(weighted["positiv"], 4),
+        "negativ": round(weighted["negativ"], 4),
+        "neutral": round(weighted["neutral"], 4),
+        "dominant": dominant,
+        "sample_size": count,
+        "weighted": True,
+    }
 
 
 def _extract_headlines(news_list: Any) -> list[str]:
@@ -75,7 +167,40 @@ def _extract_headlines(news_list: Any) -> list[str]:
     return headlines
 
 
-def _fetch_google_news(ticker: str, company_name: str = "", limit: int = 10) -> list[str]:
+def _parse_rss_date(raw: str | None) -> datetime:
+    """Parst ein RSS-Datum (pubDate RFC-822 oder dc:date ISO-8601).
+
+    Fallback bei Fehler oder fehlendem Datum: aktuelle Zeit (timezone-aware).
+    Crasht NIE.
+    """
+    if not raw:
+        return datetime.now(timezone.utc)
+    raw = raw.strip()
+    try:
+        # pubDate — RFC-822 Format (z.B. "Wed, 20 Aug 2026 08:30:00 GMT")
+        dt = parsedate_to_datetime(raw)
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+    except (TypeError, ValueError):
+        pass
+    try:
+        # dc:date — ISO-8601 Format (z.B. "2026-08-20T08:30:00Z")
+        clean = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(clean)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (TypeError, ValueError):
+        pass
+    # Nicht parsebar → aktuelle Zeit als Fallback
+    return datetime.now(timezone.utc)
+
+
+def _fetch_google_news(
+    ticker: str, company_name: str = "", limit: int = 10
+) -> list[dict[str, Any]]:
     """Holt News-Headlines von Google News RSS als Fallback, wenn yfinance leer ist.
 
     Sucht nach Ticker und optional zusätzlich nach Firmennamen.
@@ -87,7 +212,8 @@ def _fetch_google_news(ticker: str, company_name: str = "", limit: int = 10) -> 
         limit: Maximale Anzahl Headlines.
 
     Returns:
-        Liste von Headline-Strings (leer bei Fehler oder keinem Ergebnis).
+        Liste von dicts mit {"title": str, "published": datetime}.
+        Leere Liste bei Fehler oder keinem Ergebnis.
     """
     # Suchbegriffe zusammenstellen: Ticker + optional Firmenname
     query_parts = [ticker]
@@ -110,24 +236,40 @@ def _fetch_google_news(ticker: str, company_name: str = "", limit: int = 10) -> 
         logger.warning("Google News RSS XML konnte nicht geparst werden für '%s': %s", ticker, exc)
         return []
 
-    headlines: list[str] = []
-    # RSS-Struktur: <rss><channel><item><title>…</title></item>…
-    for item in root.iter("item"):
-        title_el = item.find("title")
-        if title_el is not None and title_el.text:
-            title = title_el.text.strip()
-            # "Top Stories" als generischen Aggregator-Titel überspringen
-            if title and title.lower() != "top stories":
-                headlines.append(title)
-            if len(headlines) >= limit:
-                break
+    items: list[dict[str, Any]] = []
+    # RSS-Struktur: <rss><channel><item><title>…</title><pubDate>…</pubDate></item>…
+    for element in root.iter("item"):
+        title_el = element.find("title")
+        if title_el is None or not title_el.text:
+            continue
+        title = title_el.text.strip()
+        # "Top Stories" als generischen Aggregator-Titel überspringen
+        if not title or title.lower() == "top stories":
+            continue
 
-    if not headlines:
+        # Zeitstempel: pubDate (RFC-822), Fallback auf dc:date (ISO-8601)
+        pub_date_el = element.find("pubDate")
+        raw_date: str | None = None
+        if pub_date_el is not None and pub_date_el.text:
+            raw_date = pub_date_el.text.strip()
+        if not raw_date:
+            # Fallback: Dublin Core <dc:date>
+            dc_date_el = element.find(f"{_DC_NAMESPACE}date")
+            if dc_date_el is not None and dc_date_el.text:
+                raw_date = dc_date_el.text.strip()
+
+        published = _parse_rss_date(raw_date)
+        items.append({"title": title, "published": published})
+
+        if len(items) >= limit:
+            break
+
+    if not items:
         logger.info("Google News RSS lieferte keine Headlines für '%s'.", ticker)
     else:
-        logger.info("Google News RSS: %d Headlines für '%s' erhalten.", len(headlines), ticker)
+        logger.info("Google News RSS: %d Headlines für '%s' erhalten.", len(items), ticker)
 
-    return headlines
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -301,17 +443,40 @@ def collect_ticker_data(ticker: str) -> dict[str, Any]:
         logger.warning("Konnte .news nicht abrufen: %s", exc)
 
     headlines = _extract_headlines(news_list)
+    news_with_dates: list[dict[str, Any]] = []
 
     if headlines:
         news_source = "yfinance"
+        # yfinance-News haben (meist) keine verlässlichen Zeitstempel → ungewichtet
     else:
         # Fallback: Google News RSS, wenn yfinance keine Headlines liefert
         logger.info("yfinance lieferte keine News für %s — versuche Google News RSS …", ticker)
         company = info.get("longName") or info.get("shortName") or ""
-        headlines = _fetch_google_news(ticker, company_name=company)
+        news_with_dates = _fetch_google_news(ticker, company_name=company)
+        headlines = [item["title"] for item in news_with_dates]
         news_source = "google_news" if headlines else "none"
 
-    sentiment = _count_sentiment(headlines)
+    # Zeitgewichtete Sentiment-Zählung, wenn Zeitstempel verfügbar sind;
+    # sonst ungewichtete Keyword-Zählung.
+    if news_with_dates:
+        sentiment = _count_sentiment_weighted(news_with_dates)
+        # sample_size und dominant sind bereits enthalten
+    else:
+        base = _count_sentiment(headlines)
+        # Dominante Stimmung auch im ungewichteten Fall ermitteln
+        max_val = max(base["positiv"], base["negativ"], base["neutral"])
+        if base["positiv"] == max_val and base["positiv"] > base["negativ"]:
+            dominant = "positiv"
+        elif base["negativ"] == max_val and base["negativ"] > base["positiv"]:
+            dominant = "negativ"
+        else:
+            dominant = "neutral"
+        sentiment = {
+            **base,
+            "dominant": dominant,
+            "sample_size": len(headlines),
+            "weighted": False,
+        }
 
     # --- Historie als Records (für Backtest / Report) ---
     history_records = []
@@ -332,5 +497,6 @@ def collect_ticker_data(ticker: str) -> dict[str, Any]:
         "history": history_records,
         "sentiment": sentiment,
         "news": headlines[:20],  # neueste 20 Headlines
+        "news_with_dates": news_with_dates[:20] if news_with_dates else [],
         "news_source": news_source,  # "yfinance" | "google_news" | "none"
     }
