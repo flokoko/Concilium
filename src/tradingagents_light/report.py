@@ -34,6 +34,25 @@ def _fmt_pct(val: Any) -> str:
         return "N/A"
 
 
+def _clean_debate_text(agent: dict[str, Any]) -> str:
+    """Entfernt das JSON-Preamble und Markdown-Codeblock-Wrapper aus Debatten-Texten.
+
+    Die Bull/Bear-Agenten geben einen JSON-Block (confidence/name) gefolgt vom
+    Fließtext zurück. Der Report soll nur den lesbaren Fließtext zeigen.
+    """
+    import re as _re
+
+    raw = str(agent.get("_raw", ""))
+    if not raw:
+        return "N/A"
+
+    # JSON-Block am Anfang entfernen: {"confidence": X, "name": "..."} oder ```json {...}```
+    text = _re.sub(r"```json\s*\{.*?\}\s*```", "", raw, flags=_re.DOTALL).strip()
+    text = _re.sub(r"^\{.*?\}", "", text, flags=_re.DOTALL).strip()
+    text = text.strip("`").strip()
+    return text if text else raw
+
+
 def generate_report(result: dict[str, Any]) -> str:
     """Generiert einen deutschen Markdown-Report aus den Pipeline-Ergebnissen.
 
@@ -146,11 +165,10 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
 
     # --- Agenten-Abschnitte (nur mit LLM) ---
     if not no_llm and result.get("analysts"):
-        section_num = 5 if not result.get("backtest") else 5
-        if result.get("backtest"):
-            section_num = 5
-        else:
-            section_num = 4
+        # Agenten-Abschnitte beginnen nach Daten/Backtest-Abschnitten.
+        # Basis: ohne Backtest = 4 (Übersicht, Technik, Sentiment, dann Analysten)
+        #        mit Backtest = 5 (…, Backtest, dann Analysten)
+        section_num = 5 if result.get("backtest") else 4
 
         # Analysten-Tabelle
         lines.append(f"## {section_num}. Analysten-Team")
@@ -175,11 +193,11 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         bear = debate.get("bear", {})
         lines.append("### Bull-Argumentation")
         lines.append("")
-        lines.append(str(bull.get("_raw", "N/A")))
+        lines.append(_clean_debate_text(bull))
         lines.append("")
         lines.append("### Bear-Argumentation")
         lines.append("")
-        lines.append(str(bear.get("_raw", "N/A")))
+        lines.append(_clean_debate_text(bear))
         lines.append("")
 
         # Trade
