@@ -9,12 +9,16 @@ import os
 
 # src zum Pfad hinzufügen
 import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from tradingagents_light.data import collect_ticker_data  # noqa: E402
+from tradingagents_light.data import (
+    _fetch_google_news,  # noqa: E402
+    collect_ticker_data,  # noqa: E402
+)
 
 
 def _has_network() -> bool:
@@ -108,3 +112,41 @@ class TestSentimentHeuristic:
 
         result = _count_sentiment(["Apple announces quarterly results"])
         assert result["neutral"] >= 1
+
+
+# Mini-RSS-XML für Mock-Tests (2 echte Items + 1 "Top Stories" zum Überspringen)
+_MOCK_RSS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Google News</title>
+    <item><title>Top Stories</title></item>
+    <item><title>NVIDIA surges to record high on AI demand</title></item>
+    <item><title>Chip stocks rally as NVDA beats earnings</title></item>
+  </channel>
+</rss>
+"""
+
+
+class TestGoogleNewsFallback:
+    """Tests für _fetch_google_news — ohne echtes Netzwerk."""
+
+    def test_returns_headlines_from_mock_xml(self):
+        """Mock liefert Mini-XML mit 2 echten Items → Funktion gibt 2 Headlines zurück."""
+        mock_response = MagicMock()
+        mock_response.text = _MOCK_RSS_XML
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("tradingagents_light.data.requests.get", return_value=mock_response):
+            result = _fetch_google_news("NVDA", company_name="NVIDIA")
+
+        # "Top Stories" wird übersprungen → 2 echte Headlines
+        assert len(result) == 2
+        assert "NVIDIA surges to record high on AI demand" in result
+        assert "Chip stocks rally as NVDA beats earnings" in result
+
+    def test_returns_empty_on_connection_error(self):
+        """Bei requests.ConnectionError → leere Liste, kein Crash."""
+        with patch("tradingagents_light.data.requests.get", side_effect=ConnectionError("DNS failed")):
+            result = _fetch_google_news("NVDA")
+
+        assert result == []

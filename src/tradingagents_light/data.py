@@ -1,14 +1,26 @@
-"""Datenmodul — Sammelt Fundamentals, technische Indikatoren, Historie und Sentiment-Heuristik via yfinance."""
+"""Datenmodul — Sammelt Fundamentals, technische Indikatoren, Historie und Sentiment-Heuristik via yfinance.
+
+Fallback-News-Quelle: Google News RSS (kein API-Key nötig, nur requests + xml.etree).
+"""
 
 from __future__ import annotations
 
 import logging
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import pandas as pd
+import requests
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
+
+# Google News RSS — Fallback-Quelle für Headlines
+_GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search?q={query}&hl=de&gl=DE&ceid=DE:de"
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
 
 # ---------------------------------------------------------------------------
 # Sentiment-Heuristik — einfache keyword-basierte Zählung
@@ -60,6 +72,61 @@ def _extract_headlines(news_list: Any) -> list[str]:
                 headlines.append(title)
         elif isinstance(item, str):
             headlines.append(item)
+    return headlines
+
+
+def _fetch_google_news(ticker: str, company_name: str = "", limit: int = 10) -> list[str]:
+    """Holt News-Headlines von Google News RSS als Fallback, wenn yfinance leer ist.
+
+    Sucht nach Ticker und optional zusätzlich nach Firmennamen.
+    Gibt NIE eine Exception weiter — bei Fehler/leer → leere Liste.
+
+    Args:
+        ticker: Ticker-Symbol (z. B. "NVDA").
+        company_name: Optionaler Firmenname für erweiterte Suche (z. B. "NVIDIA").
+        limit: Maximale Anzahl Headlines.
+
+    Returns:
+        Liste von Headline-Strings (leer bei Fehler oder keinem Ergebnis).
+    """
+    # Suchbegriffe zusammenstellen: Ticker + optional Firmenname
+    query_parts = [ticker]
+    if company_name:
+        query_parts.append(company_name)
+    query = " OR ".join(query_parts)
+
+    url = _GOOGLE_NEWS_RSS_URL.format(query=query)
+
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 — niemals crashen
+        logger.warning("Google News RSS Anfrage fehlgeschlagen für '%s': %s", ticker, exc)
+        return []
+
+    try:
+        root = ET.fromstring(resp.text)
+    except ET.ParseError as exc:
+        logger.warning("Google News RSS XML konnte nicht geparst werden für '%s': %s", ticker, exc)
+        return []
+
+    headlines: list[str] = []
+    # RSS-Struktur: <rss><channel><item><title>…</title></item>…
+    for item in root.iter("item"):
+        title_el = item.find("title")
+        if title_el is not None and title_el.text:
+            title = title_el.text.strip()
+            # "Top Stories" als generischen Aggregator-Titel überspringen
+            if title and title.lower() != "top stories":
+                headlines.append(title)
+            if len(headlines) >= limit:
+                break
+
+    if not headlines:
+        logger.info("Google News RSS lieferte keine Headlines für '%s'.", ticker)
+    else:
+        logger.info("Google News RSS: %d Headlines für '%s' erhalten.", len(headlines), ticker)
+
     return headlines
 
 
@@ -234,6 +301,16 @@ def collect_ticker_data(ticker: str) -> dict[str, Any]:
         logger.warning("Konnte .news nicht abrufen: %s", exc)
 
     headlines = _extract_headlines(news_list)
+
+    if headlines:
+        news_source = "yfinance"
+    else:
+        # Fallback: Google News RSS, wenn yfinance keine Headlines liefert
+        logger.info("yfinance lieferte keine News für %s — versuche Google News RSS …", ticker)
+        company = info.get("longName") or info.get("shortName") or ""
+        headlines = _fetch_google_news(ticker, company_name=company)
+        news_source = "google_news" if headlines else "none"
+
     sentiment = _count_sentiment(headlines)
 
     # --- Historie als Records (für Backtest / Report) ---
@@ -255,4 +332,5 @@ def collect_ticker_data(ticker: str) -> dict[str, Any]:
         "history": history_records,
         "sentiment": sentiment,
         "news": headlines[:20],  # neueste 20 Headlines
+        "news_source": news_source,  # "yfinance" | "google_news" | "none"
     }
