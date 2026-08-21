@@ -707,7 +707,7 @@ def realised_return_for_row(row: dict[str, Any], lookback_days: int = 30) -> dic
         if entry_row is None:
             entry_row = prices[0]
         entry_price = _safe_float(entry_row.get("close"))
-        if entry_price is None or entry_price <= 0:
+        if entry_price is None or not math.isfinite(entry_price) or entry_price <= 0:
             return None
 
         # Exit: Kurs am oder nach decision_date + lookback_days, clamped to today
@@ -719,11 +719,13 @@ def realised_return_for_row(row: dict[str, Any], lookback_days: int = 30) -> dic
         if exit_row is None:
             exit_row = prices[-1]
         exit_price = _safe_float(exit_row.get("close"))
-        if exit_price is None:
+        if exit_price is None or not math.isfinite(exit_price):
             return None
 
         # Rendite berechnen
         price_change_pct = (exit_price - entry_price) / entry_price * 100.0
+        if not math.isfinite(price_change_pct):
+            return None
         if action in ("VERKAUFEN", "STARK VERKAUFEN"):
             raw_return_pct = -price_change_pct
         else:
@@ -743,9 +745,14 @@ def realised_return_for_row(row: dict[str, Any], lookback_days: int = 30) -> dic
                     spy_exit = spy_prices[-1]
                 spy_entry_price = _safe_float(spy_entry.get("close"))
                 spy_exit_price = _safe_float(spy_exit.get("close"))
-                if spy_entry_price is not None and spy_exit_price is not None and spy_entry_price > 0:
+                if (spy_entry_price is not None and spy_exit_price is not None
+                        and math.isfinite(spy_entry_price) and math.isfinite(spy_exit_price)
+                        and spy_entry_price > 0):
                     spy_return_pct = (spy_exit_price - spy_entry_price) / spy_entry_price * 100.0
-                    alpha_pct = raw_return_pct - spy_return_pct
+                    if math.isfinite(spy_return_pct):
+                        alpha_pct = raw_return_pct - spy_return_pct
+                    else:
+                        spy_return_pct = None
         except Exception as spy_exc:  # noqa: BLE001 — best effort
             logger.debug("SPY-Return konnte nicht berechnet werden: %s", spy_exc)
 

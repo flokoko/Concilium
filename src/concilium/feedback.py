@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 import os
 from typing import Any
 
@@ -292,10 +293,11 @@ def build_reflection_context(
             except Exception as llm_exc:  # noqa: BLE001 — Fallback
                 logger.debug("LLM-Lektion fehlgeschlagen, verwende deterministische Lektion: %s", llm_exc)
 
-        alpha_str = f"{alpha_pct:+.2f}%" if alpha_pct is not None else "-"
+        alpha_str = f"{alpha_pct:+.2f}%" if alpha_pct is not None and math.isfinite(alpha_pct) else "-"
+        raw_str = f"{raw_return_pct:+.2f}%" if raw_return_pct is not None and math.isfinite(raw_return_pct) else "N/A"
         text = (
             f"=== DEINE LETZTE ENTSCHEIDUNG ZU {ticker.upper()} ({ts}) ===\n"
-            f"Aktion: {action} | Realisierter Return: {raw_return_pct:+.2f}% "
+            f"Aktion: {action} | Realisierter Return: {raw_str} "
             f"| Alpha vs SPY: {alpha_str}\n"
             f"Lerne daraus: {lesson}"
         )
