@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ticker",
         required=True,
-        help="Ticker-Symbol (z. B. AAPL, MSFT, NVDA)",
+        help="Ticker-Symbol, ISIN oder WKN (z. B. AAPL, DE000BASF111, 716460)",
     )
     parser.add_argument(
         "--backtest",

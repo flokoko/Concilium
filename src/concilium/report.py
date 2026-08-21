@@ -75,6 +75,16 @@ def generate_report(result: dict[str, Any]) -> str:
     lines.append(f"**Unternehmen:** {f.get('name', ticker)}")
     lines.append(f"**Sektor:** {f.get('sector', 'N/A')} / {f.get('industry', 'N/A')}")
     lines.append(f"**Währung:** {f.get('currency', 'USD')}")
+    # ISIN/WKN anzeigen, falls verfügbar (bei Auflösung über ISIN/WKN)
+    isin = data.get("isin")
+    wkn = data.get("wkn")
+    if isin or wkn:
+        parts: list[str] = []
+        if isin:
+            parts.append(f"ISIN: {isin}")
+        if wkn:
+            parts.append(f"WKN: {wkn}")
+        lines.append(f"**Kennung:** {' · '.join(parts)}")
     lines.append("")
 
     # --- Disclaimer ---

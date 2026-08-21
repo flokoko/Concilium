@@ -6,6 +6,7 @@ Fallback-News-Quelle: Google News RSS (kein API-Key nötig, nur requests + xml.e
 from __future__ import annotations
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -23,6 +24,155 @@ _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
+
+# ---------------------------------------------------------------------------
+# Identifier-Auflösung (ISIN / WKN → Yahoo-Ticker)
+# ---------------------------------------------------------------------------
+
+# ISIN: 2 Buchstaben + 9 alphanumerische Zeichen + 1 Prüfziffer
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+
+# WKN: genau 6 alphanumerische Zeichen
+_WKN_RE = re.compile(r"^[A-Z0-9]{6}$")
+
+# ISIN-Extraktion aus wallstreet-online HTML
+_ISIN_EXTRACT_RE = re.compile(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")
+
+# Yahoo Search API (kein API-Key nötig)
+_YAHOO_SEARCH_URL = (
+    "https://query1.finance.yahoo.com/v1/finance/search"
+    "?q={query}&lang=de-DE&region=DE&quotesCount=5&newsCount=0"
+)
+
+# wallstreet-online Suche (für WKN → ISIN)
+_WSO_SEARCH_URL = "https://www.wallstreet-online.de/suche?q={query}"
+
+
+def _detect_identifier_type(identifier: str) -> str:
+    """Klassifiziert einen Bezeichner als 'ISIN', 'WKN' oder 'TICKER'.
+
+    Args:
+        identifier: Eingabe (bereits uppercase, stripped).
+
+    Returns:
+        'ISIN', 'WKN' oder 'TICKER'.
+    """
+    if _ISIN_RE.match(identifier):
+        return "ISIN"
+    if _WKN_RE.match(identifier):
+        return "WKN"
+    return "TICKER"
+
+
+def _isin_to_ticker(isin: str) -> str:
+    """Löst eine ISIN über die Yahoo Search API zum Yahoo-Ticker auf.
+
+    GET https://query1.finance.yahoo.com/v1/finance/search?q={ISIN}
+    Parse quotes[0].symbol.
+
+    Raises:
+        ValueError: bei Netzwerk-/Parse-Fehler oder leerem Ergebnis.
+    """
+    url = _YAHOO_SEARCH_URL.format(query=isin)
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+        raise ValueError(
+            f"Kann ISIN '{isin}' nicht zu einem Ticker auflösen "
+            f"(Yahoo Search API nicht erreichbar). Bitte prüfen. "
+            f"Fehler: {exc}"
+        ) from exc
+
+    quotes = data.get("quotes", [])
+    if not quotes:
+        raise ValueError(
+            f"Kann ISIN '{isin}' nicht zu einem Ticker auflösen "
+            "(keine Treffer bei Yahoo). Bitte prüfen."
+        )
+
+    symbol = quotes[0].get("symbol")
+    if not symbol:
+        raise ValueError(
+            f"Kann ISIN '{isin}' nicht zu einem Ticker auflösen "
+            "(Yahoo lieferte kein Symbol). Bitte prüfen."
+        )
+
+    logger.info("ISIN '%s' → Yahoo-Ticker '%s'", isin, symbol)
+    return symbol
+
+
+def _wkn_to_isin(wkn: str) -> str:
+    """Löst eine WKN über wallstreet-online zur ISIN auf.
+
+    GET https://www.wallstreet-online.de/suche?q={WKN}
+    Extrahiert die erste ISIN via Regex aus dem HTML.
+
+    Raises:
+        ValueError: bei Netzwerk-/Parse-Fehler oder leerem Ergebnis.
+    """
+    url = _WSO_SEARCH_URL.format(query=wkn)
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+        raise ValueError(
+            f"Kann WKN '{wkn}' nicht zu einer ISIN auflösen "
+            f"(wallstreet-online nicht erreichbar). Bitte prüfen. "
+            f"Fehler: {exc}"
+        ) from exc
+
+    match = _ISIN_EXTRACT_RE.search(html)
+    if not match:
+        raise ValueError(
+            f"Kann WKN '{wkn}' nicht zu einer ISIN auflösen "
+            "(keine ISIN auf wallstreet-online gefunden). Bitte prüfen."
+        )
+
+    isin = match.group(0)
+    logger.info("WKN '%s' → ISIN '%s'", wkn, isin)
+    return isin
+
+
+def resolve_identifier(identifier: str) -> tuple[str, dict[str, Any]]:
+    """Löst einen Bezeichner (ISIN, WKN oder Ticker) zum Yahoo-Ticker auf.
+
+    Erkennt automatisch den Typ:
+      - ISIN (z. B. DE000BASF111) → Yahoo Search API → Ticker
+      - WKN  (z. B. 716460, BASF11) → wallstreet-online → ISIN → Yahoo → Ticker
+      - Ticker (z. B. AAPL, RWE.DE) → unverändert
+
+    Args:
+        identifier: Ticker, ISIN oder WKN.
+
+    Returns:
+        Tuple (resolved_ticker, meta) wobei meta ein dict ist mit:
+          - input_type: 'ISIN' | 'WKN' | 'TICKER'
+          - isin: str | None
+          - wkn: str | None
+
+    Raises:
+        ValueError: bei Auflösungsfehler (Netzwerk/Parse) mit deutscher Meldung.
+    """
+    identifier = identifier.strip().upper()
+    if not identifier:
+        raise ValueError("Bezeichner darf nicht leer sein.")
+
+    id_type = _detect_identifier_type(identifier)
+
+    if id_type == "TICKER":
+        return identifier, {"input_type": "TICKER", "isin": None, "wkn": None}
+
+    if id_type == "ISIN":
+        ticker = _isin_to_ticker(identifier)
+        return ticker, {"input_type": "ISIN", "isin": identifier, "wkn": None}
+
+    # WKN → ISIN → Ticker
+    isin = _wkn_to_isin(identifier)
+    ticker = _isin_to_ticker(isin)
+    return ticker, {"input_type": "WKN", "isin": isin, "wkn": identifier}
 
 # Halbwertszeit für zeitgewichtete Sentiment-Zählung (Tage)
 HALF_LIFE_DAYS = 7.0
@@ -594,9 +744,14 @@ def collect_ticker_data(
     Raises:
         ValueError: bei ungültigem Ticker (keine Daten von yfinance).
     """
-    ticker = ticker.strip().upper()
+    ticker = ticker.strip()
     if not ticker:
         raise ValueError("Ticker darf nicht leer sein.")
+
+    # Identifier auflösen (ISIN/WKN → Yahoo-Ticker); bei reinem Ticker
+    # bleibt alles unverändert — kein Netzwerkaufruf nötig.
+    resolved_ticker, id_meta = resolve_identifier(ticker)
+    ticker = resolved_ticker
 
     logger.info("Sammle Daten für %s …", ticker)
     t = yf.Ticker(ticker)
@@ -778,4 +933,7 @@ def collect_ticker_data(
         "peers": peers_data,
         # Datenqualitäts-Warnungen (immer eine Liste, auch leer)
         "data_warnings": data_warnings,
+        # Identifier-Metadaten (ISIN/WKN falls als Eingabe verwendet)
+        "isin": id_meta.get("isin"),
+        "wkn": id_meta.get("wkn"),
     }
