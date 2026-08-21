@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import time
 from typing import Any
 
@@ -20,6 +21,16 @@ DEFAULT_MODEL = "glm-5.2:cloud"
 TIMEOUT_SECONDS = 120
 MAX_RETRIES = 2
 RETRY_BACKOFF = 2  # Sekunden
+
+
+def _jittered_backoff(attempt: int) -> float:
+    """Berechnet den Backoff-Wert mit zufälligem Jitter (±30%).
+
+    Verhindert Thundering-Herd bei parallelen/aufeinanderfolgenden Requests,
+    die 429/5xx auslösen. Basis: RETRY_BACKOFF * (attempt + 1), multipliziert
+    mit random.uniform(0.7, 1.3) → Jitter-Bereich ±30%.
+    """
+    return RETRY_BACKOFF * (attempt + 1) * random.uniform(0.7, 1.3)
 
 
 class LLMClient:
@@ -74,7 +85,7 @@ class LLMClient:
                     last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
                     logger.warning("LLM-Fehler %s — Versuch %d/%d", last_error, attempt + 1, MAX_RETRIES + 1)
                     if attempt < MAX_RETRIES:
-                        time.sleep(RETRY_BACKOFF * (attempt + 1))
+                        time.sleep(_jittered_backoff(attempt))
                         continue
                     raise RuntimeError(f"LLM-Anfrage fehlgeschlagen nach {MAX_RETRIES + 1} Versuchen: {last_error}")
 
@@ -87,7 +98,7 @@ class LLMClient:
                 last_error = f"Timeout nach {TIMEOUT_SECONDS}s"
                 logger.warning("LLM-Timeout — Versuch %d/%d", attempt + 1, MAX_RETRIES + 1)
                 if attempt < MAX_RETRIES:
-                    time.sleep(RETRY_BACKOFF * (attempt + 1))
+                    time.sleep(_jittered_backoff(attempt))
                     continue
                 raise RuntimeError(f"LLM-Anfrage Timeout nach {MAX_RETRIES + 1} Versuchen") from None
 
@@ -95,7 +106,7 @@ class LLMClient:
                 last_error = f"Verbindungsfehler: {exc}"
                 logger.warning("LLM-Verbindungsfehler — Versuch %d/%d: %s", attempt + 1, MAX_RETRIES + 1, exc)
                 if attempt < MAX_RETRIES:
-                    time.sleep(RETRY_BACKOFF * (attempt + 1))
+                    time.sleep(_jittered_backoff(attempt))
                     continue
                 raise RuntimeError(f"LLM-Verbindung fehlgeschlagen: {last_error}") from exc
 

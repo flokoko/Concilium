@@ -14,6 +14,12 @@ import re
 from datetime import datetime
 from typing import Any
 
+# Platform-Guard: fcntl ist Linux/Unix-only; auf anderen Plattformen None.
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — Windows hat kein fcntl
+    fcntl = None
+
 logger = logging.getLogger(__name__)
 
 # Spalten des CSV-Journals
@@ -56,6 +62,30 @@ def _parse_confidence_from_debate(agent: dict[str, Any]) -> str:
     return ""
 
 
+def _acquire_lock(fh: Any) -> None:
+    """Holt ein exklusives Datei-Lock (best effort, crasht nie).
+
+    Verwendet fcntl.flock (LOCK_EX) wenn fcntl verfügbar ist.
+    Bei Fehler oder fehlendem fcntl → kein Lock (best effort).
+    """
+    if fcntl is None:
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except Exception as exc:  # noqa: BLE001 — best effort, Lock nicht kritisch
+        logger.debug("Konnte kein File-Lock erwerben: %s", exc)
+
+
+def _release_lock(fh: Any) -> None:
+    """Gibt das File-Lock frei (best effort, crasht nie)."""
+    if fcntl is None:
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.debug("Konnte File-Lock nicht freigeben: %s", exc)
+
+
 def _rewrite_journal_with_header(journal_file: str, existing_fields: list[str]) -> None:
     """Schreibt eine bestehende Journal-CSV neu mit dem erweiterten Header.
 
@@ -68,14 +98,18 @@ def _rewrite_journal_with_header(journal_file: str, existing_fields: list[str]) 
             reader = csv.DictReader(fh)
             rows = list(reader)
         with open(journal_file, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=JOURNAL_HEADER)
-            writer.writeheader()
-            for row in rows:
-                # Fehlende Spalten als leer auffüllen
-                for field in JOURNAL_HEADER:
-                    if field not in row:
-                        row[field] = ""
-                writer.writerow({k: row.get(k, "") for k in JOURNAL_HEADER})
+            _acquire_lock(fh)
+            try:
+                writer = csv.DictWriter(fh, fieldnames=JOURNAL_HEADER)
+                writer.writeheader()
+                for row in rows:
+                    # Fehlende Spalten als leer auffüllen
+                    for field in JOURNAL_HEADER:
+                        if field not in row:
+                            row[field] = ""
+                    writer.writerow({k: row.get(k, "") for k in JOURNAL_HEADER})
+            finally:
+                _release_lock(fh)
     except Exception as exc:  # noqa: BLE001 — best effort
         logger.warning("Journal-Header-Erweiterung fehlgeschlagen: %s", exc)
 
@@ -161,10 +195,14 @@ def append_decision(
                 logger.warning("Journal-Header-Check fehlgeschlagen: %s", exc)
 
         with open(journal_file, "a", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=JOURNAL_HEADER)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
+            _acquire_lock(fh)
+            try:
+                writer = csv.DictWriter(fh, fieldnames=JOURNAL_HEADER)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
+            finally:
+                _release_lock(fh)
 
         logger.info("Entscheidung ins Journal geschrieben: %s", journal_file)
     except Exception as exc:  # noqa: BLE001 — nie crashen

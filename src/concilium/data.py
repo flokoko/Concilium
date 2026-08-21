@@ -5,11 +5,14 @@ Fallback-News-Quelle: Google News RSS (kein API-Key nötig, nur requests + xml.e
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -24,6 +27,138 @@ _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
+
+# ---------------------------------------------------------------------------
+# Tages-Cache für Marktdaten (yfinance-Ergebnisse)
+# ---------------------------------------------------------------------------
+# Vermeidet wiederholte yfinance-Aufrufe innerhalb desselben Kalendertags.
+# Cache-Ort übersteuerbar via Env CONCILIUM_CACHE_DIR (Default: <repo>/cache/).
+# Cache DEAKTIVIERBAR via CONCILIUM_CACHE_DIR="" (leerer String).
+# Datei pro Ticker+Datum: market_{YYYY-MM-DD}_{ticker}.json.
+
+
+def _get_cache_dir() -> str | None:
+    """Bestimmt das Cache-Verzeichnis.
+
+    Returns:
+        Pfad zum Cache-Verzeichnis, oder None wenn Cache deaktiviert ist
+        (CONCILIUM_CACHE_DIR="" → deaktiviert).
+
+    Default: <repo>/cache/ (Repo-Root = Eltern von src/).
+    """
+    env = os.environ.get("CONCILIUM_CACHE_DIR")
+    if env is not None:
+        env = env.strip()
+        if not env:
+            return None  # leerer String → Cache deaktiviert
+        return env
+    # Default: <repo>/cache/ — Repo-Root ist Eltern von src/
+    # __file__ = .../src/concilium/data.py → Repo-Root = .../
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    return str(repo_root / "cache")
+
+
+def _get_today_key() -> str:
+    """Liefert das heutige UTC-Datum als YYYY-MM-DD String."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _cache_file_path(cache_dir: str, today_key: str, ticker: str) -> str:
+    """Bestimmt den Dateipfad für einen Cache-Eintrag."""
+    # Ticker kann / enthalten (z.B. nicht bereinigt) → sicher machen
+    safe_ticker = re.sub(r"[^A-Za-z0-9._-]", "_", ticker)
+    return os.path.join(cache_dir, f"market_{today_key}_{safe_ticker}.json")
+
+
+def _load_cache(ticker: str, today_key: str | None = None) -> dict[str, Any] | None:
+    """Lädt gecachte Marktdaten für einen Ticker, wenn der Cache heute ist.
+
+    Args:
+        ticker: Aufgelöster Yahoo-Ticker (z.B. AAPL, RWE.DE).
+        today_key: Optionales Datum YYYY-MM-DD (für Tests). Default: heute (UTC).
+
+    Returns:
+        Das data-dict (ohne isin/wkn) oder None bei Cache-Miss/Fehler/Deaktiviert.
+    """
+    cache_dir = _get_cache_dir()
+    if cache_dir is None:
+        return None  # Cache deaktiviert
+    if today_key is None:
+        today_key = _get_today_key()
+
+    file_path = _cache_file_path(cache_dir, today_key, ticker)
+    try:
+        if not os.path.isfile(file_path):
+            return None
+        with open(file_path, encoding="utf-8") as fh:
+            cached = json.load(fh, object_hook=_cache_json_object_hook)
+        # Gültigkeit: cache_date muss mit today_key übereinstimmen
+        if cached.get("cache_date") != today_key:
+            return None
+        # data-dict extrahieren
+        data = cached.get("data")
+        if not isinstance(data, dict):
+            return None
+        logger.info("Cache-Treffer für %s (%s)", ticker, today_key)
+        return data
+    except Exception as exc:  # noqa: BLE001 — Cache-Lesen crasht nie
+        logger.debug("Cache-Lesen fehlgeschlagen für %s: %s", ticker, exc)
+        return None
+
+
+def _save_cache(ticker: str, data: dict[str, Any], today_key: str | None = None) -> None:
+    """Speichert Marktdaten für einen Ticker im Tages-Cache.
+
+    Crasht nie (best effort). Speichert nur die yfinance-abhängigen Daten,
+    NICHT die Identifier-Metadaten (isin/wkn).
+
+    Args:
+        ticker: Aufgelöster Yahoo-Ticker.
+        data: Das komplette data-dict (inkl. isin/wkn — diese werden beim
+              Speichern entfernt).
+        today_key: Optionales Datum YYYY-MM-DD (für Tests).
+    """
+    cache_dir = _get_cache_dir()
+    if cache_dir is None:
+        return  # Cache deaktiviert
+    if today_key is None:
+        today_key = _get_today_key()
+
+    # Kopie ohne Identifier-Metadaten (isin/wkn gehören nicht in den Cache)
+    cache_data = {k: v for k, v in data.items() if k not in ("isin", "wkn")}
+    cache_entry = {
+        "cache_date": today_key,
+        "ticker": ticker,
+        "data": cache_data,
+    }
+    file_path = _cache_file_path(cache_dir, today_key, ticker)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as fh:
+            json.dump(cache_entry, fh, ensure_ascii=False, default=str)
+        logger.info("Cache gespeichert für %s (%s)", ticker, today_key)
+    except Exception as exc:  # noqa: BLE001 — Cache-Schreiben crasht nie
+        logger.debug("Cache-Schreiben fehlgeschlagen für %s: %s", ticker, exc)
+
+
+def _cache_json_object_hook(obj: dict[str, Any]) -> dict[str, Any]:
+    """Reviver für json.load: konvertiert ISO-8601 datetime-Strings zurück.
+
+    Wird in _load_cache verwendet, um serialisierte datetime-Objekte in
+    news_with_dates wiederherzustellen.
+    """
+    for key, val in obj.items():
+        if isinstance(val, str) and len(val) >= 10:
+            # ISO-8601 datetime erkennen (z.B. "2026-08-20T08:30:00+00:00")
+            if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", val):
+                try:
+                    dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    obj[key] = dt
+                except (ValueError, TypeError):
+                    pass
+    return obj
 
 # ---------------------------------------------------------------------------
 # Identifier-Auflösung (ISIN / WKN → Yahoo-Ticker)
@@ -831,8 +966,17 @@ def collect_ticker_data(
 
     # Identifier auflösen (ISIN/WKN → Yahoo-Ticker); bei reinem Ticker
     # bleibt alles unverändert — kein Netzwerkaufruf nötig.
+    # Diese Auflösung gehört NICHT in den Cache.
     resolved_ticker, id_meta = resolve_identifier(ticker)
     ticker = resolved_ticker
+
+    # --- Tages-Cache prüfen (yfinance-abhängige Daten) ---
+    cached = _load_cache(ticker)
+    if cached is not None:
+        # Identifier-Metadaten wieder hinzufügen (nicht im Cache gespeichert)
+        cached["isin"] = id_meta.get("isin")
+        cached["wkn"] = id_meta.get("wkn")
+        return cached
 
     logger.info("Sammle Daten für %s …", ticker)
     t = yf.Ticker(ticker)
@@ -999,7 +1143,7 @@ def collect_ticker_data(
     # --- Datenqualitäts-Validierung ---
     data_warnings = _validate_fundamentals(fundamentals)
 
-    return {
+    result = {
         "ticker": ticker,
         "fundamentals": fundamentals,
         "technicals": technicals,
@@ -1018,3 +1162,11 @@ def collect_ticker_data(
         "isin": id_meta.get("isin"),
         "wkn": id_meta.get("wkn"),
     }
+
+    # --- Tages-Cache speichern (yfinance-abhängige Daten) ---
+    # Wichtig: Nur speichern, wenn KEIN Fehler auftrat (kein alter Cache-Stand
+    # als Fallback bei yfinance-Fehlern). Da wir bis hier nur kommen, wenn
+    # alle Daten erfolgreich geladen wurden, ist das hier sicher.
+    _save_cache(ticker, result)
+
+    return result

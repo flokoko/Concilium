@@ -10,6 +10,7 @@ venv/
 .env
 reports/
 journal/
+cache/
 .pytest_cache/
 .ruff_cache/
 *.md.bak
