@@ -12,6 +12,7 @@ from .agents import (
     ensemble_trader,
     portfolio_manager,
     risk_manager,
+    trade_revision,
     trader,
 )
 from .data import collect_ticker_data
@@ -131,6 +132,31 @@ def run_pipeline(
     except Exception as exc:  # noqa: BLE001 — nie crashen
         logger.warning("Portfolio-Fit fehlgeschlagen: %s", exc)
         result["portfolio_fit"] = None
+
+    # --- 5c. Trade-Revision (2nd Pass) ---
+    # Nach Risk-Manager und Portfolio-Fit bekommt der Trader eine zweite Runde,
+    # um seinen Trade anzupassen. Der revidierte Trade ersetzt den ursprünglichen.
+    # Der Original-Trade wird in trade_original gespeichert.
+    result["trade_original"] = None
+    result["trade_revised"] = False
+    try:
+        logger.info("Schritt 5c: Trade-Revision (2nd Pass)")
+        original_trade = trade
+        revised = trade_revision(
+            original_trade,
+            risk,
+            result.get("portfolio_fit"),
+            llm,
+            feedback_context=feedback_context,
+            reflection_context=reflection_context,
+        )
+        result["trade_original"] = original_trade
+        result["trade"] = revised
+        result["trade_revised"] = True
+        # Ab hier mit dem revidierten Trade weiterarbeiten
+        trade = revised
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("Trade-Revision fehlgeschlagen: %s", exc)
 
     # --- 6. Portfolio-Manager ---
     logger.info("Schritt 6: Portfolio-Manager trifft finale Entscheidung")

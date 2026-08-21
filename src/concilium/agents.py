@@ -151,15 +151,39 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 }
 """
 
+SYSTEM_TRADE_REVISION = """\
+Du bist der Trader in der zweiten Runde. Dein ursprünglicher Trade wurde vom \
+Risk-Manager und Portfolio-Fit-Analysten bewertet. Passe deinen Trade an: Du \
+darfst Aktion, Zielkurs, Stop-Loss und Positionsanteil ändern, wenn die \
+Risiko-/Portfolio-Einwände begründet sind. Bleib konsistent mit deinen \
+Kernargumenten.
+
+Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
+{
+  "rolle": "Trader",
+  "aktion": "STARK KAUFEN" | "KAUFEN" | "HALTEN" | "VERKAUFEN" | "STARK VERKAUFEN",
+  "zielkurs": "Zielkurs als Zahl oder null",
+  "stop_loss": "Stop-Loss als Zahl oder null",
+  "positionsanteil": "Empfohlener Positionsanteil in % (z.B. 5)",
+  "begründung": "2-4 Sätze Begründung auf Deutsch",
+  "zeithorizont": "Kurzfristig" | "Mittelfristig" | "Langfristig"
+}
+"""
+
 SYSTEM_PM = """\
 Du bist der Portfolio-Manager. Du triffst die finale Entscheidung über den Trade, \
 basierend auf dem Trade-Vorschlag und der Risiko-Bewertung. Du kannst den Trade \
-genehmigen oder ablehnen.
+genehmigen, mit Auflagen modifizieren oder ablehnen.
+
+- GENEHMIGT: Trade wie vorgeschlagen genehmigen.
+- MODIFIZIERT: Trade grundsätzlich genehmigen, aber mit klaren Auflagen/Bedingungen \
+(z.B. kleinere Position, Zeitfenster).
+- ABGELEHNT: Trade ablehnen.
 
 Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 {
   "rolle": "Portfolio-Manager",
-  "entscheidung": "GENEHMIGT" | "ABGELEHNT",
+  "entscheidung": "GENEHMIGT" | "MODIFIZIERT" | "ABGELEHNT",
   "begründung": "2-4 Sätze Begründung auf Deutsch",
   "confidence": 1-5
 }
@@ -1030,3 +1054,52 @@ def portfolio_manager(
         user_text += f"\n\n{reflection_context}"
 
     return _call_agent(llm, SYSTEM_PM, user_text)
+
+
+def trade_revision(
+    trade: dict[str, Any],
+    risk: dict[str, Any],
+    portfolio_fit: dict[str, Any] | None,
+    llm: LLMClient,
+    feedback_context: str = "",
+    reflection_context: str = "",
+) -> dict[str, Any]:
+    """Trade-Revision (2nd Pass) — der Trader überarbeitet seinen Trade.
+
+    Nachdem Risk-Manager und Portfolio-Fit-Analyst den Trade bewertet haben,
+    bekommt der Trader eine zweite Runde, um seinen Trade anzupassen.
+
+    Args:
+        trade: Ursprünglicher Trade-Vorschlag vom Trader/Ensemble.
+        risk: Risiko-Bewertung vom Risk-Manager.
+        portfolio_fit: Portfolio-Fit-Ergebnis (oder None, wenn nicht verfügbar).
+        llm: LLMClient.
+        feedback_context: Optionaler Track-Record-Kontext-Block.
+        reflection_context: Optionaler Reflexions-Block.
+
+    Returns:
+        dict mit dem revidierten Trade (gleiche Felder wie trader(),
+        plus rating = rohes 5-stufig, aktion = 3-stufig normalisiert).
+    """
+    trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
+    risk_text = json.dumps(risk, ensure_ascii=False, indent=2, default=str)
+
+    user_text = f"Ursprünglicher Trade-Vorschlag:\n{trade_text}\n\nRisiko-Bewertung:\n{risk_text}"
+
+    if portfolio_fit is not None:
+        pf_text = json.dumps(portfolio_fit, ensure_ascii=False, indent=2, default=str)
+        user_text += f"\n\nPortfolio-Fit-Einschätzung:\n{pf_text}"
+    else:
+        user_text += "\n\nPortfolio-Fit-Einschätzung: Nicht verfügbar."
+
+    if feedback_context:
+        user_text += f"\n\n{feedback_context}"
+    if reflection_context:
+        user_text += f"\n\n{reflection_context}"
+
+    result = _call_agent(llm, SYSTEM_TRADE_REVISION, user_text, temperature=0.3)
+    # 5-stufige Rating normalisieren (wie bei trader())
+    raw_rating = str(result.get("aktion", "")).strip().upper()
+    result["rating"] = raw_rating
+    result["aktion"] = _rating_to_action(raw_rating)
+    return result

@@ -47,6 +47,7 @@ sinnvoller Baustein im bestehenden Depot ist — aus ZWEI Risikoperspektiven.
 Du erhältst:
 1. Die analysierte Aktie mit Fundamentals (Sektor/Industry, Beta, Marktkap, Volatilität).
 2. Das reale Depot mit Positionen und deren Anteil in % am Gesamtportfolio.
+3. Eine Typen-/Regionen-Allokations-Übersicht über ALLE Positionen.
 
 Bewerte explizit aus zwei Perspektiven:
 
@@ -59,6 +60,8 @@ Bewerte explizit aus zwei Perspektiven:
 (2) Sektor-/Branchen-Overlap:
     Überlappt der Sektor/Industry der analysierten Aktie mit bestehenden Positionen?
     Hoher Overlap = weniger Diversifikation.
+    Nutze dafür auch die Typen-/Regionen-Allokation: Eine hohe Konzentration auf \
+einen Typ (z.B. nur Aktien) oder eine Region (z.B. nur USA) erhöht das Risiko.
 
 Gib zusätzlich:
 - portfolio_fit_score (1-5, 5 = sehr guter Portfolio-Baustein, 1 = ungeeignet/Redundanz)
@@ -308,10 +311,57 @@ def fetch_portfolio_positions() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _build_portfolio_summary(positions: list[dict[str, Any]]) -> str:
+    """Baut eine deterministische Sektor-Allokations-Übersicht aus ALLEN Positionen.
+
+    Aggregiert depot_pct nach type (Aktie/ETF/Commodity) UND nach region.
+    Zeigt die Typen-Mix, Top-5-Regionen mit kumuliertem %.
+
+    Args:
+        positions: Liste von Positions-Dicts (wie von _parse_positions).
+
+    Returns:
+        Deutschen Text mit Typen-Mix und Regionen-Mix.
+    """
+    if not positions:
+        return ""
+
+    # --- Typen-Mix (Aktie/ETF/Commodity) ---
+    type_sums: dict[str, float] = {}
+    for p in positions:
+        typ = p.get("type", "Unbekannt")
+        pct = p.get("depot_pct", 0.0)
+        type_sums[typ] = type_sums.get(typ, 0.0) + pct
+
+    type_lines: list[str] = []
+    for typ, pct in sorted(type_sums.items(), key=lambda x: -x[1]):
+        type_lines.append(f"{typ} {pct:.1f}%")
+
+    # --- Regionen-Mix (Top 5) ---
+    region_sums: dict[str, float] = {}
+    for p in positions:
+        region = p.get("region", "Unbekannt")
+        if not region:
+            region = "Unbekannt"
+        pct = p.get("depot_pct", 0.0)
+        region_sums[region] = region_sums.get(region, 0.0) + pct
+
+    # Top 5 Regionen nach Anteil
+    top_regions = sorted(region_sums.items(), key=lambda x: -x[1])[:5]
+    region_lines = [f"{r} {pct:.1f}%" for r, pct in top_regions]
+
+    lines = [
+        "Portfolio-Typen-Mix (nach Anteil): " + ", ".join(type_lines),
+        "Regionen-Mix: " + ", ".join(region_lines),
+    ]
+    return "\n".join(lines)
+
+
 def _build_portfolio_text(positions: list[dict[str, Any]]) -> str:
     """Baut einen kompakten deutschen Portfolio-Text für den LLM-Prompt.
 
-    Zeigt nur die ~10 größten Positionen (nach depot_pct sortiert) plus
+    Zeigt die Typen-/Regionen-Allokations-Übersicht aus ALLEN Positionen
+    plus die ~10 größten Positionen (nach depot_pct sortiert) und
     die Gesamtanzahl der Depot-Positionen.
     """
     if not positions:
@@ -322,7 +372,15 @@ def _build_portfolio_text(positions: list[dict[str, Any]]) -> str:
     sorted_pos = sorted(positions, key=lambda p: p.get("depot_pct", 0), reverse=True)
     top = sorted_pos[:10]
 
-    lines = [f"Depot: {total} Positionen insgesamt.", "", "Größte Positionen (Top 10):"]
+    lines = [f"Depot: {total} Positionen insgesamt.", ""]
+
+    # Sektor-Summary (Typen/Regionen aus ALLEN Positionen)
+    summary = _build_portfolio_summary(positions)
+    if summary:
+        lines.append(summary)
+        lines.append("")
+
+    lines.append("Größte Positionen (Top 10):")
     for p in top:
         name = p.get("name", "N/A")
         ticker = p.get("ticker", "N/A")

@@ -357,6 +357,17 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         trade = result.get("trade", {})
         lines.append(f"## {section_num}. Trade-Vorschlag")
         lines.append("")
+        # Trade-Revision Hinweis (Feature A)
+        if result.get("trade_revised"):
+            lines.append("> ⚠️ Trade wurde nach Risk-/Portfolio-Fit-Einwand revidiert.")
+            lines.append("")
+            original = result.get("trade_original")
+            if isinstance(original, dict):
+                lines.append(
+                    f"_Original-Trade: {original.get('aktion', 'N/A')}"
+                    f" → revidiert: {trade.get('aktion', 'N/A')}_"
+                )
+                lines.append("")
         lines.append(f"**Aktion:** {trade.get('aktion', 'N/A')}")
         if trade.get("rating"):
             lines.append(f"**Rating (5-stufig):** {trade['rating']}")
@@ -428,7 +439,13 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(f"## {section_num}. Finale Entscheidung (Portfolio-Manager)")
         lines.append("")
         entscheidung = final.get("entscheidung", "N/A")
-        emoji = "✅" if "GENEHMIGT" in str(entscheidung).upper() else "❌"
+        entscheidung_upper = str(entscheidung).upper()
+        if "GENEHMIGT" in entscheidung_upper:
+            emoji = "✅"
+        elif "MODIFIZIERT" in entscheidung_upper:
+            emoji = "⚡"
+        else:
+            emoji = "❌"
         lines.append(f"### {emoji} {entscheidung}")
         lines.append("")
         lines.append(f"**Begründung:** {final.get('begründung', 'N/A')}")
