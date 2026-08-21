@@ -338,6 +338,7 @@ def portfolio_fit_agent(
     data: dict[str, Any],
     llm: LLMClient,
     positions: list[dict[str, Any]],
+    data_text: str | None = None,
 ) -> dict[str, Any]:
     """Ruft den Portfolio-Fit-Analysten auf.
 
@@ -350,11 +351,14 @@ def portfolio_fit_agent(
         llm: LLMClient für den Agenten-Call.
         positions: Liste von Positions-Dicts aus fetch_portfolio_positions().
             Kann leer sein — dann nur Sektor-Bewertung.
+        data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
+            _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
 
     Returns:
         dict mit den Feldern aus SYSTEM_PORTFOLIO_FIT (plus _raw).
     """
-    data_text = _build_data_text(data)
+    if data_text is None:
+        data_text = _build_data_text(data)
     portfolio_text = _build_portfolio_text(positions)
 
     portfolio_daten_verfuegbar = len(positions) > 0

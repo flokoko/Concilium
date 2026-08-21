@@ -5,7 +5,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .agents import analyst_team, debate, ensemble_trader, portfolio_manager, risk_manager, trader
+from .agents import (
+    _build_data_text,
+    analyst_team,
+    debate,
+    ensemble_trader,
+    portfolio_manager,
+    risk_manager,
+    trader,
+)
 from .data import collect_ticker_data
 from .llm import LLMClient
 from .portfolio_fit import fetch_portfolio_positions, portfolio_fit_agent
@@ -52,6 +60,12 @@ def run_pipeline(
     result["data"] = data
     result["ticker"] = data["ticker"]
 
+    # --- 1b. data_text einmal berechnen (für alle Agenten-Prompts) ---
+    # _build_data_text ist teuer (enthält 10 Headlines) und wurde bisher in
+    # analyst_team, risk_manager und portfolio_fit_agent mehrfach berechnet.
+    # Hier einmal berechnen und durchgereicht — nur im LLM-Modus nötig.
+    data_text = _build_data_text(data) if llm is not None else None
+
     # --- Optional: Backtest ---
     if backtest:
         logger.info("Schritt 1b: Führe Backtest-Signalproxy aus")
@@ -69,7 +83,7 @@ def run_pipeline(
 
     # --- 2. Analysten-Team ---
     logger.info("Schritt 2: Analysten-Team wird aufgerufen")
-    analysts = analyst_team(data, llm)
+    analysts = analyst_team(data, llm, data_text=data_text)
     result["analysts"] = analysts
 
     # --- 3. Debatte ---
@@ -88,7 +102,7 @@ def run_pipeline(
 
     # --- 5. Risk-Manager ---
     logger.info("Schritt 5: Risk-Manager bewertet Risiko")
-    risk = risk_manager(trade, data, llm)
+    risk = risk_manager(trade, data, llm, data_text=data_text)
     result["risk"] = risk
 
     # --- 5b. Portfolio-Fit (zwischen Risk-Manager und Portfolio-Manager) ---
@@ -96,7 +110,7 @@ def run_pipeline(
     try:
         logger.info("Schritt 5b: Portfolio-Fit-Analyst bewertet Depot-Fit")
         positions = fetch_portfolio_positions()
-        portfolio_fit = portfolio_fit_agent(data, llm, positions)
+        portfolio_fit = portfolio_fit_agent(data, llm, positions, data_text=data_text)
         result["portfolio_fit"] = portfolio_fit
     except Exception as exc:  # noqa: BLE001 — nie crashen
         logger.warning("Portfolio-Fit fehlgeschlagen: %s", exc)

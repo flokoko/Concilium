@@ -53,10 +53,20 @@ def _clean_debate_text(agent: dict[str, Any]) -> str:
     return text if text else raw
 
 
-def generate_report(result: dict[str, Any]) -> str:
+def generate_report(
+    result: dict[str, Any],
+    reports_dir: str | None = None,
+) -> str:
     """Generiert einen deutschen Markdown-Report aus den Pipeline-Ergebnissen.
 
     Funktioniert mit und ohne LLM-Abschnitten (no_llm-Modus).
+
+    Args:
+        result: Das Ergebnis-dict aus run_pipeline.
+        reports_dir: Verzeichnis für Report-Dateien (z. B. 'reports/').
+            Falls gegeben und matplotlib verfügbar, wird ein Chart erzeugt
+            und als relatives Bild eingebettet. Falls None, wird kein Chart
+            erzeugt.
     """
     data = result.get("data", {})
     f = data.get("fundamentals", {})
@@ -163,6 +173,17 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
     lines.append(f"| Volumen | {_fmt(t.get('current_volume'))} |")
     lines.append(f"| Ø Volumen 30T | {_fmt(t.get('avg_volume_30d'))} |")
     lines.append("")
+
+    # === Chart (optional, nur wenn matplotlib verfügbar und reports_dir gegeben) ===
+    if reports_dir is not None:
+        from .charts import generate_chart
+
+        chart_path = generate_chart(data, reports_dir)
+        if chart_path is not None:
+            lines.append("## 2b. Chart")
+            lines.append("")
+            lines.append(f"![Chart]({chart_path})")
+            lines.append("")
 
     # === Sentiment ===
     lines.append("## 3. Sentiment-Heuristik")

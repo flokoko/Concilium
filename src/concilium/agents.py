@@ -335,15 +335,26 @@ def _call_agent(llm: LLMClient, system_prompt: str, user_text: str, temperature:
     return parsed
 
 
-def analyst_team(data: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
+def analyst_team(
+    data: dict[str, Any],
+    llm: LLMClient,
+    data_text: str | None = None,
+) -> dict[str, Any]:
     """Ruft 3 Analysten-Rollen auf (Fundamental, Technical, Sentiment).
 
     Returns dict mit 'fundamental', 'technical', 'sentiment' und 'technicals' Schlüsseln.
     Die 3 Analysten-Calls werden PARALLEL über ThreadPoolExecutor ausgeführt.
-    Bei einem Teilfehler wird eine Warnung geloggt und für den betroffenen Key
+    Bei einem Teilfehler wird eine Warnung geloggt und für den betroffenen key
     ein Fehlereintrag geliefert — die Pipeline crasht nicht.
+
+    Args:
+        data: Daten-dict aus collect_ticker_data.
+        llm: LLMClient für die Agenten-Calls.
+        data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
+            _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
     """
-    data_text = _build_data_text(data)
+    if data_text is None:
+        data_text = _build_data_text(data)
 
     # (key, system_prompt) — Reihenfolge bleibt fundamental/technical/sentiment
     analyst_specs = [
@@ -674,10 +685,24 @@ def ensemble_trader(
     return result
 
 
-def risk_manager(trade: dict[str, Any], data: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
-    """Bewertet Risiko des Trades."""
+def risk_manager(
+    trade: dict[str, Any],
+    data: dict[str, Any],
+    llm: LLMClient,
+    data_text: str | None = None,
+) -> dict[str, Any]:
+    """Bewertet Risiko des Trades.
+
+    Args:
+        trade: Trade-Vorschlag vom Trader/Ensemble.
+        data: Daten-dict aus collect_ticker_data.
+        llm: LLMClient.
+        data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
+            _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
+    """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
-    data_text = _build_data_text(data)
+    if data_text is None:
+        data_text = _build_data_text(data)
 
     user_text = f"Trade-Vorschlag:\n{trade_text}\n\nMarktdaten:\n{data_text}"
     return _call_agent(llm, SYSTEM_RISK, user_text)
