@@ -421,6 +421,7 @@ def trader(
     debate_result: dict[str, Any],
     llm: LLMClient,
     temperature: float = 0.3,
+    feedback_context: str = "",
 ) -> dict[str, Any]:
     """Erstellt Trade-Vorschlag aus Analysten + Debatte.
 
@@ -432,6 +433,9 @@ def trader(
             Wird von ``ensemble_trader`` pro Run variiert, um eine
             Mehrheitsabstimmung über unterschiedlich sampling-erzeugte Trades
             durchzuführen.
+        feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
+            Feedback). Wird am Ende des User-Prompts angehängt, damit der
+            Trader seine Kalibrierung an der Historie ausrichten kann.
     """
     summary = _analyst_summary_text(analysts)
     bull_text = debate_result.get("bull", {}).get("_raw", "")
@@ -442,6 +446,8 @@ def trader(
         f"Bull-Argumentation:\n{bull_text}\n\n"
         f"Bear-Argumentation:\n{bear_text}"
     )
+    if feedback_context:
+        user_text += f"\n\n{feedback_context}"
     return _call_agent(llm, SYSTEM_TRADER, user_text, temperature=temperature)
 
 
@@ -546,6 +552,7 @@ def ensemble_trader(
     llm: LLMClient,
     runs: int = 3,
     temperature_range: list[float] | None = None,
+    feedback_context: str = "",
 ) -> dict[str, Any]:
     """Führt den Trader mehrfach aus (Ensemble) und aggregiert per Mehrheitsentscheid.
 
@@ -556,6 +563,8 @@ def ensemble_trader(
         runs: Anzahl der Ensemble-Runs (Default 3).
         temperature_range: Temperaturen pro Run (Default [0.3, 0.5, 0.7]).
             Bei weniger/mehr Runs wird zyklisch verwendet bzw. abgeschnitten.
+        feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
+            Feedback). Wird an jeden trader()-Aufruf durchgereicht.
 
     Returns:
         dict mit dem gewählten Trade plus _ensemble-Metadaten:
@@ -575,7 +584,7 @@ def ensemble_trader(
     all_runs: list[dict[str, Any]] = []
 
     def _run_trader(temp: float) -> dict[str, Any]:
-        return trader(analysts, debate_result, llm, temperature=temp)
+        return trader(analysts, debate_result, llm, temperature=temp, feedback_context=feedback_context)
 
     max_workers = min(len(temps), _MAX_PARALLEL)
     # Reihenfolge der Ergebnisse muss der Temp-Reihenfolge entsprechen für
@@ -762,6 +771,7 @@ def risk_manager(
     data: dict[str, Any],
     llm: LLMClient,
     data_text: str | None = None,
+    feedback_context: str = "",
 ) -> dict[str, Any]:
     """Bewertet Risiko des Trades.
 
@@ -775,12 +785,16 @@ def risk_manager(
         llm: LLMClient.
         data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
             _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
+        feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
+            Feedback). Wird am Ende des User-Prompts angehängt.
     """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     if data_text is None:
         data_text = _build_data_text(data)
 
     user_text = f"Trade-Vorschlag:\n{trade_text}\n\nMarktdaten:\n{data_text}"
+    if feedback_context:
+        user_text += f"\n\n{feedback_context}"
     risk = _call_agent(llm, SYSTEM_RISK, user_text)
 
     # --- Rechnerische Positionsgröße via Volatility-Targeting ---
@@ -798,6 +812,7 @@ def portfolio_manager(
     risk: dict[str, Any],
     llm: LLMClient,
     portfolio_fit: dict[str, Any] | None = None,
+    feedback_context: str = "",
 ) -> dict[str, Any]:
     """Trifft finale Entscheidung.
 
@@ -807,6 +822,9 @@ def portfolio_manager(
         llm: LLMClient.
         portfolio_fit: Optional Portfolio-Fit-Ergebnis (Ziel-Gewichtung etc.).
             Wird dem PM als zusätzlicher Kontext übergeben.
+        feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
+            Feedback). Wird am Ende des User-Prompts angehängt, damit der PM
+            seine Kalibrierung an der Historie ausrichten kann.
     """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     risk_text = json.dumps(risk, ensure_ascii=False, indent=2, default=str)
@@ -816,5 +834,8 @@ def portfolio_manager(
     if portfolio_fit is not None:
         pf_text = json.dumps(portfolio_fit, ensure_ascii=False, indent=2, default=str)
         user_text += f"\n\nPortfolio-Fit-Einschätzung:\n{pf_text}"
+
+    if feedback_context:
+        user_text += f"\n\n{feedback_context}"
 
     return _call_agent(llm, SYSTEM_PM, user_text)
