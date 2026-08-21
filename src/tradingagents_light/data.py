@@ -345,6 +345,40 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
+def _get_dividend_yield(info: dict[str, Any]) -> float | None:
+    """Bestimmt die Dividendenrendite robust aus dem yfinance-info-Dict.
+
+    yfinance liefert zwei Felder:
+      - 'trailingAnnualDividendYield' (TTM): verlässlich, korrekte Werte.
+      - 'dividendYield': bei mehreren Tickern fehlerhaft (z.B. NVDA 46%,
+        RWE.DE 210%, TSM 105%). Bekannter yfinance-Datenfehler.
+
+    Strategie:
+      1. Primär 'trailingAnnualDividendYield' verwenden (TTM, verlässlich).
+      2. Fallback auf 'dividendYield', nur wenn Trailing fehlt/None ist
+         UND der Wert plausibel ist (0 < wert < 0.5).
+      3. Falls das Ergebnis ≥ 0.5 ist (unsinnig hoch), als None behandeln.
+      4. Der Wert bleibt ein Anteil (0.021 = 2.1%).
+
+    Crasht nie; liefert None bei unplausiblen oder fehlenden Werten.
+    """
+    # 1. Primär: trailingAnnualDividendYield (TTM, verlässlich)
+    trailing = _safe_float(info.get("trailingAnnualDividendYield"))
+    if trailing is not None:
+        # Plausibilitäts-Sicherung: ≥ 0.5 ist unsinnig hoch
+        if trailing < 0.5:
+            return trailing
+        return None
+
+    # 2. Fallback: dividendYield, nur wenn plausibel (0 < wert < 0.5)
+    fallback = _safe_float(info.get("dividendYield"))
+    if fallback is not None and 0.0 < fallback < 0.5:
+        return fallback
+
+    # 3. Unplausibel oder fehlt → None
+    return None
+
+
 def _validate_fundamentals(fundamentals: dict[str, Any]) -> list[str]:
     """Prüft Fundamentals auf unplausible Werte und gibt deutsche Warn-Strings zurück.
 
@@ -591,7 +625,7 @@ def collect_ticker_data(
     peg_ratio = _safe_float(info.get("pegRatio"))
     fifty_two_week_high = _safe_float(info.get("fiftyTwoWeekHigh"))
     fifty_two_week_low = _safe_float(info.get("fiftyTwoWeekLow"))
-    dividend_yield = _safe_float(info.get("dividendYield"))
+    dividend_yield = _get_dividend_yield(info)
     beta = _safe_float(info.get("beta"))
     currency = info.get("currency", "USD")
     sector = info.get("sector", "N/A")

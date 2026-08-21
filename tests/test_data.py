@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from tradingagents_light.data import (  # noqa: E402
     _fetch_google_news,
+    _get_dividend_yield,
     collect_ticker_data,
 )
 from tradingagents_light.journal import append_decision
@@ -485,3 +486,27 @@ class TestAppendDecision:
         assert len(rows) == 3
         assert rows[0]["ticker"] == "TEST0.DE"
         assert rows[2]["ticker"] == "TEST2.DE"
+
+
+class TestGetDividendYield:
+    """Tests für _get_dividend_yield — robuste Dividendenrendite-Bestimmung."""
+
+    def test_dividend_yield_uses_trailing(self):
+        """Trailing (TTM) wird bevorzugt, auch wenn dividendYield kaputt ist."""
+        info = {"trailingAnnualDividendYield": 0.021, "dividendYield": 2.1}
+        assert _get_dividend_yield(info) == 0.021
+
+    def test_dividend_yield_fallback_plausible(self):
+        """Fallback auf dividendYield, wenn Trailing fehlt und Wert plausibel ist."""
+        info = {"trailingAnnualDividendYield": None, "dividendYield": 0.03}
+        assert _get_dividend_yield(info) == 0.03
+
+    def test_dividend_yield_rejects_implausible(self):
+        """Unplausibler dividendYield (≥0.5) wird verworfen → None."""
+        info = {"trailingAnnualDividendYield": None, "dividendYield": 2.1}
+        assert _get_dividend_yield(info) is None
+
+    def test_dividend_yield_none(self):
+        """Beide None → None, kein Crash."""
+        info = {"trailingAnnualDividendYield": None, "dividendYield": None}
+        assert _get_dividend_yield(info) is None
