@@ -341,6 +341,23 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(f"**Empfehlung:** {risk.get('empfehlung', 'N/A')}")
         lines.append("")
 
+        # Portfolio-Fit (nur wenn ein dict vorhanden ist)
+        portfolio_fit = result.get("portfolio_fit")
+        if isinstance(portfolio_fit, dict):
+            section_num += 1
+            lines.append(f"## {section_num}. Portfolio-Fit")
+            lines.append("")
+            pf_score = portfolio_fit.get("portfolio_fit_score", "N/A")
+            lines.append(f"**Portfolio-Fit-Score:** {pf_score} / 5")
+            lines.append(f"**Ziel-Gewichtung:** {portfolio_fit.get('ziel_gewichtung_pct', 'N/A')} % des Portfolios")
+            lines.append(f"**Konzentrationsrisiko:** {portfolio_fit.get('konzentrationsrisiko_bewertung', 'N/A')}")
+            lines.append(f"**Sektor-/Branchen-Overlap:** {portfolio_fit.get('sektor_overlap_bewertung', 'N/A')}")
+            lines.append(f"**Begründung:** {portfolio_fit.get('begründung', 'N/A')}")
+            if portfolio_fit.get("portfolio_daten_verfuegbar") is False:
+                lines.append("")
+                lines.append("> ⚠️ Portfolio-Daten nicht verfügbar — nur Sektor-Bewertung.")
+            lines.append("")
+
         # Final
         section_num += 1
         final = result.get("final", {})

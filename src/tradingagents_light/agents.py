@@ -616,10 +616,28 @@ def risk_manager(trade: dict[str, Any], data: dict[str, Any], llm: LLMClient) ->
     return _call_agent(llm, SYSTEM_RISK, user_text)
 
 
-def portfolio_manager(trade: dict[str, Any], risk: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
-    """Trifft finale Entscheidung."""
+def portfolio_manager(
+    trade: dict[str, Any],
+    risk: dict[str, Any],
+    llm: LLMClient,
+    portfolio_fit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Trifft finale Entscheidung.
+
+    Args:
+        trade: Trade-Vorschlag vom Trader/Ensemble.
+        risk: Risiko-Bewertung vom Risk-Manager.
+        llm: LLMClient.
+        portfolio_fit: Optional Portfolio-Fit-Ergebnis (Ziel-Gewichtung etc.).
+            Wird dem PM als zusätzlicher Kontext übergeben.
+    """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     risk_text = json.dumps(risk, ensure_ascii=False, indent=2, default=str)
 
     user_text = f"Trade-Vorschlag:\n{trade_text}\n\nRisiko-Bewertung:\n{risk_text}"
+
+    if portfolio_fit is not None:
+        pf_text = json.dumps(portfolio_fit, ensure_ascii=False, indent=2, default=str)
+        user_text += f"\n\nPortfolio-Fit-Einschätzung:\n{pf_text}"
+
     return _call_agent(llm, SYSTEM_PM, user_text)

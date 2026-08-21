@@ -29,6 +29,8 @@ JOURNAL_HEADER = [
     "bull_confidence",
     "bear_confidence",
     "ensemble_confidence",
+    "portfolio_fit_score",
+    "ziel_gewichtung_pct",
 ]
 
 
@@ -57,8 +59,9 @@ def _parse_confidence_from_debate(agent: dict[str, Any]) -> str:
 def _rewrite_journal_with_header(journal_file: str, existing_fields: list[str]) -> None:
     """Schreibt eine bestehende Journal-CSV neu mit dem erweiterten Header.
 
-    Liest alle Zeilen der alten Datei, fügt die neue Spalte ensemble_confidence
-    (leer) zu jeder Zeile hinzu und schreibt die Datei neu mit JOURNAL_HEADER.
+    Liest alle Zeilen der alten Datei, fügt fehlende Spalten (z. B.
+    ensemble_confidence, portfolio_fit_score, ziel_gewichtung_pct) als leere
+    Werte zu jeder Zeile hinzu und schreibt die Datei neu mit JOURNAL_HEADER.
     """
     try:
         with open(journal_file, encoding="utf-8") as fh:
@@ -120,6 +123,11 @@ def append_decision(
         if isinstance(ensemble_confidence, float):
             ensemble_confidence = f"{ensemble_confidence:.2f}"
 
+        # Portfolio-Fit-Felder extrahieren (falls vorhanden)
+        portfolio_fit = result.get("portfolio_fit") or {}
+        portfolio_fit_score = portfolio_fit.get("portfolio_fit_score", "")
+        ziel_gewichtung_pct = portfolio_fit.get("ziel_gewichtung_pct", "")
+
         row = {
             "timestamp": timestamp,
             "ticker": ticker,
@@ -132,20 +140,22 @@ def append_decision(
             "bull_confidence": _parse_confidence_from_debate(bull),
             "bear_confidence": _parse_confidence_from_debate(bear),
             "ensemble_confidence": ensemble_confidence,
+            "portfolio_fit_score": portfolio_fit_score,
+            "ziel_gewichtung_pct": ziel_gewichtung_pct,
         }
 
         # Datei existiert? → Header nur schreiben wenn neu
         file_exists = os.path.isfile(journal_file)
 
-        # Bei bestehender Datei ohne ensemble_confidence-Spalte:
-        # Header ergänzen, indem wir die Datei neu schreiben mit Header.
+        # Bei bestehender Datei mit fehlenden Spalten:
+        # Header ergänzen, indem wir die Datei neu schreiben mit erweitertem Header.
         if file_exists:
             try:
                 with open(journal_file, encoding="utf-8") as fh_check:
                     reader = csv.DictReader(fh_check)
                     existing_fields = reader.fieldnames or []
-                if "ensemble_confidence" not in existing_fields:
-                    # Datei hat alten Header → neu schreiben mit erweitertem Header
+                # Wenn Header nicht mit JOURNAL_HEADER übereinstimmt → Migration
+                if set(JOURNAL_HEADER) - set(existing_fields):
                     _rewrite_journal_with_header(journal_file, list(existing_fields))
             except Exception as exc:  # noqa: BLE001 — best effort
                 logger.warning("Journal-Header-Check fehlgeschlagen: %s", exc)

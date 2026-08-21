@@ -8,6 +8,7 @@ from typing import Any
 from .agents import analyst_team, debate, ensemble_trader, portfolio_manager, risk_manager, trader
 from .data import collect_ticker_data
 from .llm import LLMClient
+from .portfolio_fit import fetch_portfolio_positions, portfolio_fit_agent
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ def run_pipeline(
       3. Bull/Bear-Debatte (2 LLM-Calls) — nur wenn llm gegeben
       4. Trade-Vorschlag (1 LLM-Call oder Ensemble) — nur wenn llm gegeben
       5. Risk-Manager (1 LLM-Call) — nur wenn llm gegeben
+      5b. Portfolio-Fit-Analyst (1 LLM-Call) — nur wenn llm gegeben
       6. Portfolio-Manager finale Entscheidung (1 LLM-Call) — nur wenn llm gegeben
       7. Optional: Backtest-Signalproxy
 
@@ -89,9 +91,20 @@ def run_pipeline(
     risk = risk_manager(trade, data, llm)
     result["risk"] = risk
 
+    # --- 5b. Portfolio-Fit (zwischen Risk-Manager und Portfolio-Manager) ---
+    result["portfolio_fit"] = None
+    try:
+        logger.info("Schritt 5b: Portfolio-Fit-Analyst bewertet Depot-Fit")
+        positions = fetch_portfolio_positions()
+        portfolio_fit = portfolio_fit_agent(data, llm, positions)
+        result["portfolio_fit"] = portfolio_fit
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("Portfolio-Fit fehlgeschlagen: %s", exc)
+        result["portfolio_fit"] = None
+
     # --- 6. Portfolio-Manager ---
     logger.info("Schritt 6: Portfolio-Manager trifft finale Entscheidung")
-    final = portfolio_manager(trade, risk, llm)
+    final = portfolio_manager(trade, risk, llm, portfolio_fit=result.get("portfolio_fit"))
     result["final"] = final
 
     # --- Feature 4: Entscheidungs-Journal ---
