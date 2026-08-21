@@ -45,18 +45,23 @@ def _clean_debate_text(agent: dict[str, Any]) -> str:
 
     Die Bull/Bear-Agenten geben einen JSON-Block (confidence/name) gefolgt vom
     Fließtext zurück. Der Report soll nur den lesbaren Fließtext zeigen.
+
+    Wenn ``_raw`` leer ist oder nach Entfernung des JSON-Blocks nichts übrig
+    bleibt, wird ein klarer Platzhalter zurückgegeben statt nacktem "N/A".
     """
     import re as _re
 
     raw = str(agent.get("_raw", ""))
-    if not raw:
-        return "N/A"
+    if not raw or not raw.strip():
+        return "⚠️ Argumentation nicht verfügbar (Analysten-Ausfall)."
 
     # JSON-Block am Anfang entfernen: {"confidence": X, "name": "..."} oder ```json {...}```
     text = _re.sub(r"```json\s*\{.*?\}\s*```", "", raw, flags=_re.DOTALL).strip()
     text = _re.sub(r"^\{.*?\}", "", text, flags=_re.DOTALL).strip()
     text = text.strip("`").strip()
-    return text if text else raw
+    if not text:
+        return "⚠️ Argumentation nicht verfügbar (Analysten-Ausfall)."
+    return text
 
 
 def generate_report(
@@ -342,6 +347,18 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append("")
         lines.append(_clean_debate_text(bear))
         lines.append("")
+
+        # Debatten-Konfidenz anzeigen (falls vorhanden)
+        bull_conf = debate.get("bull_confidence")
+        bear_conf = debate.get("bear_confidence")
+        if bull_conf is not None or bear_conf is not None:
+            conf_parts: list[str] = []
+            if bull_conf is not None:
+                conf_parts.append(f"Bull {bull_conf}/5")
+            if bear_conf is not None:
+                conf_parts.append(f"Bear {bear_conf}/5")
+            lines.append(f"_Debatten-Konfidenz: {' vs '.join(conf_parts)}_")
+            lines.append("")
 
         # Reflexion (Track-Record) — vor Trade-Vorschlag
         reflection = result.get("reflection")

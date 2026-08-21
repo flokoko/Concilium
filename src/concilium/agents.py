@@ -73,23 +73,50 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 """
 
 SYSTEM_BULL = """\
-Du bist ein Bull-Stratege (Bull-Befürworter). Du argumentierst für eine Long-Position \
-in der Aktie. Nutze die Analysten-Einschätzungen, um die stärksten Argumente für \
-einen Kauf zu sammeln.
+Du bist der Bull. Fokussiere auf die konkreten STÄRKEN und Bull-Fälle aus den \
+Analysten-Daten: Wachstum, Margen, technisches Momentum, positives Sentiment, \
+günstige relative Bewertung.
+
+Schwerpunkte:
+- Wachstum: Umsatzwachstum, Gewinnmargen, EPS-Trend — wo wächst das Unternehmen?
+- Marktanteil & Wettbewerbsvorteil: Sektor-Position, Differenzierung.
+- Technisches Momentum: Aufwärtstrend (SMA50 > SMA200), RSI im gesunden Bereich, \
+MACD positiv.
+- Positives Sentiment: Dominante Stimmung, kaufsfördernde Headlines.
+- Bewertung relativ zu Wachstum: PEG-Ratio, KGV im Vergleich zu Peers und S&P 500 \
+— ist die Aktie relativ zu ihrem Wachstum günstig?
+
+Ignoriere die Risiken bewusst — der Bear-Stratege kümmert sich darum. \
+Dein Job ist es, die stärksten Argumente FÜR einen Kauf herauszuarbeiten.
 
 Antworte auf Deutsch in 3-6 Sätzen. Formuliere überzeugend, aber sachlich. \
-Gib am Anfang ein JSON-Block mit confidence (1-5) und einem Kurznamen an:
+Gib am Anfang einen JSON-Block mit confidence (1-5) und einem Kurznamen an:
 {"confidence": 1-5, "name": "Bull-Argumentation"}
 Danach folgt dein Fließtext.
 """
 
 SYSTEM_BEAR = """\
-Du bist ein Bear-Stratege (Bear-Kritiker). Du argumentierst gegen eine Long-Position \
-in der Aktie. Nutze die Analysten-Einschätzungen, um die größten Risiken und Gegenargumente \
-zu sammeln.
+Du bist der Bear. Fokussiere auf die konkreten RISIKEN und Gegenargumente: \
+überhöhte Bewertung, KGV zu teuer, Zinsbelastung, Konzentration, Margin-Rückgang, \
+technische Schwäche.
+
+Schwerpunkte:
+- Bewertungsrisiken: KGV vs. Peers und S&P 500 — ist die Aktie zu teuer? \
+PEG unplausibel?
+- Konzentrationsrisiko: Abhängigkeit von einzelnen Produkten/Märkten/Kunden.
+- Sektor-Overlap: Redundanz mit Peers, zyklische Sektorgefahren.
+- Makroökonomische Risiken: Steigende Zinsen belasten kapitalintensive Sektoren \
+und hohe Bewertungen; Zinstrend berücksichtigen.
+- Technische Gegenanzeichen: Überkauft (RSI > 70), Abwärtstrend, MACD negativ, \
+Bollinger-Band-Bruch nach unten.
+- Margin-Erosion: Rückläufige Gewinnmargen, sinkendes Umsatzwachstum — \
+wo schwächt sich das Geschäftsmodell?
+
+Ignoriere die Stärken bewusst — der Bull-Stratege kümmert sich darum. \
+Dein Job ist es, die stärksten Gegenargumente GEGEN einen Kauf herauszuarbeiten.
 
 Antworte auf Deutsch in 3-6 Sätzen. Formuliere überzeugend, aber sachlich. \
-Gib am Anfang ein JSON-Block mit confidence (1-5) und einem Kurznamen an:
+Gib am Anfang einen JSON-Block mit confidence (1-5) und einem Kurznamen an:
 {"confidence": 1-5, "name": "Bear-Argumentation"}
 Danach folgt dein Fließtext.
 """
@@ -552,6 +579,76 @@ def analyst_team(
     return results
 
 
+def _parse_debate_confidence(agent: dict[str, Any]) -> int | None:
+    """Extrahiert die confidence (1-5) aus einem Bull/Bear-Agent-Dict.
+
+    Versucht zuerst, den JSON-Block aus ``agent["_raw"]`` via parse_json zu
+    extrahieren. Wenn dort eine ``confidence`` gefunden wird, wird sie als
+    int zurückgegeben. Als Fallback wird ein direktes Feld ``confidence``
+    im Agent-Dict geprüft.
+
+    Gibt None bei Fehler oder fehlender confidence zurück.
+    """
+    if not isinstance(agent, dict):
+        return None
+
+    # 1. Versuch: direktes Feld confidence im Agent-Dict
+    direct = agent.get("confidence")
+    if direct is not None:
+        try:
+            return int(direct)
+        except (TypeError, ValueError):
+            pass
+
+    # 2. Versuch: JSON-Block aus _raw parsen
+    raw = agent.get("_raw", "")
+    if raw:
+        parsed = parse_json(raw)
+        conf = parsed.get("confidence")
+        if conf is not None:
+            try:
+                return int(conf)
+            except (TypeError, ValueError):
+                pass
+
+    return None
+
+
+def _debate_skew_text(bull_conf: int | None, bear_conf: int | None) -> str:
+    """Baut einen deutschen Kontext-Block über die Debatten-Konfidenz für den Trader.
+
+    - Beide Konfidenzen vorhanden: "Debatten-Konfidenz: Bull X/5 vs Bear Y/5
+      (Nettoneigung: Z)." mit Z = round((bull_conf - bear_conf) / 2, 1).
+      Bei Z > 0.5: "die Bull-Seite hat die Oberhand."
+      Bei Z < -0.5: "die Bear-Seite hat die Oberhand."
+      Sonst: "ausgewogene Debatte."
+    - Nur eine Seite verfügbar: Zeigt die verfügbare Konfidenz.
+    - Keine Konfidenz → leerer String "".
+
+    Sachlich, kein Alarmismus.
+    """
+    if bull_conf is None and bear_conf is None:
+        return ""
+
+    if bull_conf is not None and bear_conf is not None:
+        skew = round((bull_conf - bear_conf) / 2, 1)
+        if skew > 0.5:
+            tendenz = "die Bull-Seite hat die Oberhand."
+        elif skew < -0.5:
+            tendenz = "die Bear-Seite hat die Oberhand."
+        else:
+            tendenz = "ausgewogene Debatte."
+        return (
+            f"Debatten-Konfidenz: Bull {bull_conf}/5 vs Bear {bear_conf}/5 "
+            f"(Nettoneigung: {skew:+.1f}) — {tendenz}"
+        )
+
+    # Nur eine Seite verfügbar
+    if bull_conf is not None:
+        return f"Debatten-Konfidenz: Bull {bull_conf}/5 (Bear-Seite nicht verfügbar)."
+    return f"Debatten-Konfidenz: Bear {bear_conf}/5 (Bull-Seite nicht verfügbar)."
+
+
 def _analyst_summary_text(analysts: dict[str, Any]) -> str:
     """Kompakte Zusammenfassung aller Analysten für Debatte/Trader."""
     parts = []
@@ -568,14 +665,24 @@ def _analyst_summary_text(analysts: dict[str, Any]) -> str:
 def debate(analysts: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
     """Führt Bull/Bear-Debatte durch (2 LLM-Calls).
 
-    Returns dict mit 'bull' und 'bear' Schlüsseln.
+    Returns dict mit 'bull', 'bear', 'bull_confidence' und 'bear_confidence'
+    Schlüsseln. Die Konfidenzen werden via _parse_debate_confidence aus den
+    jeweiligen Agent-Ergebnissen extrahiert (None bei Fehlschlag).
     """
     summary = _analyst_summary_text(analysts)
 
     bull = _call_agent(llm, SYSTEM_BULL, f"Analysten-Einschätzungen:\n{summary}", temperature=0.5)
     bear = _call_agent(llm, SYSTEM_BEAR, f"Analysten-Einschätzungen:\n{summary}", temperature=0.5)
 
-    return {"bull": bull, "bear": bear}
+    bull_conf = _parse_debate_confidence(bull)
+    bear_conf = _parse_debate_confidence(bear)
+
+    return {
+        "bull": bull,
+        "bear": bear,
+        "bull_confidence": bull_conf,
+        "bear_confidence": bear_conf,
+    }
 
 
 def trader(
@@ -607,11 +714,22 @@ def trader(
     bull_text = debate_result.get("bull", {}).get("_raw", "")
     bear_text = debate_result.get("bear", {}).get("_raw", "")
 
+    # Debatten-Konfidenz extrahieren und Kontext-Block bauen
+    bull_conf = debate_result.get("bull_confidence")
+    if bull_conf is None:
+        bull_conf = _parse_debate_confidence(debate_result.get("bull", {}))
+    bear_conf = debate_result.get("bear_confidence")
+    if bear_conf is None:
+        bear_conf = _parse_debate_confidence(debate_result.get("bear", {}))
+    skew_text = _debate_skew_text(bull_conf, bear_conf)
+
     user_text = (
         f"Analysten-Einschätzungen:\n{summary}\n\n"
         f"Bull-Argumentation:\n{bull_text}\n\n"
         f"Bear-Argumentation:\n{bear_text}"
     )
+    if skew_text:
+        user_text += f"\n\n{skew_text}"
     if feedback_context:
         user_text += f"\n\n{feedback_context}"
     if reflection_context:
