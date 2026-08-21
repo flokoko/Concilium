@@ -64,6 +64,139 @@ def _clean_debate_text(agent: dict[str, Any]) -> str:
     return text
 
 
+def _management_summary(result: dict[str, Any], no_llm: bool) -> list[str]:
+    """Erstellt eine kompakte Management-Summary aus dem result-dict.
+
+    Deterministisch, kein LLM-Call. Robust gegen fehlende Werte (N/A).
+    Liefert die Zeilen für die ``## Management-Summary``-Sektion.
+    """
+    lines: list[str] = []
+    lines.append("## Management-Summary")
+    lines.append("")
+
+    # --- 1. Gesamturteil (TL;DR) ---
+    if no_llm:
+        lines.append("**Urteil:** Datensnapshot (kein LLM)")
+    else:
+        final = result.get("final") or {}
+        trade = result.get("trade") or {}
+        entscheidung = final.get("entscheidung", "N/A")
+        entscheidung_upper = str(entscheidung).upper()
+        if "GENEHMIGT" in entscheidung_upper:
+            emoji = "✅"
+        elif "MODIFIZIERT" in entscheidung_upper:
+            emoji = "⚡"
+        else:
+            emoji = "❌"
+
+        trade_aktion = trade.get("aktion", "N/A")
+        trade_parts = [f"Trade: {trade_aktion}"]
+        trade_rating = trade.get("rating")
+        if trade_rating:
+            trade_parts.append(f"Rating: {trade_rating}")
+        zielkurs = trade.get("zielkurs")
+        if zielkurs is not None:
+            trade_parts.append(f"Zielkurs {_fmt(zielkurs)}")
+        stop_loss = trade.get("stop_loss")
+        if stop_loss is not None:
+            trade_parts.append(f"Stop {_fmt(stop_loss)}")
+
+        lines.append(f"**Urteil:** {emoji} {entscheidung} — {', '.join(trade_parts)}")
+
+    # --- 2. Score-Zeile ---
+    score_parts: list[str] = []
+
+    risk = result.get("risk") or {}
+    risiko_score = risk.get("risiko_score")
+    if risiko_score is not None:
+        score_parts.append(f"Risiko {risiko_score}/5")
+
+    portfolio_fit = result.get("portfolio_fit")
+    if isinstance(portfolio_fit, dict):
+        pf_score = portfolio_fit.get("portfolio_fit_score")
+        if pf_score is not None:
+            score_parts.append(f"Portfolio-Fit {pf_score}/5")
+
+    debate = result.get("debate") or {}
+    bull_conf = debate.get("bull_confidence")
+    bear_conf = debate.get("bear_confidence")
+    if bull_conf is not None or bear_conf is not None:
+        deb_parts: list[str] = []
+        if bull_conf is not None:
+            deb_parts.append(f"Bull {bull_conf}")
+        if bear_conf is not None:
+            deb_parts.append(f"Bear {bear_conf}")
+        score_parts.append(f"Debatte {' vs '.join(deb_parts)}")
+
+    trade = result.get("trade") or {}
+    ensemble_info = trade.get("_ensemble")
+    if ensemble_info and isinstance(ensemble_info, dict):
+        ens_conf = ensemble_info.get("ensemble_confidence", 0)
+        if isinstance(ens_conf, int | float):
+            ens_conf_pct = int(ens_conf * 100)
+        else:
+            ens_conf_pct = 0
+        score_parts.append(f"Ensemble-Konfidenz {ens_conf_pct}%")
+
+    if score_parts:
+        lines.append(f"**Scores:** {' · '.join(score_parts)}")
+
+    # --- 3. Kernrisiken ---
+    risks: list[str] = []
+
+    # Risk-Auflagen
+    auflagen = risk.get("auflagen")
+    if auflagen and str(auflagen).strip().lower() != "keine":
+        risks.append(f"- {str(auflagen)[:120]}")
+
+    # Konzentrations-/Overlap-Risiko
+    if isinstance(portfolio_fit, dict):
+        konz = portfolio_fit.get("konzentrationsrisiko_bewertung")
+        if konz and str(konz).strip() and str(konz).strip().lower() != "n/a":
+            risks.append(f"- {str(konz)[:120]}")
+        else:
+            overlap = portfolio_fit.get("sektor_overlap_bewertung")
+            if overlap and str(overlap).strip() and str(overlap).strip().lower() != "n/a":
+                risks.append(f"- {str(overlap)[:120]}")
+
+    # Analysten-Konsistenz-Warnungen
+    analysts = result.get("analysts") or {}
+    if isinstance(analysts, dict):
+        for key in ("fundamental", "technical", "sentiment"):
+            a = analysts.get(key)
+            if isinstance(a, dict):
+                warn = a.get("konsistenz_warnung")
+                if warn and str(warn).strip():
+                    risks.append(f"- {str(warn)[:120]}")
+
+    # Debatten-Nettoneigung bearisch
+    if bull_conf is not None and bear_conf is not None:
+        try:
+            bc = int(bull_conf)
+            be = int(bear_conf)
+            if be - bc >= 2:
+                risks.append("- ⚠️ Debatte tendiert bearisch")
+        except (TypeError, ValueError):
+            pass
+
+    # Max 4 Risiken, sonst Platzhalter
+    if not risks:
+        lines.append("- Keine auffälligen Risiken erkannt.")
+    else:
+        for r in risks[:4]:
+            lines.append(r)
+
+    # --- 4. Kurz-Begründung ---
+    if not no_llm:
+        final = result.get("final") or {}
+        begründung = final.get("begründung")
+        if begründung and str(begründung).strip():
+            lines.append(f"**Kurz-Begründung:** {str(begründung)[:200]}")
+
+    lines.append("")
+    return lines
+
+
 def generate_report(
     result: dict[str, Any],
     reports_dir: str | None = None,
@@ -107,6 +240,9 @@ def generate_report(
             parts.append(f"WKN: {wkn}")
         lines.append(f"**Kennung:** {' · '.join(parts)}")
     lines.append("")
+
+    # --- Management-Summary ---
+    lines.extend(_management_summary(result, no_llm))
 
     # --- Disclaimer ---
     lines.append("> ⚠️ **Disclaimer:** Dies ist keine Anlageberatung. Die Analysen basieren auf \
