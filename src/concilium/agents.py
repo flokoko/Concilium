@@ -945,17 +945,33 @@ def risk_manager(
     if data_text is None:
         data_text = _build_data_text(data)
 
-    user_text = f"Trade-Vorschlag:\n{trade_text}\n\nMarktdaten:\n{data_text}"
+    # --- Rechnerische Positionsgröße VOR dem LLM-Call berechnen ---
+    # Einmal berechnen, im Prompt UND im Rückgabedict verwenden (keine Doppelberechnung).
+    annualized_vol = _compute_annualized_volatility(data)
+    vol_pct = round(annualized_vol * 100, 2) if annualized_vol is not None else None
+    pos_rechnerisch = compute_position_size(annualized_vol)
+
+    vol_str = f"{vol_pct} %" if vol_pct is not None else "N/A"
+    pos_str = f"{pos_rechnerisch} %" if pos_rechnerisch is not None else "N/A"
+
+    risk_block = (
+        "\n\n=== RECHNERISCHES RISIKO-MODELL (deterministisch) ===\n"
+        f"Annualisierte Volatilität: {vol_str}\n"
+        f"Rechnerische Positionsgröße (Volatility-Targeting, "
+        f"Risiko-Budget 2%, Cap 10%): {pos_str}\n"
+        "Anweisung: Dein \"positionsgröße_empfohlen\" sollte in der Nähe der "
+        "rechnerischen Positionsgröße liegen, es sei denn, du begründest eine "
+        "Abweichung (z.B. in den auflagen)."
+    )
+
+    user_text = f"Trade-Vorschlag:\n{trade_text}\n\nMarktdaten:\n{data_text}{risk_block}"
     if feedback_context:
         user_text += f"\n\n{feedback_context}"
     risk = _call_agent(llm, SYSTEM_RISK, user_text)
 
-    # --- Rechnerische Positionsgröße via Volatility-Targeting ---
-    annualized_vol = _compute_annualized_volatility(data)
-    risk["volatilität_annualisiert_pct"] = (
-        round(annualized_vol * 100, 2) if annualized_vol is not None else None
-    )
-    risk["positionsgröße_rechnerisch_pct"] = compute_position_size(annualized_vol)
+    # Rechnerische Werte ins Rückgabedict übernehmen (einmal berechnet, nicht doppelt)
+    risk["volatilität_annualisiert_pct"] = vol_pct
+    risk["positionsgröße_rechnerisch_pct"] = pos_rechnerisch
 
     return risk
 

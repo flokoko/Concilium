@@ -61,8 +61,161 @@ class TestComputePositionSize:
         assert result == 1.0
 
 
-class TestRiskManagerVolatility:
-    """Tests für risk_manager: rechnerische Positionsgröße wird ergänzt."""
+class TestRiskManagerRiskBlockInPrompt:
+    """Tests: risk_manager reichert den LLM-Prompt mit dem rechnerischen Risiko-Modell an."""
+
+    def test_prompt_contains_risk_block(self):
+        """Der LLM-Prompt enthält 'RECHNERISCHES RISIKO-MODELL'."""
+        class _CapturingLLM:
+            def __init__(self):
+                self.captured: list[list[dict]] = []
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.captured.append(messages)
+                return json.dumps({"risiko_score": 3, "empfehlung": "GENEHMIGT"})
+
+        llm = _CapturingLLM()
+        history = []
+        price = 100.0
+        for i in range(30):
+            if i % 2 == 0:
+                price *= 1.01
+            else:
+                price *= 0.99
+            history.append({"close": price})
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {},
+            "technicals": {"current_price": 100.0},
+            "history": history,
+            "sentiment": {},
+        }
+        risk_manager({"aktion": "KAUFEN"}, data, llm, data_text="dummy")
+
+        user_content = llm.captured[0][1]["content"]
+        assert "RECHNERISCHES RISIKO-MODELL" in user_content
+
+    def test_prompt_contains_position_size(self):
+        """Der Prompt enthält die rechnerische Positionsgröße als Zahl."""
+        class _CapturingLLM:
+            def __init__(self):
+                self.captured: list[list[dict]] = []
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.captured.append(messages)
+                return json.dumps({"risiko_score": 3})
+
+        llm = _CapturingLLM()
+        history = []
+        price = 100.0
+        for i in range(30):
+            if i % 2 == 0:
+                price *= 1.01
+            else:
+                price *= 0.99
+            history.append({"close": price})
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {},
+            "technicals": {"current_price": 100.0},
+            "history": history,
+            "sentiment": {},
+        }
+        result = risk_manager({"aktion": "KAUFEN"}, data, llm, data_text="dummy")
+
+        user_content = llm.captured[0][1]["content"]
+        # Die rechnerische Positionsgröße muss im Prompt stehen (als Zahl, nicht N/A)
+        assert "Rechnerische Positionsgröße" in user_content
+        assert "N/A" not in user_content.split("Rechnerische Positionsgröße")[1].split("\n")[0]
+        # Und im Rückgabedict
+        assert result["positionsgröße_rechnerisch_pct"] is not None
+        assert result["positionsgröße_rechnerisch_pct"] > 0
+
+    def test_prompt_no_history_shows_na(self):
+        """Bei fehlender Historie steht 'N/A' im Prompt für Volatilität und Position."""
+        class _CapturingLLM:
+            def __init__(self):
+                self.captured: list[list[dict]] = []
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.captured.append(messages)
+                return json.dumps({"risiko_score": 2})
+
+        llm = _CapturingLLM()
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {},
+            "technicals": {},
+            "history": [],
+            "sentiment": {},
+        }
+        risk_manager({"aktion": "HALTEN"}, data, llm, data_text="dummy")
+
+        user_content = llm.captured[0][1]["content"]
+        assert "RECHNERISCHES RISIKO-MODELL" in user_content
+        assert "N/A" in user_content
+
+    def test_volatility_in_prompt_matches_return_dict(self):
+        """Der Volatilitätswert im Prompt stimmt mit dem im Rückgabedict überein."""
+        class _CapturingLLM:
+            def __init__(self):
+                self.captured: list[list[dict]] = []
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.captured.append(messages)
+                return json.dumps({"risiko_score": 3})
+
+        llm = _CapturingLLM()
+        history = []
+        price = 100.0
+        for i in range(30):
+            if i % 2 == 0:
+                price *= 1.01
+            else:
+                price *= 0.99
+            history.append({"close": price})
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {},
+            "technicals": {"current_price": 100.0},
+            "history": history,
+            "sentiment": {},
+        }
+        result = risk_manager({"aktion": "KAUFEN"}, data, llm, data_text="dummy")
+
+        user_content = llm.captured[0][1]["content"]
+        vol_pct = result["volatilität_annualisiert_pct"]
+        # Der Wert aus dem Rückgabedict muss im Prompt auftauchen
+        assert str(vol_pct) in user_content
+        pos_pct = result["positionsgröße_rechnerisch_pct"]
+        assert str(pos_pct) in user_content
+
+    def test_prompt_contains_anweisung(self):
+        """Der Prompt enthält die Anweisung zur positionsgröße_empfohlen."""
+        class _CapturingLLM:
+            def __init__(self):
+                self.captured: list[list[dict]] = []
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.captured.append(messages)
+                return json.dumps({"risiko_score": 3})
+
+        llm = _CapturingLLM()
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {},
+            "technicals": {},
+            "history": [],
+            "sentiment": {},
+        }
+        risk_manager({"aktion": "HALTEN"}, data, llm, data_text="dummy")
+
+        user_content = llm.captured[0][1]["content"]
+        assert "positionsgröße_empfohlen" in user_content
+        assert "Abweichung" in user_content
 
     def test_risk_manager_adds_computational_fields(self):
         """risk_manager hängt positionsgröße_rechnerisch_pct und volatilität_annualisiert_pct an."""
