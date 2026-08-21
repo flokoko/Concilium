@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime, timedelta
@@ -469,18 +470,18 @@ def _build_llm_summary(result: dict[str, Any], llm: LLMClient) -> str | None:
     try:
         n = result["anzahl_entscheidungen"]
         hr = result.get("hit_rate_gesamt")
-        hr_str = f"{hr * 100:.1f}%" if hr is not None else "N/A"
+        hr_str = f"{hr * 100:.1f}%" if hr is not None and not (isinstance(hr, float) and math.isnan(hr)) else "N/A"
         dr = result.get("durchschnitt_rendite_gesamt")
-        dr_str = f"{dr:.2f}%" if dr is not None else "N/A"
+        dr_str = f"{dr:.2f}%" if dr is not None and not (isinstance(dr, float) and math.isnan(dr)) else "N/A"
         zt = result.get("zielkurs_trefferquote")
-        zt_str = f"{zt * 100:.1f}%" if zt is not None else "N/A"
+        zt_str = f"{zt * 100:.1f}%" if zt is not None and not (isinstance(zt, float) and math.isnan(zt)) else "N/A"
 
         kauf = result["nach_aktion"]["KAUFEN"]
-        kauf_hr = f"{kauf['hit_rate'] * 100:.1f}%" if kauf["hit_rate"] else "N/A"
+        kauf_hr = f"{kauf['hit_rate'] * 100:.1f}%" if kauf["hit_rate"] and not (isinstance(kauf["hit_rate"], float) and math.isnan(kauf["hit_rate"])) else "N/A"
 
         bands_str = ", ".join(
             f"{b['band']} ({b['n']}): "
-            f"{b['hit_rate'] * 100:.0f}%" if b["hit_rate"] is not None
+            f"{b['hit_rate'] * 100:.0f}%" if b["hit_rate"] is not None and not (isinstance(b["hit_rate"], float) and math.isnan(b["hit_rate"]))
             else f"{b['band']} ({b['n']}): N/A"
             for b in result.get("konfidenz_baende", [])
         )

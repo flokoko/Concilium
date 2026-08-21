@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
@@ -12,6 +13,8 @@ def _fmt(val: Any, suffix: str = "") -> str:
         return "N/A"
     try:
         fval = float(val)
+        if math.isnan(fval):
+            return "N/A"
         if abs(fval) >= 1e12:
             return f"{fval / 1e12:.2f} Bio{suffix}"
         if abs(fval) >= 1e9:
@@ -29,7 +32,10 @@ def _fmt_pct(val: Any) -> str:
     if val is None:
         return "N/A"
     try:
-        return f"{float(val) * 100:.1f} %"
+        fval = float(val)
+        if math.isnan(fval):
+            return "N/A"
+        return f"{fval * 100:.1f} %"
     except (TypeError, ValueError):
         return "N/A"
 
@@ -442,7 +448,10 @@ def _fmt_pct2(val: Any) -> str:
     if val is None:
         return "N/A"
     try:
-        return f"{float(val) * 100:.1f} %"
+        fval = float(val)
+        if math.isnan(fval):
+            return "N/A"
+        return f"{fval * 100:.1f} %"
     except (TypeError, ValueError):
         return "N/A"
 
@@ -452,7 +461,10 @@ def _fmt_num(val: Any, suffix: str = "") -> str:
     if val is None:
         return "N/A"
     try:
-        return f"{float(val):.2f}{suffix}"
+        fval = float(val)
+        if math.isnan(fval):
+            return "N/A"
+        return f"{fval:.2f}{suffix}"
     except (TypeError, ValueError):
         return "N/A"
 

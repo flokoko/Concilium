@@ -489,6 +489,68 @@ class TestReportGenerator:
         assert "Konfidenz-Bänder" not in report
 
 
+class TestNaNSFormatting:
+    """Testet dass NaN-Werte als N/A formatiert werden (nicht 'nan')."""
+
+    def test_fmt_nan_returns_na(self):
+        """_fmt(float('nan')) → 'N/A'."""
+        from concilium.report import _fmt
+
+        assert _fmt(float("nan")) == "N/A"
+
+    def test_fmt_none_returns_na(self):
+        """_fmt(None) → 'N/A' (bestehendes Verhalten)."""
+        from concilium.report import _fmt
+
+        assert _fmt(None) == "N/A"
+
+    def test_fmt_valid_value_unchanged(self):
+        """_fmt(5.5) → '5.50' (gültige Werte unverändert)."""
+        from concilium.report import _fmt
+
+        assert _fmt(5.5) == "5.50"
+
+    def test_fmt_pct_nan_returns_na(self):
+        """_fmt_pct(float('nan')) → 'N/A'."""
+        from concilium.report import _fmt_pct
+
+        assert _fmt_pct(float("nan")) == "N/A"
+
+    def test_fmt_pct2_nan_returns_na(self):
+        """_fmt_pct2(float('nan')) → 'N/A'."""
+        from concilium.report import _fmt_pct2
+
+        assert _fmt_pct2(float("nan")) == "N/A"
+
+    def test_fmt_num_nan_returns_na(self):
+        """_fmt_num(float('nan')) → 'N/A'."""
+        from concilium.report import _fmt_num
+
+        assert _fmt_num(float("nan"), " %") == "N/A"
+
+    def test_report_nan_rendite_no_nan_string(self):
+        """Track-Record-Report mit NaN-Ø-Rendite enthält kein 'nan'."""
+        eval_result = {
+            "anzahl_entscheidungen": 6,
+            "nach_aktion": {
+                "KAUFEN": {"n": 6, "hit_rate": 0.0, "avg_rendite": float("nan")},
+                "HALTEN": {"n": 0, "hit_rate": None, "avg_rendite": None},
+                "VERKAUFEN": {"n": 0, "hit_rate": None, "avg_rendite": None},
+            },
+            "hit_rate_gesamt": 0.0,
+            "durchschnitt_rendite_gesamt": float("nan"),
+            "zielkurs_trefferquote": None,
+            "stop_verletzungsquote": None,
+            "konfidenz_baende": [],
+            "portfolio_fit_hoch": None,
+            "zusammenfassung": None,
+            "fehler": [],
+        }
+        report = generate_track_record_report(eval_result)
+        assert "nan" not in report.lower()
+        assert "N/A" in report
+
+
 def _empty_result_with_fehler() -> dict:
     from concilium.evaluate import _empty_result
 
