@@ -345,6 +345,75 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
+def _validate_fundamentals(fundamentals: dict[str, Any]) -> list[str]:
+    """Prüft Fundamentals auf unplausible Werte und gibt deutsche Warn-Strings zurück.
+
+    Best-effort: Crasht nie, überspringt None-Werte stumm.
+    Leere Liste = alles plausibel.
+
+    Geprüfte Regeln:
+      - dividend_yield > 0.5 (50% Rendite) → ADR-/Datenfehler vermutet
+      - profit_margin > 1.0 (100%) → unplausible Gewinnmarge
+      - market_cap < 1e8 (100 Mio) → sehr geringe Marktkapitalisierung
+      - market_cap/revenue > 50 → ungewöhnlich hohe Bewertung (nur Hinweis)
+    """
+    warnings: list[str] = []
+
+    # --- Dividendenrendite > 50% (ADR-Fehler wie TSM: 1.05 = 105%) ---
+    dy = fundamentals.get("dividend_yield")
+    if dy is not None:
+        try:
+            dy_val = float(dy)
+            if dy_val > 0.5:
+                warnings.append(
+                    f"Unplausible Dividendenrendite von {dy_val * 100:.1f}% erkannt "
+                    "— vermutlich ADR-/Datenfehler."
+                )
+        except (TypeError, ValueError):
+            pass
+
+    # --- Gewinnmarge > 100% ---
+    pm = fundamentals.get("profit_margin")
+    if pm is not None:
+        try:
+            pm_val = float(pm)
+            if pm_val > 1.0:
+                warnings.append(
+                    f"Unplausible Gewinnmarge von {pm_val * 100:.1f}%."
+                )
+        except (TypeError, ValueError):
+            pass
+
+    # --- Sehr geringe Marktkapitalisierung (< 100 Mio USD) ---
+    mc = fundamentals.get("market_cap")
+    if mc is not None:
+        try:
+            mc_val = float(mc)
+            if mc_val < 1e8:
+                warnings.append(
+                    f"Sehr geringe Marktkapitalisierung ({mc_val:.0f}) — Daten prüfen."
+                )
+        except (TypeError, ValueError):
+            pass
+
+    # --- Ungewöhnlich hohe Bewertung: market_cap/revenue > 50 ---
+    rev = fundamentals.get("revenue")
+    if mc is not None and rev is not None:
+        try:
+            mc_val = float(mc)
+            rev_val = float(rev)
+            if rev_val > 0:
+                ratio = mc_val / rev_val
+                if ratio > 50:
+                    warnings.append(
+                        f"Ungewöhnlich hohe Bewertung (Marktkap./Umsatz = {ratio:.1f})."
+                    )
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+    return warnings
+
+
 def _fetch_macro_data() -> dict[str, Any]:
     """Holt Makro/Zins-Daten (10y US Treasury, S&P 500) — best effort, nie crashen.
 
@@ -657,6 +726,9 @@ def collect_ticker_data(
             "volume": _safe_float(row.get("Volume")),
         })
 
+    # --- Datenqualitäts-Validierung ---
+    data_warnings = _validate_fundamentals(fundamentals)
+
     return {
         "ticker": ticker,
         "fundamentals": fundamentals,
@@ -670,4 +742,6 @@ def collect_ticker_data(
         "macro": macro,
         # Feature 3: Peer-Vergleich
         "peers": peers_data,
+        # Datenqualitäts-Warnungen (immer eine Liste, auch leer)
+        "data_warnings": data_warnings,
     }

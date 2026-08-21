@@ -13,7 +13,7 @@ def _fmt(val: Any, suffix: str = "") -> str:
     try:
         fval = float(val)
         if abs(fval) >= 1e12:
-            return f"{fval / 1e12:.2f} Mrd{suffix}"
+            return f"{fval / 1e12:.2f} Bio{suffix}"
         if abs(fval) >= 1e9:
             return f"{fval / 1e9:.2f} Mrd{suffix}"
         if abs(fval) >= 1e6:
@@ -81,6 +81,15 @@ def generate_report(result: dict[str, Any]) -> str:
     lines.append("> ⚠️ **Disclaimer:** Dies ist keine Anlageberatung. Die Analysen basieren auf \
 LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
     lines.append("")
+
+    # --- Datenqualitäts-Hinweise (nur bei Warnungen) ---
+    data_warnings = data.get("data_warnings", [])
+    if data_warnings:
+        lines.append("## ⚠️ Datenqualitäts-Hinweise")
+        lines.append("")
+        for w in data_warnings:
+            lines.append(f"- {w}")
+        lines.append("")
 
     # === Übersicht ===
     lines.append("## 1. Übersicht")

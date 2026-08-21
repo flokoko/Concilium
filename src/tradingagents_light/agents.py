@@ -187,7 +187,7 @@ def _fmt_num(val: Any, suffix: str = "") -> str:
     try:
         fval = float(val)
         if abs(fval) >= 1e12:
-            return f"{fval / 1e12:.2f}B{suffix}"
+            return f"{fval / 1e12:.2f} Bio{suffix}"
         if abs(fval) >= 1e9:
             return f"{fval / 1e9:.2f} Mrd{suffix}"
         if abs(fval) >= 1e6:
@@ -211,6 +211,21 @@ def _build_data_text(data: dict[str, Any]) -> str:
     lines = [
         f"Aktie: {data.get('ticker', '?')} ({f.get('name', 'N/A')})",
         f"Sektor: {f.get('sector', 'N/A')} / {f.get('industry', 'N/A')}",
+    ]
+
+    # Datenqualitäts-Warnungen — LLM soll betroffene Kennzahlen kritisch bewerten
+    data_warnings = data.get("data_warnings", [])
+    if data_warnings:
+        lines.append("")
+        lines.append("=== DATENQUALITÄTS-WARNUNGEN ===")
+        lines.append(
+            "  Die folgenden Kennzahlen sind möglicherweise unzuverlässig "
+            "(ADR-Fehler, Datenfehler). Werte weiterhin anzeigen, aber kritisch bewerten:"
+        )
+        for w in data_warnings:
+            lines.append(f"  - {w}")
+
+    lines.extend([
         "",
         "=== FUNDAMENTALS ===",
         f"  Marktkapitalisierung: {_fmt_num(f.get('market_cap'), ' ')}",
@@ -243,7 +258,7 @@ def _build_data_text(data: dict[str, Any]) -> str:
         f"  Bollinger-Position: {_fmt_num(t.get('bollinger', {}).get('position'))} (0=unteres Band, 1=oberes Band)",
         f"  Volumen: {_fmt_num(t.get('current_volume'), ' ')}",
         f"  Ø Volumen 30T: {_fmt_num(t.get('avg_volume_30d'), ' ')}",
-    ]
+    ])
 
     # Feature 2: Makro/Zins-Daten
     if macro:
