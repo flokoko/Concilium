@@ -39,10 +39,14 @@ _WKN_RE = re.compile(r"^[A-Z0-9]{6}$")
 _ISIN_EXTRACT_RE = re.compile(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")
 
 # Yahoo Search API (kein API-Key nötig)
+# WICHTIG: Yahoo blockiert den vollen Chrome-User-Agent mit HTTP 429 (Too Many
+# Requests), obwohl der Endpoint eigentlich ohne Key funktioniert. Ein minimaler
+# UA ("Mozilla/5.0") umgeht das Rate-Limit zuverlässig (verifiziert).
 _YAHOO_SEARCH_URL = (
     "https://query1.finance.yahoo.com/v1/finance/search"
     "?q={query}&lang=de-DE&region=DE&quotesCount=5&newsCount=0"
 )
+_YAHOO_SEARCH_UA = "Mozilla/5.0"
 
 # wallstreet-online Suche (für WKN → ISIN)
 _WSO_SEARCH_URL = "https://www.wallstreet-online.de/suche?q={query}"
@@ -75,7 +79,7 @@ def _isin_to_ticker(isin: str) -> str:
     """
     url = _YAHOO_SEARCH_URL.format(query=isin)
     try:
-        resp = requests.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
+        resp = requests.get(url, timeout=15, headers={"User-Agent": _YAHOO_SEARCH_UA})
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
