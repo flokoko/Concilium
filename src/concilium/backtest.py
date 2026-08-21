@@ -32,6 +32,10 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
             "buy_hold_rendite": None,
             "outperformance": None,
             "signale": [],
+            "sharpe_ratio": None,
+            "max_drawdown_pct": None,
+            "win_rate_pct": None,
+            "anzahl_trades": 0,
             "hinweis": f"Zu wenig Historie ({len(history)} Tage, min. 200 nötig).",
         }
 
@@ -73,6 +77,10 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
             "buy_hold_rendite": None,
             "outperformance": None,
             "signale": [],
+            "sharpe_ratio": None,
+            "max_drawdown_pct": None,
+            "win_rate_pct": None,
+            "anzahl_trades": 0,
             "hinweis": "SMA200 konnte nicht berechnet werden.",
         }
 
@@ -90,12 +98,71 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
                 "close": round(float(row["close"]), 2) if pd.notna(row["close"]) else None,
             })
 
+    # --- Neue Kennzahlen: Sharpe, Max-Drawdown, Win-Rate ---
+    # Nur ab valid_start berechnen (wo SMAs gültig sind)
+    strat_returns = df["strategy_return"].iloc[valid_start:].dropna()
+    sharpe_ratio: float | None = None
+    max_drawdown_pct: float | None = None
+    win_rate_pct: float | None = None
+    anzahl_trades: int = 0
+
+    # Sharpe Ratio (annualisiert, rf=0)
+    if len(strat_returns) >= 2 and strat_returns.std() > 0:
+        sharpe_ratio = round(float(strat_returns.mean() / strat_returns.std() * (252**0.5)), 4)
+
+    # Max Drawdown der Strategie-Kurve
+    cum = df["cum_strategy"].iloc[valid_start:]
+    if len(cum) >= 2:
+        running_max = cum.cummax()
+        drawdown = (cum - running_max) / running_max
+        max_dd = drawdown.min()
+        if pd.notna(max_dd):
+            max_drawdown_pct = round(float(max_dd) * 100, 2)
+
+    # Win-Rate: Long-Signal-Abschnitte bis zum nächsten Signalwechsel
+    signal_series = df["signal"].iloc[valid_start:]
+    trades: list[bool] = []  # True = positiver Trade
+    in_long = False
+    entry_idx = None
+
+    for idx in range(len(signal_series)):
+        sig = signal_series.iloc[idx]
+        if sig == 1 and not in_long:
+            in_long = True
+            entry_idx = signal_series.index[idx]
+        elif sig == 0 and in_long:
+            # Long-Sektion endet — prüfe ob netto positiv
+            if entry_idx is not None:
+                entry_close = df.loc[entry_idx, "close"]
+                exit_close = df.loc[signal_series.index[idx], "close"]
+                if pd.notna(entry_close) and pd.notna(exit_close) and entry_close > 0:
+                    trades.append(exit_close > entry_close)
+                anzahl_trades += 1
+            in_long = False
+            entry_idx = None
+
+    # Offene Position am Ende abschließen (falls noch in Long)
+    if in_long and entry_idx is not None:
+        entry_close = df.loc[entry_idx, "close"]
+        exit_close = df["close"].iloc[-1]
+        if pd.notna(entry_close) and pd.notna(exit_close) and entry_close > 0:
+            trades.append(exit_close > entry_close)
+        anzahl_trades += 1
+
+    if len(trades) >= 1:
+        win_rate_pct = round(sum(trades) / len(trades) * 100, 2)
+
     return {
         "strategie_rendite": round(float(strat_final) * 100, 2) if pd.notna(strat_final) else None,
         "buy_hold_rendite": round(float(bh_final) * 100, 2) if pd.notna(bh_final) else None,
         "outperformance": round(float(strat_final - bh_final) * 100, 2) if pd.notna(strat_final) and pd.notna(bh_final) else None,
-        "signale": signal_dates[-10:],  # letzte 10 Signal-Wechsel
+        "signale": signal_dates[-10:],
         "anzahl_signale": len(signal_dates),
         "startdatum": df.loc[valid_start, "date"],
         "enddatum": df.iloc[-1]["date"],
+        # --- Neue Kennzahlen ---
+        "sharpe_ratio": sharpe_ratio,
+        "max_drawdown_pct": max_drawdown_pct,
+        "win_rate_pct": win_rate_pct,
+        "anzahl_trades": anzahl_trades,
     }

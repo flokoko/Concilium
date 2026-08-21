@@ -284,6 +284,10 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             lines.append(f"| Buy & Hold Rendite | {bt['buy_hold_rendite']} % |")
             lines.append(f"| Outperformance | {bt['outperformance']} % |")
             lines.append(f"| Anzahl Signale | {bt.get('anzahl_signale', 0)} |")
+            lines.append(f"| Sharpe Ratio (annualisiert) | {_fmt(bt.get('sharpe_ratio'))} |")
+            lines.append(f"| Max. Drawdown | {_fmt(bt.get('max_drawdown_pct'))} % |")
+            lines.append(f"| Win-Rate | {_fmt(bt.get('win_rate_pct'))} % |")
+            lines.append(f"| Anzahl Trades | {bt.get('anzahl_trades', 0)} |")
             lines.append(f"| Zeitraum | {bt.get('startdatum', '?')} – {bt.get('enddatum', '?')} |")
             lines.append("")
             if bt.get("signale"):
@@ -367,7 +371,15 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(f"**Risiko-Score:** {risk.get('risiko_score', 'N/A')} / 5")
         lines.append(f"**Volatilität:** {risk.get('volatilität_bewertung', 'N/A')}")
         lines.append(f"**Max. Drawdown (Schätzung):** {risk.get('max_drawdown_schaetzung', 'N/A')}")
-        lines.append(f"**Empf. Positionsgröße:** {risk.get('positionsgröße_empfohlen', 'N/A')}")
+        lines.append(f"**Empf. Positionsgröße (LLM):** {risk.get('positionsgröße_empfohlen', 'N/A')}")
+        lines.append(
+            f"**Positionsgröße (rechnerisch, Volatility-Targeting):** "
+            f"{risk.get('positionsgröße_rechnerisch_pct', 'N/A')} %"
+        )
+        if risk.get("volatilität_annualisiert_pct") is not None:
+            lines.append(
+                f"**Volatilität (annualisiert):** {risk.get('volatilität_annualisiert_pct', 'N/A')} %"
+            )
         lines.append(f"**Auflagen:** {risk.get('auflagen', 'N/A')}")
         lines.append(f"**Empfehlung:** {risk.get('empfehlung', 'N/A')}")
         lines.append("")

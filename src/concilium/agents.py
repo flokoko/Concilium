@@ -685,6 +685,78 @@ def ensemble_trader(
     return result
 
 
+def compute_position_size(
+    volatility: float | None,
+    risk_budget_pct: float = 2.0,
+    max_position_pct: float = 10.0,
+) -> float | None:
+    """Berechnet eine rechnerische Positionsgröße via Volatility-Targeting.
+
+    Formel: positions_pct = min(risk_budget_pct / volatility, max_position_pct)
+
+    Args:
+        volatility: Annualisierte Volatilität als Dezimalbruch (z.B. 0.30 = 30%).
+            Bei None, <= 0 oder nicht float-konvertierbar → None.
+        risk_budget_pct: Risiko-Budget in % (Default 2.0).
+        max_position_pct: Maximale Positionsgröße in % (Default 10.0).
+
+    Returns:
+        Empfohlene Positionsgröße in % (float) oder None bei ungültiger Volatilität.
+
+    Beispiel:
+        risk_budget 2%, annualisierte Vol 30% → 0.02/0.30 = 6.67% → 6.67%
+    """
+    if volatility is None:
+        return None
+    try:
+        vol = float(volatility)
+    except (TypeError, ValueError):
+        return None
+    if vol <= 0:
+        return None
+    positions_pct = risk_budget_pct / vol
+    return round(min(positions_pct, max_position_pct), 2)
+
+
+def _compute_annualized_volatility(data: dict[str, Any]) -> float | None:
+    """Berechnet die annualisierte Volatilität aus Tagesrenditen der Historie.
+
+    Verwendet data["history"] (Liste von dicts mit "close"-Werten).
+    Formel: std der Tagesrenditen * sqrt(252).
+
+    Returns:
+        Annualisierte Volatilität als Dezimalbruch (z.B. 0.30) oder None
+        bei fehlender/zu kurzer Historie.
+    """
+    history = data.get("history", [])
+    if not history or len(history) < 2:
+        return None
+    try:
+        closes = [float(h["close"]) for h in history if h.get("close") is not None]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if len(closes) < 2:
+        return None
+    # Tagesrenditen berechnen
+    returns: list[float] = []
+    for i in range(1, len(closes)):
+        if closes[i - 1] <= 0:
+            continue
+        returns.append((closes[i] - closes[i - 1]) / closes[i - 1])
+    if len(returns) < 2:
+        return None
+    # Std der Tagesrenditen
+    mean_r = sum(returns) / len(returns)
+    variance = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
+    std = variance**0.5
+    if std <= 0:
+        return None
+    import math
+
+    annualized = std * math.sqrt(252)
+    return round(annualized, 6)
+
+
 def risk_manager(
     trade: dict[str, Any],
     data: dict[str, Any],
@@ -692,6 +764,10 @@ def risk_manager(
     data_text: str | None = None,
 ) -> dict[str, Any]:
     """Bewertet Risiko des Trades.
+
+    Der LLM-basierte Risk-Manager-Aufruf bleibt unverändert. Zusätzlich wird
+    eine rechnerische Positionsgröße via Volatility-Targeting ergänzt
+    (positionsgröße_rechnerisch_pct, volatilität_annualisiert_pct).
 
     Args:
         trade: Trade-Vorschlag vom Trader/Ensemble.
@@ -705,7 +781,16 @@ def risk_manager(
         data_text = _build_data_text(data)
 
     user_text = f"Trade-Vorschlag:\n{trade_text}\n\nMarktdaten:\n{data_text}"
-    return _call_agent(llm, SYSTEM_RISK, user_text)
+    risk = _call_agent(llm, SYSTEM_RISK, user_text)
+
+    # --- Rechnerische Positionsgröße via Volatility-Targeting ---
+    annualized_vol = _compute_annualized_volatility(data)
+    risk["volatilität_annualisiert_pct"] = (
+        round(annualized_vol * 100, 2) if annualized_vol is not None else None
+    )
+    risk["positionsgröße_rechnerisch_pct"] = compute_position_size(annualized_vol)
+
+    return risk
 
 
 def portfolio_manager(

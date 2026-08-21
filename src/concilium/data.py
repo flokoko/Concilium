@@ -405,6 +405,12 @@ _POSITIVE_WORDS = {
     "growth", "upgrade", "bullish", "strong", "breakthrough", "win", "deal",
     "launch", "innovation", "expand", "acquire", "approve", "rise", "jump",
     "boom", "optimistic", "outperform", "raise", "boost",
+    # --- Erweitert (deutsch/englisch) ---
+    "gewinn", "wachstum", "anstieg", "steigt", "plus", "ertrag",
+    "turnaround", "rebound", "erholung", "aufschwung", "rekord",
+    "uebertrifft", "uebererfuellt", "starke", "erhoehung",
+    # Umlaut-Versionen (für direkten Token-Match)
+    "übertrifft", "übererfüllt", "erhöhung",
 }
 
 _NEGATIVE_WORDS = {
@@ -412,22 +418,98 @@ _NEGATIVE_WORDS = {
     "weak", "lawsuit", "fraud", "recall", "bankrupt", "crash", "decline",
     "fear", "risk", "warning", "halt", "suspend", "investigate", "sell-off",
     "slump", "dive", "tumble", "disappoint", "delay", "close", "fire",
+    # --- Erweitert (deutsch/englisch) ---
+    "verlust", "ruecklaeufig", "rueckgang", "sturz", "krise", "sorgen",
+    "druck", "verfehlt", "gewinnwarnung", "schwach", "minus",
+    "absturz", "belastung", "einbruch",
+    # Umlaut-Versionen
+    "rückläufig", "rückgang", "druck", "unterdruck",
+    "unterdruck", "fall",
 }
+
+# Negationswörter (deutsch/englisch). Wenn eines dieser Wörter unmittelbar
+# (0-2 Wörter Abstand) vor einem positiven/negativen Keyword steht, wird
+# die Bewertung dieses Keywords invertiert.
+_NEGATION_WORDS = {
+    "nicht", "kein", "keine", "keinen", "ohne", "weniger", "trotz",
+    "mangelnd", "fehlend", "no", "not", "never", "none", "weder",
+}
+
+
+def _token_matches_keyword(token: str, keywords: set[str]) -> bool:
+    """Prüft, ob ein Token ein Keyword aus der Menge matcht.
+
+    Match-Strategie: Zuerst exakter Token-Match, dann Suffix-basierte
+    Flexions-Erkennung (z.B. "surges" → "surge" + "s").
+    Vermeidet falsche Substring-Matches wie "rise" in "krise".
+    """
+    # 1. Exakter Match
+    if token in keywords:
+        return True
+    # 2. Flexionsformen: Keyword + bis zu 3 Zeichen Suffix (z.B. "surge" + "s")
+    for kw in keywords:
+        if len(kw) < 4:
+            continue
+        if token.startswith(kw) and len(token) - len(kw) <= 3:
+            return True
+    return False
 
 
 def _classify_headline(headline: str) -> str:
     """Klassifiziert eine einzelne Headline als 'positiv', 'negativ' oder 'neutral'.
 
     Wird von _count_sentiment und _count_sentiment_weighted gemeinsam genutzt.
+
+    Negations-Handling: Wenn ein Negationswort 0-2 Wörter vor einem positiven
+    oder negativen Keyword steht, wird die Bewertung dieses Keywords invertiert
+    (positiv→negativ, negativ→positiv).
     """
     text = headline.lower()
-    found_pos = any(w in text for w in _POSITIVE_WORDS)
-    found_neg = any(w in text for w in _NEGATIVE_WORDS)
-    if found_pos and not found_neg:
+    tokens = text.split()
+
+    pos_score = 0
+    neg_score = 0
+
+    for i, token in enumerate(tokens):
+        # Token bereinigen (Satzzeichen am Anfang/Ende entfernen)
+        clean = token.strip(".,!?;:\"'()[]{}")
+
+        # Prüfen, ob das Token ein Keyword matcht
+        matched_positive = _token_matches_keyword(clean, _POSITIVE_WORDS)
+        matched_negative = _token_matches_keyword(clean, _NEGATIVE_WORDS)
+
+        if not matched_positive and not matched_negative:
+            continue
+
+        # Prüfen, ob ein Negationswort in den vorangehenden 0-2 Wörtern steht
+        negated = False
+        for j in range(max(0, i - 2), i):
+            prev_token = tokens[j].strip(".,!?;:\"'()[]{}")
+            if prev_token in _NEGATION_WORDS:
+                negated = True
+                break
+
+        # Bewertung anwenden (mit Invertierung bei Negation)
+        if matched_positive:
+            if negated:
+                neg_score += 1
+            else:
+                pos_score += 1
+        if matched_negative:
+            if negated:
+                pos_score += 1
+            else:
+                neg_score += 1
+
+    if pos_score > 0 and neg_score == 0:
         return "positiv"
-    if found_neg and not found_pos:
+    if neg_score > 0 and pos_score == 0:
         return "negativ"
-    # Gemischte Headline (pos+neg) oder gar keine Keywords → neutral
+    if pos_score > neg_score:
+        return "positiv"
+    if neg_score > pos_score:
+        return "negativ"
+    # Gleichstand oder keine Keywords → neutral
     return "neutral"
 
 
