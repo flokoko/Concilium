@@ -397,3 +397,145 @@ Obiger Report zeigt nur den Datensnapshot._")
         lines.append("Entscheidung im Journal gespeichert: journal/decisions.csv")
 
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Track-Record-Report
+# --------------------------------------------------------------------------- #
+
+
+def _fmt_pct2(val: Any) -> str:
+    """Formatiert einen Anteil (0-1) als Prozentangabe."""
+    if val is None:
+        return "N/A"
+    try:
+        return f"{float(val) * 100:.1f} %"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _fmt_num(val: Any, suffix: str = "") -> str:
+    """Formatiert eine Zahl (z.B. Rendite) mit 2 Nachkommastellen."""
+    if val is None:
+        return "N/A"
+    try:
+        return f"{float(val):.2f}{suffix}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def generate_track_record_report(eval_result: dict[str, Any]) -> str:
+    """Generiert einen deutschen Markdown-Track-Record-Report.
+
+    Erzeugt einen strukturierten Report mit Übersicht, Aktions-Tabellen,
+    Konfidenz-Bändern, Portfolio-Fit-Zusammenhang und LLM-Zusammenfassung.
+
+    Args:
+        eval_result: Das dict aus evaluate_journal().
+
+    Returns:
+        Markdown-String mit Tabellen und Disclaimer-Footer.
+    """
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    lines: list[str] = []
+
+    lines.append("# Concilium Track-Record-Evaluierung")
+    lines.append("")
+    lines.append(f"**Erstellt am:** {now}")
+    lines.append(f"**Bewertungszeitraum:** Letzte {eval_result.get('lookback_days', 90)} Tage (falls zutreffend)")
+    lines.append("")
+
+    # Disclaimer
+    lines.append(
+        '> ⚠️ **Disclaimer:** Dies ist keine Anlageberatung. Die Evaluierung basiert '
+        "auf historischen Kursdaten und Heuristiken und dienen nur Demonstrationszwecken."
+    )
+    lines.append("")
+
+    n = eval_result.get("anzahl_entscheidungen", 0)
+
+    # --- Übersicht ---
+    lines.append("## Übersicht")
+    lines.append("")
+    lines.append("| Kennzahl | Wert |")
+    lines.append("|---|---|")
+    lines.append(f"| Anzahl Entscheidungen | {n} |")
+    lines.append(f"| Hit-Rate gesamt | {_fmt_pct2(eval_result.get('hit_rate_gesamt'))} |")
+    lines.append(
+        f"| Durchschnittliche Rendite | {_fmt_num(eval_result.get('durchschnitt_rendite_gesamt'), ' %')} |"
+    )
+    lines.append(
+        f"| Zielkurs-Trefferquote | {_fmt_pct2(eval_result.get('zielkurs_trefferquote'))} |"
+    )
+    lines.append(
+        f"| Stop-Verletzungsquote | {_fmt_pct2(eval_result.get('stop_verletzungsquote'))} |"
+    )
+    lines.append("")
+
+    # --- Tabelle nach Aktion ---
+    lines.append("## Bewertung nach Aktion")
+    lines.append("")
+    lines.append("| Aktion | n | Hit-Rate | Ø Rendite |")
+    lines.append("|---|---|---|---|")
+    nach_aktion = eval_result.get("nach_aktion", {})
+    for action in ("KAUFEN", "HALTEN", "VERKAUFEN"):
+        a = nach_aktion.get(action, {})
+        lines.append(
+            f"| {action} | {a.get('n', 0)} | "
+            f"{_fmt_pct2(a.get('hit_rate'))} | "
+            f"{_fmt_num(a.get('avg_rendite'), ' %')} |"
+        )
+    lines.append("")
+
+    # --- Konfidenz-Bänder ---
+    konfidenz_baende = eval_result.get("konfidenz_baende", [])
+    if konfidenz_baende:
+        lines.append("## Konfidenz-Bänder (Trefferquote nach Confidence)")
+        lines.append("")
+        lines.append("| Band | n | Hit-Rate |")
+        lines.append("|---|---|---|")
+        for b in konfidenz_baende:
+            lines.append(
+                f"| {b.get('band', '?')} | {b.get('n', 0)} | "
+                f"{_fmt_pct2(b.get('hit_rate'))} |"
+            )
+        lines.append("")
+        lines.append(
+            "_Bänder: hoch (≥4), mittel (3), niedrig (≤2). "
+            "Steigt die Hit-Rate mit höherer Confidence?_"
+        )
+        lines.append("")
+
+    # --- Portfolio-Fit ---
+    pf = eval_result.get("portfolio_fit_hoch")
+    if pf is not None:
+        lines.append("## Portfolio-Fit-Zusammenhang")
+        lines.append("")
+        lines.append("| Kennzahl | Wert |")
+        lines.append("|---|---|")
+        lines.append(f"| n (Portfolio-Fit ≥ 4) | {pf.get('n', 0)} |")
+        lines.append(f"| Hit-Rate (hohes Portfolio-Fit) | {_fmt_pct2(pf.get('hit_rate'))} |")
+        lines.append("")
+
+    # --- LLM-Zusammenfassung ---
+    zusammenfassung = eval_result.get("zusammenfassung")
+    if zusammenfassung:
+        lines.append("## LLM-Zusammenfassung")
+        lines.append("")
+        lines.append(zusammenfassung)
+        lines.append("")
+
+    # --- Fehler ---
+    fehler = eval_result.get("fehler", [])
+    if fehler:
+        lines.append("## Fehlerhinweise")
+        lines.append("")
+        for f in fehler:
+            lines.append(f"- {f}")
+        lines.append("")
+
+    # --- Footer ---
+    lines.append("---")
+    lines.append("*Erstellt von Concilium Track-Record-Evaluator · Keine Anlageberatung*")
+
+    return "\n".join(lines)

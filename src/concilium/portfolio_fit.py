@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
+import os
 import urllib.request
 from typing import Any
 
 from .agents import _build_data_text, _call_agent
+from .data import _get_cache_dir, _get_today_key
 from .llm import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -189,21 +192,93 @@ def _parse_positions(csv_text: str) -> list[dict[str, Any]]:
     return positions
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Tages-Cache für Portfolio-Sheet (gleicher Cache-Mechanismus wie data.py)
+# --------------------------------------------------------------------------- #
+
+
+def _portfolio_cache_path(cache_dir: str, today_key: str) -> str:
+    """Dateipfad für den Portfolio-Sheet-Cache."""
+    return os.path.join(cache_dir, f"portfolio_{today_key}.json")
+
+
+def _load_portfolio_cache(today_key: str | None = None) -> list[dict[str, Any]] | None:
+    """Lädt gecachte Portfolio-Positionen, wenn der Cache heute ist.
+
+    Returns:
+        Liste von Positions-Dicts oder None bei Cache-Miss/Fehler/Deaktiviert.
+    """
+    cache_dir = _get_cache_dir()
+    if cache_dir is None:
+        return None  # Cache deaktiviert
+    if today_key is None:
+        today_key = _get_today_key()
+
+    path = _portfolio_cache_path(cache_dir, today_key)
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            entry = json.load(fh)
+        if entry.get("cache_date") != today_key:
+            return None
+        data = entry.get("data")
+        if not isinstance(data, list):
+            return None
+        logger.info("Portfolio-Cache-Treffer (%s)", today_key)
+        return data
+    except Exception as exc:  # noqa: BLE001 — Cache-Lesen crasht nie
+        logger.debug("Portfolio-Cache-Lesen fehlgeschlagen: %s", exc)
+        return None
+
+
+def _save_portfolio_cache(
+    positions: list[dict[str, Any]],
+    today_key: str | None = None,
+) -> None:
+    """Speichert Portfolio-Positionen im Tages-Cache (best effort)."""
+    cache_dir = _get_cache_dir()
+    if cache_dir is None:
+        return  # Cache deaktiviert
+    if today_key is None:
+        today_key = _get_today_key()
+
+    path = _portfolio_cache_path(cache_dir, today_key)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"cache_date": today_key, "data": positions},
+                fh,
+                ensure_ascii=False,
+            )
+        logger.info("Portfolio-Cache gespeichert (%s)", today_key)
+    except Exception as exc:  # noqa: BLE001 — Cache-Schreiben crasht nie
+        logger.debug("Portfolio-Cache-Schreiben fehlgeschlagen: %s", exc)
+
+
+# --------------------------------------------------------------------------- #
 # Portfolio-Loader (Netzwerk, niemals crashen)
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- #
 
 
 def fetch_portfolio_positions() -> list[dict[str, Any]]:
     """Lädt Florians Depot aus dem Google-Sheet (CSV-Export).
 
-    Verwendet nur Python-Stdlib (urllib.request, csv, io) — keine neuen Dependencies.
+    Verwendet einen Tages-Cache (Key: portfolio_YYYY-MM-DD), sodass das Sheet
+    nur einmal pro Tag geladen wird. Cache deaktivierbar via
+    CONCILIUM_CACHE_DIR="" (leerer String).
 
     Returns:
         Liste von Positions-Dicts (siehe _parse_positions).
         Bei jedem Fehler (Netzwerk, CSV-Parse, keine Positionen): leere Liste [].
         NIEMALS crashen.
     """
+    # Tages-Cache prüfen
+    cached = _load_portfolio_cache()
+    if cached is not None:
+        return cached
+
     try:
         req = urllib.request.Request(  # noqa: S310 — HTTPS zu Google Sheets
             _PORTFOLIO_URL,
@@ -219,6 +294,8 @@ def fetch_portfolio_positions() -> list[dict[str, Any]]:
             return []
 
         logger.info("Portfolio geladen: %d Positionen.", len(positions))
+        # Im Tages-Cache speichern
+        _save_portfolio_cache(positions)
         return positions
 
     except Exception as exc:  # noqa: BLE001 — niemals crashen
