@@ -112,6 +112,22 @@ def _safe_float(val: str | None) -> float | None:
         return None
 
 
+def _infer_type(name: str, symbol: str) -> str:
+    """Leitet den Positionstyp aus Name/Symbol ab (ETF, Commodity, sonst Aktie).
+
+    Gleiche Heuristik wie scripts/load_portfolio.py im Hermes-Setup:
+    - ETF: Name enthält ISHS/ISHR/ISHARES (iShares).
+    - Commodity: Name enthält GOLD oder COCOA oder WISDOMTREE.
+    - Sonst: Stock (Aktie).
+    """
+    n = name.upper()
+    if "GOLD" in n or "COCOA" in n or "WISDOMTREE" in n:
+        return "Commodity"
+    if "ISHS" in n or "ISHR" in n or "ISHARES" in n:
+        return "ETF"
+    return "Aktie"
+
+
 # ---------------------------------------------------------------------------
 # CSV-Parser (testbar ohne Netzwerk)
 # ---------------------------------------------------------------------------
@@ -156,15 +172,9 @@ def _parse_positions(csv_text: str) -> list[dict[str, Any]]:
         # Marktwert (kann None sein)
         value_eur = _safe_float(row.get("Marktwert"))
 
-        # Typ ableiten: Region-basiert als Heuristic
-        if region in ("Deutschland", "Europa"):
-            typ = "Aktie"
-        elif region in ("USA", "Nordamerika"):
-            typ = "Aktie"
-        elif region in ("ETF", "Fonds"):
-            typ = "ETF"
-        else:
-            typ = "Aktie"
+        # Typ ableiten (gleiche Heuristik wie scripts/load_portfolio.py):
+        # anhand Name/Symbol — ISHS/ISHR = ETF, GOLD/COCOA = Commodity, sonst Stock.
+        typ = _infer_type(name, sheet_symbol)
 
         positions.append({
             "name": name,
