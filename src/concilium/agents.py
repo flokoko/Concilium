@@ -375,8 +375,23 @@ def debate(analysts: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
     return {"bull": bull, "bear": bear}
 
 
-def trader(analysts: dict[str, Any], debate_result: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
-    """Erstellt Trade-Vorschlag aus Analysten + Debatte."""
+def trader(
+    analysts: dict[str, Any],
+    debate_result: dict[str, Any],
+    llm: LLMClient,
+    temperature: float = 0.3,
+) -> dict[str, Any]:
+    """Erstellt Trade-Vorschlag aus Analysten + Debatte.
+
+    Args:
+        analysts: Analysten-Ergebnisse.
+        debate_result: Bull/Bear-Debatte-Ergebnis.
+        llm: LLMClient.
+        temperature: Sampling-Temperatur für den LLM-Call (Default 0.3).
+            Wird von ``ensemble_trader`` pro Run variiert, um eine
+            Mehrheitsabstimmung über unterschiedlich sampling-erzeugte Trades
+            durchzuführen.
+    """
     summary = _analyst_summary_text(analysts)
     bull_text = debate_result.get("bull", {}).get("_raw", "")
     bear_text = debate_result.get("bear", {}).get("_raw", "")
@@ -386,7 +401,7 @@ def trader(analysts: dict[str, Any], debate_result: dict[str, Any], llm: LLMClie
         f"Bull-Argumentation:\n{bull_text}\n\n"
         f"Bear-Argumentation:\n{bear_text}"
     )
-    return _call_agent(llm, SYSTEM_TRADER, user_text)
+    return _call_agent(llm, SYSTEM_TRADER, user_text, temperature=temperature)
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +529,7 @@ def ensemble_trader(
     all_runs: list[dict[str, Any]] = []
     for temp in temps:
         try:
-            run = trader(analysts, debate_result, llm)
+            run = trader(analysts, debate_result, llm, temperature=temp)
             all_runs.append(run)
         except Exception as exc:  # noqa: BLE001 — nie crashen
             logger.warning("Ensemble-Run fehlgeschlagen (temp=%.1f): %s", temp, exc)

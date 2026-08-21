@@ -179,10 +179,10 @@ class TestSingleFallback:
 
         original_trader = agents_mod.trader
 
-        def patched_trader(analysts, debate_result, llm_arg):
+        def patched_trader(analysts, debate_result, llm_arg, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                return original_trader(analysts, debate_result, llm_arg)
+                return original_trader(analysts, debate_result, llm_arg, **kwargs)
             raise RuntimeError("LLM-Aussetzer")
 
         with patch.object(agents_mod, "trader", patched_trader):
@@ -246,3 +246,53 @@ class TestPlausibilityHelpers:
         trade = {"aktion": "HALTEN", "zielkurs": 32.0, "stop_loss": 60.0}
         fixed = _fix_implausible_trade(trade, current_price=57.0)
         assert fixed == trade
+
+
+class TestTemperaturePassThrough:
+    """Test: ensemble_trader reicht verschiedene Temperaturen an den LLM-Call durch."""
+
+    def test_temperatures_match_default_spread(self):
+        """Bei runs=3 müssen die Temperaturen [0.3, 0.5, 0.7] sein."""
+        # Je nach Temperatur unterschiedliche Aktion → Mehrheit KAUFEN
+        llm = _FakeLLM([
+            _trader_json("KAUFEN", zielkurs=65.0, stop_loss=50.0),   # temp=0.3
+            _trader_json("HALTEN"),                                    # temp=0.5
+            _trader_json("KAUFEN", zielkurs=62.0, stop_loss=52.0),   # temp=0.7
+        ])
+
+        result = ensemble_trader(_ANALYSTS, _DEBATE, llm, runs=3)
+
+        # Temperaturen wurden korrekt durchgereicht
+        assert llm.temperatures_seen == [0.3, 0.5, 0.7]
+
+        # Mehrheitsabstimmung funktioniert (2x KAUFEN, 1x HALTEN)
+        assert result["aktion"] == "KAUFEN"
+        assert result["_ensemble"]["mehrheits_aktion"] == "KAUFEN"
+        assert result["_ensemble"]["alle_aktionen"] == ["KAUFEN", "HALTEN", "KAUFEN"]
+
+    def test_temperature_varies_per_run_not_constant(self):
+        """Stellt sicher, dass NICHT alle Runs mit 0.3 laufen (der Bug)."""
+        llm = _FakeLLM([
+            _trader_json("KAUFEN", zielkurs=65.0, stop_loss=50.0),
+            _trader_json("KAUFEN", zielkurs=65.0, stop_loss=50.0),
+            _trader_json("KAUFEN", zielkurs=65.0, stop_loss=50.0),
+        ])
+
+        ensemble_trader(_ANALYSTS, _DEBATE, llm, runs=3)
+
+        # Vor dem Fix waren alle Temperaturen 0.3 — jetzt müssen sie variieren
+        assert len(set(llm.temperatures_seen)) > 1, (
+            f"Temperaturen sollten variieren, war aber: {llm.temperatures_seen}"
+        )
+
+    def test_custom_temperature_range(self):
+        """Eigener Temperatur-Range wird korrekt durchgereicht."""
+        custom = [0.1, 0.9]
+        llm = _FakeLLM([
+            _trader_json("KAUFEN", zielkurs=65.0, stop_loss=50.0),
+            _trader_json("HALTEN"),
+        ])
+
+        ensemble_trader(_ANALYSTS, _DEBATE, llm, runs=2, temperature_range=custom)
+
+        assert llm.temperatures_seen == [0.1, 0.9]
