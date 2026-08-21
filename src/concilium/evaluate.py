@@ -216,6 +216,49 @@ def _find_price_on_or_after(
 # Einzelentscheidung bewerten
 # --------------------------------------------------------------------------- #
 
+# 5-stufige Rating-Skala (Index-Mapping)
+_RATING_INDEX_MAP = {
+    "STARK KAUFEN": 0,
+    "KAUFEN": 1,
+    "HALTEN": 2,
+    "VERKAUFEN": 3,
+    "STARK VERKAUFEN": 4,
+}
+
+
+def _rating_index(rating: str) -> int | None:
+    """Mapt eine 5-stufige Bewertung auf ihren Index 0..4.
+
+    Unknown/leer -> None.
+    """
+    r = (rating or "").strip().upper()
+    return _RATING_INDEX_MAP.get(r)
+
+
+def _outcome_rating_index(rendite_pct: float | None) -> int | None:
+    """Mapt die tatsächliche Rendite auf einen 5-stufigen Outcome-Index.
+
+    Regel (kommentiert):
+      rendite > +2%   -> STARK KAUFEN (0)
+      0%..+2%         -> KAUFEN (1)
+      -2%..0%         -> VERKAUFEN (3)  [leicht negativ = bearish]
+      < -2%           -> STARK VERKAUFEN (4)
+      |rendite| <= 2% aber rund um 0 -> HALTEN (2) nur bei |rendite| <= 2%
+
+    Praktisch: >+2% -> 0, >0% -> 1, <=-2% -> 4, <0% -> 3, sonst -> 2.
+    """
+    if rendite_pct is None:
+        return None
+    if rendite_pct > 2.0:
+        return 0  # STARK KAUFEN
+    if rendite_pct > 0.0:
+        return 1  # KAUFEN
+    if rendite_pct < -2.0:
+        return 4  # STARK VERKAUFEN
+    if rendite_pct < 0.0:
+        return 3  # VERKAUFEN
+    return 2  # HALTEN (rendite == 0 oder sehr kleine Schwankung)
+
 
 def _evaluate_single(
     row: dict[str, Any],
@@ -233,6 +276,7 @@ def _evaluate_single(
     action = (row.get("action") or "").strip().upper()
     timestamp = row.get("timestamp", "")
     decision_date = _parse_timestamp(timestamp)
+    rating = (row.get("rating") or "").strip().upper()
 
     # Leeres Ergebnis bei unbrauchbaren Daten
     empty = {
@@ -241,6 +285,8 @@ def _evaluate_single(
         "ziel_erreicht": None,
         "stop_gerissen": None,
         "action": action,
+        "rating": rating,
+        "rating_distance": None,
         "confidence": _safe_float(row.get("confidence")),
         "portfolio_fit_score": _safe_float(row.get("portfolio_fit_score")),
         "ticker": row.get("ticker", ""),
@@ -330,12 +376,21 @@ def _evaluate_single(
         # Halten ist "richtig" wenn Kurs ±5% stabil geblieben ist
         hit = abs(rendite_pct) <= 5.0
 
+    # Rating-Distanz: Abstand zwischen bewerteter Aktion und tatsächlichem Outcome
+    rating_distance: int | None = None
+    rating_idx = _rating_index(rating)
+    outcome_idx = _outcome_rating_index(rendite_pct)
+    if rating_idx is not None and outcome_idx is not None:
+        rating_distance = abs(rating_idx - outcome_idx)
+
     return {
         "hit": hit,
         "rendite_pct": rendite_pct,
         "ziel_erreicht": ziel_erreicht,
         "stop_gerissen": stop_gerissen,
         "action": action,
+        "rating": rating,
+        "rating_distance": rating_distance,
         "confidence": _safe_float(row.get("confidence")),
         "portfolio_fit_score": _safe_float(row.get("portfolio_fit_score")),
         "ticker": row.get("ticker", ""),
@@ -359,6 +414,7 @@ def _empty_result() -> dict[str, Any]:
         },
         "hit_rate_gesamt": None,
         "durchschnitt_rendite_gesamt": None,
+        "durchschnitt_rating_distanz": None,
         "zielkurs_trefferquote": None,
         "stop_verletzungsquote": None,
         "konfidenz_baende": [],
@@ -456,6 +512,17 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
             "hit_rate": len(pf_hits) / pf_rated if pf_rated > 0 else None,
             "n": len(pf_hoch),
         }
+
+    # --- Durchschnittliche Rating-Distanz ---
+    # Nur Zeilen mit gültigem rating_distance (int, nicht None)
+    rating_distances = [
+        e["rating_distance"]
+        for e in evaluations
+        if e.get("rating_distance") is not None
+    ]
+    result["durchschnitt_rating_distanz"] = (
+        sum(rating_distances) / len(rating_distances) if rating_distances else None
+    )
 
     return result
 
@@ -594,3 +661,104 @@ def evaluate_journal(
         result["zusammenfassung"] = _build_llm_summary(result, llm)
 
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Realisierter Return für eine einzelne Journal-Zeile (für Reflexion)
+# --------------------------------------------------------------------------- #
+
+
+def realised_return_for_row(row: dict[str, Any], lookback_days: int = 30) -> dict[str, Any] | None:
+    """Berechnet den realisierten Return für eine einzelne Journal-Zeile.
+
+    Nutzt die vorhandenen Helper _load_price_history / _find_price_on_or_before /
+    _find_price_on_or_after. Invertiert die Rendite für VERKAUFEN/STARK VERKAUFEN
+    (analog _evaluate_single). Berechnet zusätzlich den SPY-Return über das
+    gleiche Zeitfenster und den Alpha (raw - spy).
+
+    Args:
+        row: Journal-Zeile (dict mit mindestens 'ticker', 'timestamp', 'action').
+        lookback_days: Zeitfenster in Tagen (Default 30).
+
+    Returns:
+        dict mit ticker, entry_price, exit_price, raw_return_pct,
+        spy_return_pct, alpha_pct, timestamp, action — oder None bei
+        irgendeinem Fehler (never raises).
+    """
+    try:
+        ticker = (row.get("ticker") or "").strip()
+        if not ticker:
+            return None
+
+        timestamp = row.get("timestamp", "")
+        decision_date = _parse_timestamp(timestamp)
+        if decision_date is None:
+            return None
+
+        action = (row.get("action") or "").strip().upper()
+
+        # Preisgeschichte laden
+        prices = _load_price_history(ticker, lookback_days=lookback_days)
+        if not prices:
+            return None
+
+        # Entry: Kurs am oder vor Entscheidungsdatum
+        entry_row = _find_price_on_or_before(prices, decision_date)
+        if entry_row is None:
+            entry_row = prices[0]
+        entry_price = _safe_float(entry_row.get("close"))
+        if entry_price is None or entry_price <= 0:
+            return None
+
+        # Exit: Kurs am oder nach decision_date + lookback_days, clamped to today
+        today = datetime.now()
+        end_date = decision_date + timedelta(days=lookback_days)
+        eval_end = min(end_date, today)
+
+        exit_row = _find_price_on_or_before(prices, eval_end)
+        if exit_row is None:
+            exit_row = prices[-1]
+        exit_price = _safe_float(exit_row.get("close"))
+        if exit_price is None:
+            return None
+
+        # Rendite berechnen
+        price_change_pct = (exit_price - entry_price) / entry_price * 100.0
+        if action in ("VERKAUFEN", "STARK VERKAUFEN"):
+            raw_return_pct = -price_change_pct
+        else:
+            raw_return_pct = price_change_pct
+
+        # SPY-Return über das gleiche Fenster
+        spy_return_pct: float | None = None
+        alpha_pct: float | None = None
+        try:
+            spy_prices = _load_price_history("SPY", lookback_days=lookback_days)
+            if spy_prices:
+                spy_entry = _find_price_on_or_before(spy_prices, decision_date)
+                if spy_entry is None:
+                    spy_entry = spy_prices[0]
+                spy_exit = _find_price_on_or_before(spy_prices, eval_end)
+                if spy_exit is None:
+                    spy_exit = spy_prices[-1]
+                spy_entry_price = _safe_float(spy_entry.get("close"))
+                spy_exit_price = _safe_float(spy_exit.get("close"))
+                if spy_entry_price is not None and spy_exit_price is not None and spy_entry_price > 0:
+                    spy_return_pct = (spy_exit_price - spy_entry_price) / spy_entry_price * 100.0
+                    alpha_pct = raw_return_pct - spy_return_pct
+        except Exception as spy_exc:  # noqa: BLE001 — best effort
+            logger.debug("SPY-Return konnte nicht berechnet werden: %s", spy_exc)
+
+        return {
+            "ticker": ticker,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "raw_return_pct": raw_return_pct,
+            "spy_return_pct": spy_return_pct,
+            "alpha_pct": alpha_pct,
+            "timestamp": timestamp,
+            "action": action,
+        }
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("realised_return fehlgeschlagen für Zeile: %s", exc)
+        return None

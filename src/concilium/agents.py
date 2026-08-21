@@ -97,10 +97,14 @@ SYSTEM_TRADER = """\
 Du bist ein professioneller Trader. Basierend auf den Analysten-Einschätzungen und \
 der Bull/Bear-Debatte erstellst du einen konkreten Trade-Vorschlag.
 
+Nutze die volle 5-stufige Skala. 'STARK KAUFEN'/'STARK VERKAUFEN' nur bei hoher \
+Überzeugung (sehr klare Fundamental- und/oder technische Signale). Bei Unsicherheit \
+nimm 'KAUFEN'/'VERKAUFEN' bzw. 'HALTEN'.
+
 Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 {
   "rolle": "Trader",
-  "aktion": "KAUFEN" | "HALTEN" | "VERKAUFEN",
+  "aktion": "STARK KAUFEN" | "KAUFEN" | "HALTEN" | "VERKAUFEN" | "STARK VERKAUFEN",
   "zielkurs": "Zielkurs als Zahl oder null",
   "stop_loss": "Stop-Loss als Zahl oder null",
   "positionsanteil": "Empfohlener Positionsanteil in % (z.B. 5)",
@@ -108,6 +112,26 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
   "zeithorizont": "Kurzfristig" | "Mittelfristig" | "Langfristig"
 }
 """
+
+# 5-stufige Rating-Skala (von bullisch zu bearisch)
+RATING_5 = ["STARK KAUFEN", "KAUFEN", "HALTEN", "VERKAUFEN", "STARK VERKAUFEN"]
+
+
+def _rating_to_action(rating: str) -> str:
+    """Mapt eine 5-stufige Bewertung auf die 3-stufige Aktion (Rückwärtskompatibilität).
+
+    STARK KAUFEN/KAUFEN -> KAUFEN; HALTEN -> HALTEN;
+    VERKAUFEN/STARK VERKAUFEN -> VERKAUFEN.
+    Unbekannt/leer -> HALTEN.
+    """
+    r = (rating or "").strip().upper()
+    if r in ("STARK KAUFEN", "KAUFEN"):
+        return "KAUFEN"
+    if r == "HALTEN":
+        return "HALTEN"
+    if r in ("VERKAUFEN", "STARK VERKAUFEN"):
+        return "VERKAUFEN"
+    return "HALTEN"
 
 SYSTEM_RISK = """\
 Du bist ein Risk-Manager. Du bewertest das Risiko eines vorgeschlagenen Trades \
@@ -422,6 +446,7 @@ def trader(
     llm: LLMClient,
     temperature: float = 0.3,
     feedback_context: str = "",
+    reflection_context: str = "",
 ) -> dict[str, Any]:
     """Erstellt Trade-Vorschlag aus Analysten + Debatte.
 
@@ -436,6 +461,9 @@ def trader(
         feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
             Feedback). Wird am Ende des User-Prompts angehängt, damit der
             Trader seine Kalibrierung an der Historie ausrichten kann.
+        reflection_context: Optionaler Reflexions-Block (leer = keine
+            Reflexion). Wird nach feedback_context am Ende des User-Prompts
+            angehängt.
     """
     summary = _analyst_summary_text(analysts)
     bull_text = debate_result.get("bull", {}).get("_raw", "")
@@ -448,7 +476,14 @@ def trader(
     )
     if feedback_context:
         user_text += f"\n\n{feedback_context}"
-    return _call_agent(llm, SYSTEM_TRADER, user_text, temperature=temperature)
+    if reflection_context:
+        user_text += f"\n\n{reflection_context}"
+    result = _call_agent(llm, SYSTEM_TRADER, user_text, temperature=temperature)
+    # 5-stufige Rating normalisieren: rohes Rating in 'rating', 3-stufige Aktion in 'aktion'
+    raw_rating = str(result.get("aktion", "")).strip().upper()
+    result["rating"] = raw_rating
+    result["aktion"] = _rating_to_action(raw_rating)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +588,7 @@ def ensemble_trader(
     runs: int = 3,
     temperature_range: list[float] | None = None,
     feedback_context: str = "",
+    reflection_context: str = "",
 ) -> dict[str, Any]:
     """Führt den Trader mehrfach aus (Ensemble) und aggregiert per Mehrheitsentscheid.
 
@@ -565,10 +601,12 @@ def ensemble_trader(
             Bei weniger/mehr Runs wird zyklisch verwendet bzw. abgeschnitten.
         feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
             Feedback). Wird an jeden trader()-Aufruf durchgereicht.
+        reflection_context: Optionaler Reflexions-Block (leer = keine
+            Reflexion). Wird an jeden trader()-Aufruf durchgereicht.
 
     Returns:
         dict mit dem gewählten Trade plus _ensemble-Metadaten:
-          _ensemble: {runs, mehrheits_aktion, ensemble_confidence, alle_aktionen}
+          _ensemble: {runs, mehrheits_aktion, ensemble_confidence, alle_aktionen, alle_ratings}
     """
     if temperature_range is None:
         temperature_range = _DEFAULT_TEMPERATURES
@@ -584,7 +622,12 @@ def ensemble_trader(
     all_runs: list[dict[str, Any]] = []
 
     def _run_trader(temp: float) -> dict[str, Any]:
-        return trader(analysts, debate_result, llm, temperature=temp, feedback_context=feedback_context)
+        return trader(
+            analysts, debate_result, llm,
+            temperature=temp,
+            feedback_context=feedback_context,
+            reflection_context=reflection_context,
+        )
 
     max_workers = min(len(temps), _MAX_PARALLEL)
     # Reihenfolge der Ergebnisse muss der Temp-Reihenfolge entsprechen für
@@ -612,6 +655,7 @@ def ensemble_trader(
         return {
             "rolle": "Trader",
             "aktion": "HALTEN",
+            "rating": "HALTEN",
             "zielkurs": None,
             "stop_loss": None,
             "positionsanteil": 0,
@@ -623,6 +667,7 @@ def ensemble_trader(
                 "mehrheits_aktion": "HALTEN",
                 "ensemble_confidence": 0.0,
                 "alle_aktionen": [],
+                "alle_ratings": [],
             },
         }
 
@@ -630,15 +675,17 @@ def ensemble_trader(
     if len(all_runs) == 1:
         result = dict(all_runs[0])
         aktion = str(result.get("aktion", "HALTEN")).upper()
+        rating = str(result.get("rating", aktion)).upper()
         result["_ensemble"] = {
             "runs": 1,
             "mehrheits_aktion": aktion,
             "ensemble_confidence": 1.0,
             "alle_aktionen": [aktion],
+            "alle_ratings": [rating],
         }
         return result
 
-    # Mehrheitsabstimmung über aktion
+    # Mehrheitsabstimmung über aktion (3-stufig normalisiert)
     aktionen = [str(r.get("aktion", "HALTEN")).upper() for r in all_runs]
     aktion_counts: dict[str, int] = {}
     for a in aktionen:
@@ -646,6 +693,12 @@ def ensemble_trader(
 
     mehrheits_aktion = max(aktion_counts, key=lambda k: aktion_counts[k])
     confidence = aktion_counts[mehrheits_aktion] / len(all_runs)
+
+    # 5-stufige Ratings sammeln (Fallback auf aktion wenn rating fehlt)
+    alle_ratings = [
+        str(r.get("rating", r.get("aktion", "HALTEN"))).strip().upper()
+        for r in all_runs
+    ]
 
     # Den ersten Run mit der Mehrheits-Aktion als Basis wählen
     basis_run = None
@@ -689,6 +742,7 @@ def ensemble_trader(
         "mehrheits_aktion": mehrheits_aktion,
         "ensemble_confidence": round(confidence, 2),
         "alle_aktionen": aktionen,
+        "alle_ratings": alle_ratings,
     }
 
     return result
@@ -813,6 +867,7 @@ def portfolio_manager(
     llm: LLMClient,
     portfolio_fit: dict[str, Any] | None = None,
     feedback_context: str = "",
+    reflection_context: str = "",
 ) -> dict[str, Any]:
     """Trifft finale Entscheidung.
 
@@ -825,6 +880,9 @@ def portfolio_manager(
         feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
             Feedback). Wird am Ende des User-Prompts angehängt, damit der PM
             seine Kalibrierung an der Historie ausrichten kann.
+        reflection_context: Optionaler Reflexions-Block (leer = keine
+            Reflexion). Wird nach feedback_context am Ende des User-Prompts
+            angehängt.
     """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     risk_text = json.dumps(risk, ensure_ascii=False, indent=2, default=str)
@@ -837,5 +895,8 @@ def portfolio_manager(
 
     if feedback_context:
         user_text += f"\n\n{feedback_context}"
+
+    if reflection_context:
+        user_text += f"\n\n{reflection_context}"
 
     return _call_agent(llm, SYSTEM_PM, user_text)

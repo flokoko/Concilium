@@ -15,7 +15,7 @@ from .agents import (
     trader,
 )
 from .data import collect_ticker_data
-from .feedback import build_feedback_context
+from .feedback import build_feedback_context, build_reflection_context
 from .llm import LLMClient
 from .portfolio_fit import fetch_portfolio_positions, portfolio_fit_agent
 
@@ -73,6 +73,15 @@ def run_pipeline(
     # LLM-Modus nötig — bei <min_decisions Einträgen → leerer String.
     feedback_context = build_feedback_context() if llm is not None else ""
 
+    # --- 1d. Reflexions-Kontext (realisierter Return der letzten Entscheidung) ---
+    # Nur im LLM-Modus: holt den realisierten Return der jüngsten
+    # Entscheidungs-Zeile für diesen Ticker und generiert einen
+    # Reflexions-Block, der in Trader-/PM-Prompts injiziert wird.
+    reflection_context = ""
+    if llm is not None:
+        reflection_context = build_reflection_context(ticker=ticker, llm=llm)
+    result["reflection"] = reflection_context or None
+
     # --- Optional: Backtest ---
     if backtest:
         logger.info("Schritt 1b: Führe Backtest-Signalproxy aus")
@@ -101,10 +110,10 @@ def run_pipeline(
     # --- 4. Trader (oder Ensemble-Trader) ---
     if ensemble:
         logger.info("Schritt 4: Ensemble-Trader (%d Runs) erstellt Trade-Vorschlag", ensemble_runs)
-        trade = ensemble_trader(analysts, debate_result, llm, runs=ensemble_runs, feedback_context=feedback_context)
+        trade = ensemble_trader(analysts, debate_result, llm, runs=ensemble_runs, feedback_context=feedback_context, reflection_context=reflection_context)
     else:
         logger.info("Schritt 4: Trader erstellt Trade-Vorschlag (Single-Run)")
-        trade = trader(analysts, debate_result, llm, feedback_context=feedback_context)
+        trade = trader(analysts, debate_result, llm, feedback_context=feedback_context, reflection_context=reflection_context)
     result["trade"] = trade
 
     # --- 5. Risk-Manager ---
@@ -125,7 +134,7 @@ def run_pipeline(
 
     # --- 6. Portfolio-Manager ---
     logger.info("Schritt 6: Portfolio-Manager trifft finale Entscheidung")
-    final = portfolio_manager(trade, risk, llm, portfolio_fit=result.get("portfolio_fit"), feedback_context=feedback_context)
+    final = portfolio_manager(trade, risk, llm, portfolio_fit=result.get("portfolio_fit"), feedback_context=feedback_context, reflection_context=reflection_context)
     result["final"] = final
 
     # --- Feature 4: Entscheidungs-Journal ---

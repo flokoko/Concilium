@@ -343,12 +343,23 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(_clean_debate_text(bear))
         lines.append("")
 
+        # Reflexion (Track-Record) — vor Trade-Vorschlag
+        reflection = result.get("reflection")
+        if reflection:
+            section_num += 1
+            lines.append(f"## {section_num}. Reflexion (Track-Record)")
+            lines.append("")
+            lines.append(reflection)
+            lines.append("")
+
         # Trade
         section_num += 1
         trade = result.get("trade", {})
         lines.append(f"## {section_num}. Trade-Vorschlag")
         lines.append("")
         lines.append(f"**Aktion:** {trade.get('aktion', 'N/A')}")
+        if trade.get("rating"):
+            lines.append(f"**Rating (5-stufig):** {trade['rating']}")
         lines.append(f"**Zielkurs:** {_fmt(trade.get('zielkurs'))}")
         lines.append(f"**Stop-Loss:** {_fmt(trade.get('stop_loss'))}")
         lines.append(f"**Positionsanteil:** {trade.get('positionsanteil', 'N/A')} %")
@@ -363,10 +374,14 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             ens_aktion = ensemble_info.get("mehrheits_aktion", "N/A")
             ens_conf = ensemble_info.get("ensemble_confidence", 0)
             ens_conf_pct = int(ens_conf * 100) if isinstance(ens_conf, float | int) else 0
-            lines.append(
+            ens_line = (
                 f"_Ensemble: {ens_runs} Runs, Aktion {ens_aktion} "
                 f"(Konfidenz {ens_conf_pct}%)_"
             )
+            alle_ratings = ensemble_info.get("alle_ratings")
+            if alle_ratings:
+                ens_line += f", Rating-Verteilung: {', '.join(alle_ratings)}"
+            lines.append(ens_line)
             lines.append("")
 
         # Risk

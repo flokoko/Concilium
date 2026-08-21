@@ -16,6 +16,9 @@ import logging
 import os
 from typing import Any
 
+from .evaluate import realised_return_for_row
+from .llm import LLMClient
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,12 +66,19 @@ def _compute_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
     """
     n_total = len(rows)
 
-    # Aktionen zählen
+    # Aktionen zählen (3-stufig)
     actions = {"KAUFEN": 0, "HALTEN": 0, "VERKAUFEN": 0}
     for row in rows:
         action = (row.get("action") or "").strip().upper()
         if action in actions:
             actions[action] += 1
+
+    # Ratings zählen (5-stufig)
+    ratings = {r: 0 for r in ("STARK KAUFEN", "KAUFEN", "HALTEN", "VERKAUFEN", "STARK VERKAUFEN")}
+    for row in rows:
+        rating = (row.get("rating") or "").strip().upper()
+        if rating in ratings:
+            ratings[rating] += 1
 
     # Finale Entscheidungen (GENEHMIGT / ABGELEHNT)
     genehmigt = 0
@@ -101,6 +111,7 @@ def _compute_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
     return {
         "n_total": n_total,
         "actions": actions,
+        "ratings": ratings,
         "genehmigt": genehmigt,
         "abgelehnt": abgelehnt,
         "avg_confidence": avg_confidence,
@@ -167,6 +178,7 @@ def build_feedback_context(
         lines = [
             f"=== DEIN TRACK-RECORD (letzte {n} Entscheidungen) ===",
             f"Gesamt: {n} Entscheidungen (KAUFEN: {a['KAUFEN']}, HALTEN: {a['HALTEN']}, VERKAUFEN: {a['VERKAUFEN']})",
+            f"Rating-Verteilung: STARK KAUFEN: {stats['ratings']['STARK KAUFEN']}, KAUFEN: {stats['ratings']['KAUFEN']}, HALTEN: {stats['ratings']['HALTEN']}, VERKAUFEN: {stats['ratings']['VERKAUFEN']}, STARK VERKAUFEN: {stats['ratings']['STARK VERKAUFEN']}",
             f"Finale Entscheidungen: GENEHMIGT: {stats['genehmigt']}, ABGELEHNT: {stats['abgelehnt']}",
             f"Ø Confidence: {avg_conf} / 5 | Ø Ensemble-Confidence: {avg_ens}",
             f"Ø Portfolio-Fit-Score: {avg_pf} / 5 | Ø Ziel-Gewichtung: {avg_zg} %",
@@ -179,4 +191,115 @@ def build_feedback_context(
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001 — crasht nie
         logger.warning("Feedback-Kontext konnte nicht erstellt werden: %s", exc)
+        return ""
+
+
+# --------------------------------------------------------------------------- #
+# Reflexions-Kontext — realisierter Return der letzten Entscheidung für einen Ticker
+# --------------------------------------------------------------------------- #
+
+
+def _deterministic_lesson(raw_return_pct: float | None, action: str) -> str:
+    """Erzeugt eine deterministische Lektion abhängig vom Vorzeichen der Rendite."""
+    if raw_return_pct is None:
+        return "Keine aussagekräftige Rendite verfügbar — prüfe deine Annahmen sorgfältig."
+    if raw_return_pct > 0.5:
+        return "Die Marktlage hat deine Einschätzung bestätigt; behalte deine Methodik bei."
+    if raw_return_pct < -0.5:
+        return "Die Marktlage lief gegen dich; überprüfe Timing und Ziel-/Stop-Setzung."
+    return "Die Marktlage blieb weitgehend neutral — justiere deine Erwartungen nicht über."
+
+
+def build_reflection_context(
+    ticker: str,
+    llm: LLMClient | None = None,
+    lookback_days: int = 30,
+) -> str:
+    """Baut einen Reflexions-Kontext-Block für den letzten Entscheidungs-Eintrag eines Tickers.
+
+    Liest das Entscheidungs-Journal, findet die jüngste Zeile für den Ticker,
+    berechnet den realisierten Return (inkl. Alpha vs SPY) via evaluate.realised_return
+    und erzeugt einen deutschen Reflexions-Absatz.
+
+    Wenn ein LLMClient übergeben wird, wird die "Lektion" vom LLM generiert
+    (einziger Satz). Bei Fehlern oder ohne LLM wird eine deterministische
+    Lektion verwendet.
+
+    Args:
+        ticker: Ticker-Symbol.
+        llm: Optionaler LLMClient für die LLM-generierte Lektion.
+        lookback_days: Zeitfenster für die Rendite-Berechnung (Default 30).
+
+    Returns:
+        Deutscher Reflexions-String oder "" wenn kein Eintrag/Fehler.
+        Crasht niemals.
+    """
+    try:
+        journal_file = os.path.join("journal", "decisions.csv")
+        rows = _read_journal_rows(journal_file)
+        if not rows:
+            return ""
+
+        # Jüngste Zeile für diesen Ticker finden (case-insensitive)
+        target = (ticker or "").strip().lower()
+        matching_rows: list[dict[str, str]] = []
+        for row in rows:
+            row_ticker = (row.get("ticker") or "").strip().lower()
+            if row_ticker == target:
+                ts = row.get("timestamp", "")
+                # Nur Zeilen mit parsebarem Timestamp berücksichtigen
+                if ts and ts.strip():
+                    matching_rows.append(row)
+
+        if not matching_rows:
+            return ""
+
+        # Jüngste Zeile = letzte im Journal (Annahme: chronologisch sortiert)
+        row = matching_rows[-1]
+
+        rr = realised_return_for_row(row, lookback_days=lookback_days)
+        if rr is None:
+            return ""
+
+        raw_return_pct = rr.get("raw_return_pct")
+        alpha_pct = rr.get("alpha_pct")
+        action = rr.get("action", "")
+        ts = rr.get("timestamp", "")
+
+        # Lektion generieren
+        lesson = _deterministic_lesson(raw_return_pct, action)
+        if llm is not None:
+            try:
+                alpha_str = (
+                    f"{alpha_pct:+.2f}%" if alpha_pct is not None else "nicht verfügbar"
+                )
+                prompt = (
+                    f"Du bist ein Trading-Coach. Formuliere EIN deutschen Satz als Lektion "
+                    f"aus einer vergangenen Handelsentscheidung.\n\n"
+                    f"Ticker: {ticker}\n"
+                    f"Aktion: {action}\n"
+                    f"Realisierter Return: {raw_return_pct:+.2f}%\n"
+                    f"Alpha vs SPY: {alpha_str}\n\n"
+                    f"Antworte mit genau einem deutschen Satz (maximal 30 Wörter)."
+                )
+                messages = [
+                    {"role": "system", "content": "Du bist ein präziser Trading-Coach."},
+                    {"role": "user", "content": prompt},
+                ]
+                llm_lesson = llm.chat(messages, temperature=0.3)
+                if llm_lesson and llm_lesson.strip():
+                    lesson = llm_lesson.strip()
+            except Exception as llm_exc:  # noqa: BLE001 — Fallback
+                logger.debug("LLM-Lektion fehlgeschlagen, verwende deterministische Lektion: %s", llm_exc)
+
+        alpha_str = f"{alpha_pct:+.2f}%" if alpha_pct is not None else "-"
+        text = (
+            f"=== DEINE LETZTE ENTSCHEIDUNG ZU {ticker.upper()} ({ts}) ===\n"
+            f"Aktion: {action} | Realisierter Return: {raw_return_pct:+.2f}% "
+            f"| Alpha vs SPY: {alpha_str}\n"
+            f"Lerne daraus: {lesson}"
+        )
+        return text
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.warning("Reflexions-Kontext konnte nicht erstellt werden: %s", exc)
         return ""
