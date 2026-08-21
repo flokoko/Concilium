@@ -12,6 +12,7 @@ import logging
 import re
 from typing import Any
 
+from .factors import compute_multi_factor_score
 from .llm import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -293,6 +294,20 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
             f"  Zielkurs tief: {_fmt_num(f.get('analyst_target_low'))}",
             f"  Upside (geschätzt): {_fmt_num(f.get('analyst_upside_pct'))} %",
         ])
+        # Quantitativer Multi-Faktor-Score-Anker (deterministischer Referenzwert)
+        mf = compute_multi_factor_score(f)
+        if mf.get("overall_score") is not None:
+            lines.append(
+                "  Quant-Score (deterministisch, Referenz): "
+                f"Value {_fmt_num(mf.get('value_score'))}/5, "
+                f"Momentum {_fmt_num(mf.get('momentum_score'))}/5, "
+                f"Qualität {_fmt_num(mf.get('quality_score'))}/5, "
+                f"Gesamt {_fmt_num(mf.get('overall_score'))}/5 — {mf.get('kurzeinschaetzung', '')}"
+            )
+            lines.append(
+                "  → Anker nur zur Einordnung: stimme NICHT blind zu, "
+                "hinterfrage ihn kritisch anhand der Kennzahlen."
+            )
 
     # TECHNIK — für technik und alle
     if role in ("alle", "technik"):
