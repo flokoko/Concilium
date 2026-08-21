@@ -58,7 +58,11 @@ inspiriert von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
    - **Bull**: Argumente für eine Long-Position
    - **Bear**: Gegenargumente und Risiken
 
-3. **Trader** — schlägt eine konkrete Order vor (Kaufen/Halten/Verkaufen, Zielkurs, Stop-Loss)
+3. **Trader** — schlägt eine konkrete Order vor, mit **5-stufiger Rating-Skala**:
+   `STARK KAUFEN` / `KAUFEN` / `HALTEN` / `VERKAUFEN` / `STARK VERKAUFEN`
+   (plus Zielkurs, Stop-Loss, Positionsanteil). Das 5-stufige Rating wird im
+   Report und im Entscheidungs-Journal gespeichert; intern wird daraus für
+   Ensemble-Abstimmung und Track-Record eine 3-stufige Aktion abgeleitet.
 
 4. **Risk-Manager** — bewertet Volatilität, Drawdown-Risiko und Positionsgröße
 
@@ -68,6 +72,19 @@ inspiriert von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
    - Empfohlene Ziel-Gewichtung
 
 6. **Portfolio-Manager** — trifft die finale Genehmigungs-Entscheidung
+
+## Lernen aus dem Track-Record (Reflexion)
+
+Vor jeder Analyse desselben Tickers holt Concilium den **realisierten Return**
+der letzten Entscheidung zu diesem Ticker (roh **und Alpha vs. SPY**), generiert
+eine kurze deutsche **Reflexion** und injiziert sie in den Trader- und
+Portfolio-Manager-Prompt. So trägt jede Analyse die Lehren früherer
+Entscheidungen weiter — die Pipeline ist damit explizit lernend.
+
+Die 5-stufige Skala macht zudem die `--evaluate`-Track-Record-Auswertung
+granularer: zusätzlich zur Hit-Rate wird die **durchschnittliche Rating-Distanz**
+(Anzahl Stufen, um die die Einschätzung neben dem tatsächlichen Verlauf lag)
+ausgewiesen.
 
 ## LLM-Umgebungsvariablen
 
