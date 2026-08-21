@@ -69,7 +69,7 @@ def generate_report(result: dict[str, Any]) -> str:
     no_llm = result.get("no_llm", False)
 
     lines: list[str] = []
-    lines.append(f"# TradingAgents-Light Analyse: {ticker}")
+    lines.append(f"# Concilium Analyse: {ticker}")
     lines.append("")
     lines.append(f"**Erstellt am:** {now}")
     lines.append(f"**Unternehmen:** {f.get('name', ticker)}")
@@ -379,7 +379,7 @@ Obiger Report zeigt nur den Datensnapshot._")
 
     # --- Footer ---
     lines.append("---")
-    lines.append("*Erstellt von TradingAgents-Light · Keine Anlageberatung*")
+    lines.append("*Erstellt von Concilium · Keine Anlageberatung*")
 
     # Feature 4: Journal-Hinweis (nur im LLM-Modus, wenn Eintrag geschrieben)
     if not no_llm and result.get("_journal_written"):

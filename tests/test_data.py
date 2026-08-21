@@ -15,12 +15,12 @@ import pytest
 # src zum Pfad hinzufügen
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from tradingagents_light.data import (  # noqa: E402
+from concilium.data import (  # noqa: E402
     _fetch_google_news,
     _get_dividend_yield,
     collect_ticker_data,
 )
-from tradingagents_light.journal import append_decision
+from concilium.journal import append_decision
 
 
 def _has_network() -> bool:
@@ -98,19 +98,19 @@ class TestSentimentHeuristic:
     """Tests für die Sentiment-Heuristik."""
 
     def test_positive_keyword(self):
-        from tradingagents_light.data import _count_sentiment
+        from concilium.data import _count_sentiment
 
         result = _count_sentiment(["Apple surges to record high"])
         assert result["positiv"] >= 1
 
     def test_negative_keyword(self):
-        from tradingagents_light.data import _count_sentiment
+        from concilium.data import _count_sentiment
 
         result = _count_sentiment(["Apple plunges on weak earnings"])
         assert result["negativ"] >= 1
 
     def test_neutral_no_keywords(self):
-        from tradingagents_light.data import _count_sentiment
+        from concilium.data import _count_sentiment
 
         result = _count_sentiment(["Apple announces quarterly results"])
         assert result["neutral"] >= 1
@@ -157,7 +157,7 @@ class TestGoogleNewsFallback:
         mock_response.text = _MOCK_RSS_XML
         mock_response.raise_for_status = MagicMock()
 
-        with patch("tradingagents_light.data.requests.get", return_value=mock_response):
+        with patch("concilium.data.requests.get", return_value=mock_response):
             result = _fetch_google_news("NVDA", company_name="NVIDIA")
 
         # "Top Stories" wird übersprungen → 2 echte Items
@@ -168,7 +168,7 @@ class TestGoogleNewsFallback:
 
     def test_returns_empty_on_connection_error(self):
         """Bei requests.ConnectionError → leere Liste, kein Crash."""
-        with patch("tradingagents_light.data.requests.get", side_effect=ConnectionError("DNS failed")):
+        with patch("concilium.data.requests.get", side_effect=ConnectionError("DNS failed")):
             result = _fetch_google_news("NVDA")
 
         assert result == []
@@ -179,7 +179,7 @@ class TestGoogleNewsFallback:
         mock_response.text = _MOCK_RSS_XML
         mock_response.raise_for_status = MagicMock()
 
-        with patch("tradingagents_light.data.requests.get", return_value=mock_response):
+        with patch("concilium.data.requests.get", return_value=mock_response):
             result = _fetch_google_news("NVDA")
 
         assert len(result) == 2
@@ -197,7 +197,7 @@ class TestGoogleNewsFallback:
         mock_response.text = _MOCK_RSS_DC_XML
         mock_response.raise_for_status = MagicMock()
 
-        with patch("tradingagents_light.data.requests.get", return_value=mock_response):
+        with patch("concilium.data.requests.get", return_value=mock_response):
             result = _fetch_google_news("AAPL")
 
         assert len(result) == 1
@@ -220,7 +220,7 @@ class TestGoogleNewsFallback:
         mock_response.raise_for_status = MagicMock()
 
         before = datetime.now(timezone.utc)
-        with patch("tradingagents_light.data.requests.get", return_value=mock_response):
+        with patch("concilium.data.requests.get", return_value=mock_response):
             result = _fetch_google_news("TEST")
         after = datetime.now(timezone.utc)
 
@@ -236,7 +236,7 @@ class TestSentimentWeighted:
 
     def test_recent_headline_weights_more_than_old(self):
         """Eine heutige positive Headline soll mehr Gewicht haben als eine 14 Tage alte."""
-        from tradingagents_light.data import _count_sentiment_weighted
+        from concilium.data import _count_sentiment_weighted
 
         now = datetime.now(timezone.utc)
         headlines = [
@@ -263,7 +263,7 @@ class TestSentimentWeighted:
 
     def test_dominant_sentiment(self):
         """Die dominante Stimmung wird korrekt ermittelt."""
-        from tradingagents_light.data import _count_sentiment_weighted
+        from concilium.data import _count_sentiment_weighted
 
         now = datetime.now(timezone.utc)
         headlines = [
@@ -281,7 +281,7 @@ class TestSentimentWeighted:
 
     def test_old_negative_can_outweigh_new_positive(self):
         """Wenn mehrere alte negative Headlines vs. eine neue positive → negativ dominiert."""
-        from tradingagents_light.data import _count_sentiment_weighted
+        from concilium.data import _count_sentiment_weighted
 
         now = datetime.now(timezone.utc)
         headlines = [
@@ -304,7 +304,7 @@ class TestSentimentWeighted:
 
     def test_empty_headlines(self):
         """Leere Liste → alle Werte 0, dominant neutral."""
-        from tradingagents_light.data import _count_sentiment_weighted
+        from concilium.data import _count_sentiment_weighted
 
         result = _count_sentiment_weighted([])
         assert result["positiv"] == 0.0

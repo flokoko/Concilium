@@ -18,9 +18,9 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 )
 
-from tradingagents_light.agents import _fmt_num  # noqa: E402
-from tradingagents_light.data import _validate_fundamentals  # noqa: E402
-from tradingagents_light.report import _fmt  # noqa: E402
+from concilium.agents import _fmt_num  # noqa: E402
+from concilium.data import _validate_fundamentals  # noqa: E402
+from concilium.report import _fmt  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # _validate_fundamentals
@@ -176,7 +176,7 @@ class TestDataWarningsKey:
 
     def test_data_warnings_key_tsm(self):
         """TSM muss data_warnings als Liste zurückgeben."""
-        from tradingagents_light.data import collect_ticker_data
+        from concilium.data import collect_ticker_data
 
         data = collect_ticker_data("TSM")
         assert "data_warnings" in data
@@ -184,7 +184,7 @@ class TestDataWarningsKey:
 
     def test_data_warnings_key_aapl(self):
         """AAPL muss data_warnings als Liste zurückgeben (ohne Crash)."""
-        from tradingagents_light.data import collect_ticker_data
+        from concilium.data import collect_ticker_data
 
         data = collect_ticker_data("AAPL")
         assert "data_warnings" in data

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from tradingagents_light.agents import (  # noqa: E402
+from concilium.agents import (  # noqa: E402
     _fix_implausible_trade,
     _is_plausible_kauf,
     ensemble_trader,
@@ -175,7 +175,7 @@ class TestSingleFallback:
         call_count = [0]
         original_trader = None
 
-        import tradingagents_light.agents as agents_mod
+        import concilium.agents as agents_mod
 
         original_trader = agents_mod.trader
 
@@ -194,7 +194,7 @@ class TestSingleFallback:
 
     def test_all_runs_fail(self):
         """Wenn alle Runs fehlschlagen → HALTEN als Fallback, kein Crash."""
-        import tradingagents_light.agents as agents_mod
+        import concilium.agents as agents_mod
 
         with patch.object(agents_mod, "trader", side_effect=RuntimeError("LLM down")):
             result = ensemble_trader(_ANALYSTS, _DEBATE, MagicMock(), runs=3)

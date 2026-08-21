@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 SHEET_ID = "1-cTQ95Ftrw9nNnYHWAgw4EGoztNVnSw2"
 _PORTFOLIO_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
-_USER_AGENT = "Mozilla/5.0 (TradingAgents-Light/1.0)"
+_USER_AGENT = "Mozilla/5.0 (Concilium/1.0)"
 
 # Sheet-Symbol → Yahoo-Ticker Korrektur-Tabelle
 TICKER_FIX: dict[str, str] = {

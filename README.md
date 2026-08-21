@@ -1,20 +1,22 @@
-# TradingAgents-Light
+# Concilium
 
-Schlanke Trading-Entscheidungs-Pipeline mit yfinance + LLM-Agenten (OpenAI-kompatibel).
+Concilium — Multi-Agenten-Fonds-Entscheidungssystem (yfinance + LLM-Agenten, OpenAI-kompatibel), deutsche Reports.
 
 ## Was ist das?
 
-TradingAgents-Light ist ein eigenständiges CLI-Python-Paket, das eine Trading-Entscheidung
-für einen Ticker emuliert — inspiriert von [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents),
-aber deutlich schlank: kein LangGraph, kein Alpha Vantage. Die "Agenten" sind spezialisierte
-LLM-Rollen-Aufrufe über eine OpenAI-kompatible `/chat/completions` Schnittstelle. Alle
-Marktdaten werden via yfinance (kostenlos, kein API-Key) bezogen.
+Concilium ist ein eigenständiges CLI-Python-Paket, das eine fondsorientierte
+Handelsentscheidung für einen Ticker emuliert. Es ist ein Multi-Agenten-System
+(Hedgefonds-Imitat): spezialisierte LLM-Rollen-Agenten arbeiten nacheinander —
+von der Datenanalyse über Bull/Bear-Debatte bis zur finalen Genehmigung durch
+den Portfolio-Manager. Alle Marktdaten werden via yfinance (kostenlos, kein
+API-Key) bezogen. Die Agenten kommunizieren über eine OpenAI-kompatible
+`/chat/completions` Schnittstelle.
 
 ## Installation
 
 ```bash
-git clone <repo-url>
-cd TradingAgents-Light
+git clone https://github.com/flokoko/Concilium.git
+cd Concilium
 pip install -e ".[dev]"
 ```
 
@@ -42,7 +44,8 @@ Der Report wird auf stdout ausgegeben und zusätzlich als Datei unter
 
 ## Agenten-Architektur
 
-Die Pipeline simuliert ein Team von Agenten, die nacheinander arbeiten:
+Die Pipeline simuliert ein Team von Agenten, die nacheinander arbeiten —
+inspiriert von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
 
 1. **Analysten-Team** — drei Rollen, die jeweils das gleiche Datenpaket unterschiedlich auswerten:
    - **Fundamental-Analyst**: Fundamentals (MarketCap, KGV, EPS, Revenue, Margen, Wachstum)
@@ -59,7 +62,12 @@ Die Pipeline simuliert ein Team von Agenten, die nacheinander arbeiten:
 
 4. **Risk-Manager** — bewertet Volatilität, Drawdown-Risiko und Positionsgröße
 
-5. **Portfolio-Manager** — trifft die finale Genehmigungs-Entscheidung
+5. **Portfolio-Fit-Analyst** — bewertet die Aktie als Baustein im realen Depot:
+   - Konzentrationsrisiko (Ist die Aktie bereits stark gewichtet?)
+   - Sektor-/Branchen-Overlap (Sektor bereits überrepräsentiert?)
+   - Empfohlene Ziel-Gewichtung
+
+6. **Portfolio-Manager** — trifft die finale Genehmigungs-Entscheidung
 
 ## LLM-Umgebungsvariablen
 

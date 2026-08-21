@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from tradingagents_light.portfolio_fit import (  # noqa: E402
+from concilium.portfolio_fit import (  # noqa: E402
     _parse_positions,
     _safe_float,
     fetch_portfolio_positions,
@@ -150,7 +150,7 @@ class TestFetchPortfolioPositions:
     def test_network_error_returns_empty(self):
         """Bei urllib-Fehler → leere Liste, kein Crash."""
         with patch(
-            "tradingagents_light.portfolio_fit.urllib.request.urlopen",
+            "concilium.portfolio_fit.urllib.request.urlopen",
             side_effect=ConnectionError("DNS failed"),
         ):
             result = fetch_portfolio_positions()
@@ -159,7 +159,7 @@ class TestFetchPortfolioPositions:
     def test_timeout_returns_empty(self):
         """Bei Timeout → leere Liste, kein Crash."""
         with patch(
-            "tradingagents_light.portfolio_fit.urllib.request.urlopen",
+            "concilium.portfolio_fit.urllib.request.urlopen",
             side_effect=TimeoutError("Connection timed out"),
         ):
             result = fetch_portfolio_positions()
@@ -169,7 +169,7 @@ class TestFetchPortfolioPositions:
         """Bei gültigem CSV-Response → Positionen werden zurückgegeben."""
         mock_resp = _MockHTTPResponse(_DUMMY_CSV)
         with patch(
-            "tradingagents_light.portfolio_fit.urllib.request.urlopen",
+            "concilium.portfolio_fit.urllib.request.urlopen",
             return_value=mock_resp,
         ):
             result = fetch_portfolio_positions()
@@ -180,7 +180,7 @@ class TestFetchPortfolioPositions:
         """Leerer CSV-Body → leere Liste."""
         mock_resp = _MockHTTPResponse("Bestand,Name,Symbol\n")
         with patch(
-            "tradingagents_light.portfolio_fit.urllib.request.urlopen",
+            "concilium.portfolio_fit.urllib.request.urlopen",
             return_value=mock_resp,
         ):
             result = fetch_portfolio_positions()

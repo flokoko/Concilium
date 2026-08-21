@@ -1,4 +1,4 @@
-"""CLI-Modul — TradingAgents-Light Befehlszeilen-Schnittstelle."""
+"""CLI-Modul — Concilium Befehlszeilen-Schnittstelle."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .report import generate_report
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="TradingAgents-Light — Trading-Entscheidungs-Pipeline"
+        description="Concilium — Multi-Agenten-Fonds-Entscheidungssystem"
     )
     parser.add_argument(
         "--ticker",

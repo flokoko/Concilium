@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from tradingagents_light.data import _get_sp500_benchmark  # noqa: E402
+from concilium.data import _get_sp500_benchmark  # noqa: E402
 
 
 class TestGetSp500Benchmark:
@@ -25,7 +25,7 @@ class TestGetSp500Benchmark:
         spy_mock = MagicMock()
         spy_mock.info = {"trailingPE": 25.69}
 
-        with patch("tradingagents_light.data.yf.Ticker") as mock_ticker:
+        with patch("concilium.data.yf.Ticker") as mock_ticker:
             mock_ticker.side_effect = [gspc_mock, spy_mock]
             result = _get_sp500_benchmark()
 
@@ -41,7 +41,7 @@ class TestGetSp500Benchmark:
         spy_mock = MagicMock()
         spy_mock.info = {"trailingPE": 25.69, "marketCap": 9.0e11}
 
-        with patch("tradingagents_light.data.yf.Ticker") as mock_ticker:
+        with patch("concilium.data.yf.Ticker") as mock_ticker:
             mock_ticker.side_effect = [gspc_mock, spy_mock]
             result = _get_sp500_benchmark()
 
@@ -57,7 +57,7 @@ class TestGetSp500Benchmark:
         spy_mock = MagicMock()
         spy_mock.info = {"trailingPE": None}
 
-        with patch("tradingagents_light.data.yf.Ticker") as mock_ticker:
+        with patch("concilium.data.yf.Ticker") as mock_ticker:
             mock_ticker.side_effect = [gspc_mock, spy_mock]
             result = _get_sp500_benchmark()
 
@@ -70,7 +70,7 @@ class TestGetSp500Benchmark:
         spy_mock = MagicMock()
         spy_mock.info = {"trailingPE": 25.69}
 
-        with patch("tradingagents_light.data.yf.Ticker") as mock_ticker:
+        with patch("concilium.data.yf.Ticker") as mock_ticker:
             mock_ticker.side_effect = [Exception("Network error"), spy_mock]
             result = _get_sp500_benchmark()
 
@@ -79,7 +79,7 @@ class TestGetSp500Benchmark:
 
     def test_result_dict_has_required_keys(self):
         """Das Result-dict hat immer die Keys sp500_pe, sp500_market_cap, sp500_source."""
-        with patch("tradingagents_light.data.yf.Ticker") as mock_ticker:
+        with patch("concilium.data.yf.Ticker") as mock_ticker:
             mock_ticker.side_effect = [Exception("fail"), Exception("fail")]
             result = _get_sp500_benchmark()
 
