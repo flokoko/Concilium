@@ -20,6 +20,7 @@ sys.path.insert(
 
 from concilium.data import (  # noqa: E402
     _detect_identifier_type,
+    _wkn_to_isin,
     resolve_identifier,
 )
 
@@ -246,7 +247,7 @@ class TestResolveWKN:
         assert meta["wkn"] == "BASF11"
 
     def test_wkn_no_isin_in_html_raises(self):
-        """wallstreet-online liefert keine ISIN → ValueError."""
+        """Beide Quellen liefern keine ISIN → ValueError."""
         wso_response = MagicMock()
         wso_response.text = "<html>keine ISIN hier</html>"
         wso_response.raise_for_status = MagicMock()
@@ -256,7 +257,114 @@ class TestResolveWKN:
                 resolve_identifier("716460")
 
     def test_wkn_network_error_raises(self):
-        """wallstreet-online nicht erreichbar → ValueError."""
+        """Beide Quellen nicht erreichbar → ValueError."""
         with patch("concilium.data.requests.get", side_effect=ConnectionError("DNS failed")):
             with pytest.raises(ValueError, match="nicht erreichbar"):
                 resolve_identifier("716460")
+
+
+# ---------------------------------------------------------------------------
+# _wkn_to_isin — Fallback-Reihenfolge (mit Mock)
+# ---------------------------------------------------------------------------
+
+
+class TestWknToIsinFallback:
+    """Tests für die Fallback-Reihenfolge in _wkn_to_isin."""
+
+    def test_wallstreet_primary_wins_onvista_not_called(self):
+        """wallstreet-online liefert ISIN → onvista wird NICHT aufgerufen."""
+        wso_response = MagicMock()
+        wso_response.text = '<html>...DE0007164600...</html>'
+        wso_response.raise_for_status = MagicMock()
+
+        with patch("concilium.data.requests.get", return_value=wso_response) as mock_get:
+            isin = _wkn_to_isin("716460")
+
+        assert isin == "DE0007164600"
+        # Genau ein Aufruf (nur wallstreet-online)
+        assert mock_get.call_count == 1
+        called_url = mock_get.call_args[0][0]
+        assert "wallstreet-online.de" in called_url
+
+    def test_fallback_to_onvista_when_wallstreet_fails(self):
+        """wallstreet-online schlägt fehl → onvista wird versucht und liefert ISIN."""
+        # 1. Aufruf: wallstreet-online → ConnectionError
+        # 2. Aufruf: onvista → HTML mit ISIN
+        onvista_response = MagicMock()
+        onvista_response.text = '<html>...DE0007164600...</html>'
+        onvista_response.raise_for_status = MagicMock()
+
+        with patch(
+            "concilium.data.requests.get",
+            side_effect=[ConnectionError("rate limited"), onvista_response],
+        ) as mock_get:
+            isin = _wkn_to_isin("716460")
+
+        assert isin == "DE0007164600"
+        # Zwei Aufrufe: wallstreet-online, dann onvista
+        assert mock_get.call_count == 2
+        first_url = mock_get.call_args_list[0][0][0]
+        second_url = mock_get.call_args_list[1][0][0]
+        assert "wallstreet-online.de" in first_url
+        assert "onvista.de" in second_url
+
+    def test_fallback_to_onvista_when_wallstreet_no_isin(self):
+        """wallstreet-online HTML ohne ISIN → onvista liefert ISIN."""
+        wso_response = MagicMock()
+        wso_response.text = "<html>keine ISIN hier</html>"
+        wso_response.raise_for_status = MagicMock()
+
+        onvista_response = MagicMock()
+        onvista_response.text = '<html>...DE000BASF111...</html>'
+        onvista_response.raise_for_status = MagicMock()
+
+        with patch(
+            "concilium.data.requests.get",
+            side_effect=[wso_response, onvista_response],
+        ) as mock_get:
+            isin = _wkn_to_isin("BASF11")
+
+        assert isin == "DE000BASF111"
+        assert mock_get.call_count == 2
+
+    def test_both_sources_fail_raises_value_error(self):
+        """Beide Quellen schlagen fehl → ValueError erwähnt beide Quellen."""
+        with patch(
+            "concilium.data.requests.get",
+            side_effect=[ConnectionError("DNS failed"), ConnectionError("DNS failed")],
+        ):
+            with pytest.raises(ValueError, match="weder wallstreet-online noch onvista"):
+                _wkn_to_isin("716460")
+
+    def test_both_sources_no_isin_raises_value_error(self):
+        """Beide Quellen liefern HTML ohne ISIN → ValueError."""
+        empty_response = MagicMock()
+        empty_response.text = "<html>keine ISIN hier</html>"
+        empty_response.raise_for_status = MagicMock()
+
+        with patch("concilium.data.requests.get", return_value=empty_response):
+            with pytest.raises(ValueError, match="keine ISIN"):
+                _wkn_to_isin("716460")
+
+    def test_onvista_uses_full_user_agent(self):
+        """onvista-Fallback verwendet den vollen Chrome-User-Agent."""
+        wso_response = MagicMock()
+        wso_response.text = "<html>keine ISIN</html>"
+        wso_response.raise_for_status = MagicMock()
+
+        onvista_response = MagicMock()
+        onvista_response.text = '<html>...DE0007164600...</html>'
+        onvista_response.raise_for_status = MagicMock()
+
+        with patch(
+            "concilium.data.requests.get",
+            side_effect=[wso_response, onvista_response],
+        ) as mock_get:
+            _wkn_to_isin("716460")
+
+        # onvista ist der 2. Aufruf
+        onvista_headers = mock_get.call_args_list[1][1]["headers"]
+        assert onvista_headers["User-Agent"] == (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        )

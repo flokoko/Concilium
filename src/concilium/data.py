@@ -48,8 +48,14 @@ _YAHOO_SEARCH_URL = (
 )
 _YAHOO_SEARCH_UA = "Mozilla/5.0"
 
-# wallstreet-online Suche (für WKN → ISIN)
+# wallstreet-online Suche (für WKN → ISIN, Primärquelle)
 _WSO_SEARCH_URL = "https://www.wallstreet-online.de/suche?q={query}"
+
+# onvista Suche — Fallback-Quelle für WKN → ISIN, wenn wallstreet-online versagt
+_ONVISTA_SEARCH_URL = (
+    "https://www.onvista.de/aktien/suche.html"
+    "?SEARCH_VALUE={query}&SEARCH_TYPE=0"
+)
 
 
 def _detect_identifier_type(identifier: str) -> str:
@@ -107,8 +113,8 @@ def _isin_to_ticker(isin: str) -> str:
     return symbol
 
 
-def _wkn_to_isin(wkn: str) -> str:
-    """Löst eine WKN über wallstreet-online zur ISIN auf.
+def _wkn_to_isin_wallstreet(wkn: str) -> str:
+    """Löst eine WKN über wallstreet-online zur ISIN auf (Primärquelle).
 
     GET https://www.wallstreet-online.de/suche?q={WKN}
     Extrahiert die erste ISIN via Regex aus dem HTML.
@@ -136,8 +142,79 @@ def _wkn_to_isin(wkn: str) -> str:
         )
 
     isin = match.group(0)
-    logger.info("WKN '%s' → ISIN '%s'", wkn, isin)
+    logger.info("WKN '%s' → ISIN '%s' (wallstreet-online)", wkn, isin)
     return isin
+
+
+def _wkn_to_isin_onvista(wkn: str) -> str:
+    """Löst eine WKN über onvista zur ISIN auf (Fallback-Quelle).
+
+    GET https://www.onvista.de/aktien/suche.html?SEARCH_VALUE={WKN}&SEARCH_TYPE=0
+    Extrahiert die erste ISIN via Regex aus dem HTML.
+    Verwendet den vollen Chrome-User-Agent (onvista blockiert minimale UAs).
+
+    Raises:
+        ValueError: bei Netzwerk-/Parse-Fehler oder leerem Ergebnis.
+    """
+    url = _ONVISTA_SEARCH_URL.format(query=wkn)
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+        raise ValueError(
+            f"Kann WKN '{wkn}' nicht zu einer ISIN auflösen "
+            f"(onvista nicht erreichbar). Bitte prüfen. "
+            f"Fehler: {exc}"
+        ) from exc
+
+    match = _ISIN_EXTRACT_RE.search(html)
+    if not match:
+        raise ValueError(
+            f"Kann WKN '{wkn}' nicht zu einer ISIN auflösen "
+            "(keine ISIN auf onvista gefunden). Bitte prüfen."
+        )
+
+    isin = match.group(0)
+    logger.info("WKN '%s' → ISIN '%s' (onvista)", wkn, isin)
+    return isin
+
+
+def _wkn_to_isin(wkn: str) -> str:
+    """Löst eine WKN zur ISIN auf — mit Fallback über zwei Quellen.
+
+    Reihenfolge:
+      1. wallstreet-online (Primärquelle)
+      2. onvista (Fallback)
+
+    Schlägt eine Quelle fehl, wird ein Warning geloggt und die nächste
+    Quelle versucht. Erst wenn beide versagen, wird ein ValueError geworfen.
+
+    Raises:
+        ValueError: wenn beide Quellen keinen Erfolg liefern.
+    """
+    errors: list[str] = []
+
+    # Primärquelle: wallstreet-online
+    try:
+        return _wkn_to_isin_wallstreet(wkn)
+    except ValueError as exc:
+        logger.warning("wallstreet-online WKN→ISIN fehlgeschlagen für '%s': %s", wkn, exc)
+        errors.append(f"wallstreet-online: {exc}")
+
+    # Fallback: onvista
+    try:
+        return _wkn_to_isin_onvista(wkn)
+    except ValueError as exc:
+        logger.warning("onvista WKN→ISIN fehlgeschlagen für '%s': %s", wkn, exc)
+        errors.append(f"onvista: {exc}")
+
+    # Beide Quellen gescheitert
+    raise ValueError(
+        f"Kann WKN '{wkn}' nicht zu einer ISIN auflösen "
+        f"(weder wallstreet-online noch onvista lieferten ein Ergebnis). "
+        f"Fehler: {'; '.join(errors)}"
+    )
 
 
 def resolve_identifier(identifier: str) -> tuple[str, dict[str, Any]]:
