@@ -6,6 +6,7 @@ Agenten liefern Stimmung (bullish/neutral/bearish) + Score (1-5).
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import re
@@ -14,6 +15,9 @@ from typing import Any
 from .llm import LLMClient
 
 logger = logging.getLogger(__name__)
+
+# Maximale Anzahl paralleler Threads für unabhängige LLM-Calls
+_MAX_PARALLEL = 3
 
 # ---------------------------------------------------------------------------
 # Prompt-Templates (alle auf Deutsch)
@@ -334,19 +338,45 @@ def _call_agent(llm: LLMClient, system_prompt: str, user_text: str, temperature:
 def analyst_team(data: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
     """Ruft 3 Analysten-Rollen auf (Fundamental, Technical, Sentiment).
 
-    Returns dict mit 'fundamental', 'technical', 'sentiment' Schlüsseln.
+    Returns dict mit 'fundamental', 'technical', 'sentiment' und 'technicals' Schlüsseln.
+    Die 3 Analysten-Calls werden PARALLEL über ThreadPoolExecutor ausgeführt.
+    Bei einem Teilfehler wird eine Warnung geloggt und für den betroffenen Key
+    ein Fehlereintrag geliefert — die Pipeline crasht nicht.
     """
     data_text = _build_data_text(data)
 
-    fundamental = _call_agent(llm, SYSTEM_FUNDAMENTAL, data_text)
-    technical = _call_agent(llm, SYSTEM_TECHNICAL, data_text)
-    sentiment = _call_agent(llm, SYSTEM_SENTIMENT, data_text)
+    # (key, system_prompt) — Reihenfolge bleibt fundamental/technical/sentiment
+    analyst_specs = [
+        ("fundamental", SYSTEM_FUNDAMENTAL),
+        ("technical", SYSTEM_TECHNICAL),
+        ("sentiment", SYSTEM_SENTIMENT),
+    ]
 
-    return {
-        "fundamental": fundamental,
-        "technical": technical,
-        "sentiment": sentiment,
-    }
+    results: dict[str, Any] = {}
+
+    def _run_one(key: str, system_prompt: str) -> tuple[str, dict[str, Any]]:
+        return key, _call_agent(llm, system_prompt, data_text)
+
+    max_workers = min(len(analyst_specs), _MAX_PARALLEL)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_run_one, key, prompt): key for key, prompt in analyst_specs}
+        for future in concurrent.futures.as_completed(futures):
+            key = futures[future]
+            try:
+                _, result = future.result()
+                results[key] = result
+            except Exception as exc:  # noqa: BLE001 — nie crashen
+                logger.warning("Analyst '%s' fehlgeschlagen: %s", key, exc)
+                results[key] = {"_raw": "", "fehler": str(exc)}
+
+    # Sicherstellen, dass alle 3 Keys vorhanden sind (defensiv)
+    for key, _ in analyst_specs:
+        results.setdefault(key, {"_raw": "", "fehler": "nicht ausgeführt"})
+
+    # technicals durchreichen, damit _extract_current_price sauber arbeiten kann
+    results["technicals"] = data.get("technicals", {})
+
+    return results
 
 
 def _analyst_summary_text(analysts: dict[str, Any]) -> str:
@@ -413,12 +443,15 @@ _DEFAULT_TEMPERATURES: list[float] = [0.3, 0.5, 0.7]
 
 
 def _extract_current_price(analysts: dict[str, Any]) -> float | None:
-    """Versucht, den aktuellen Kurs aus den Analysten-Daten zu extrahieren.
+    """Extrahiert den aktuellen Kurs aus den Analysten-Daten.
 
-    Durchsucht technicals-Subdicts und rohe Analysten-Antworten nach current_price.
+    Primärer Weg: direkt aus ``analysts["technicals"]["current_price"]`` (wird
+    von ``analyst_team`` zuverlässig aus dem data-dict durchgereicht).
+    Fallback: Suche in den Analysten-Subdicts nach einem ``current_price``-Feld.
+    Kein Regex-Parsing aus rohem LLM-Fließtext mehr (unzuverlässig).
     """
-    # Direkt aus technicals (wenn analysts ein erweitertes dict ist)
-    technicals = analysts.get("technicals", {})
+    # 1. Direkt aus technicals (primärer Weg — von analyst_team durchgereicht)
+    technicals = analysts.get("technicals")
     if isinstance(technicals, dict):
         price = technicals.get("current_price")
         if price is not None:
@@ -426,17 +459,19 @@ def _extract_current_price(analysts: dict[str, Any]) -> float | None:
                 return float(price)
             except (TypeError, ValueError):
                 pass
-    # Fallback: in rohen Analysten-Antworten suchen
+
+    # 2. Fallback: in Analysten-Subdicts nach current_price suchen
     for key in ("fundamental", "technical", "sentiment"):
         a = analysts.get(key, {})
-        raw = str(a.get("_raw", ""))
-        # Suche nach "Aktueller Kurs: 123.45" im Daten-Text
-        match = re.search(r"Aktueller Kurs:\s*([\d.,]+)", raw)
-        if match:
+        if not isinstance(a, dict):
+            continue
+        price = a.get("current_price")
+        if price is not None:
             try:
-                return float(match.group(1).replace(",", ""))
+                return float(price)
             except (TypeError, ValueError):
                 pass
+
     return None
 
 
@@ -525,14 +560,31 @@ def ensemble_trader(
     for i in range(runs):
         temps.append(temperature_range[i % len(temperature_range)])
 
-    # Mehrere Trader-Runs ausführen
+    # Mehrere Trader-Runs PARALLEL ausführen
     all_runs: list[dict[str, Any]] = []
+
+    def _run_trader(temp: float) -> dict[str, Any]:
+        return trader(analysts, debate_result, llm, temperature=temp)
+
+    max_workers = min(len(temps), _MAX_PARALLEL)
+    # Reihenfolge der Ergebnisse muss der Temp-Reihenfolge entsprechen für
+    # deterministische Aggregation (Mehrheitsabstimmung, basis_run-Auswahl).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_temp = {pool.submit(_run_trader, temp): temp for temp in temps}
+        # Ergebnisse in der gleichen Reihenfolge wie temps sammeln
+        temp_to_result: dict[float, dict[str, Any] | None] = {}
+        for future in concurrent.futures.as_completed(future_to_temp):
+            temp = future_to_temp[future]
+            try:
+                temp_to_result[temp] = future.result()
+            except Exception as exc:  # noqa: BLE001 — nie crashen
+                logger.warning("Ensemble-Run fehlgeschlagen (temp=%.1f): %s", temp, exc)
+                temp_to_result[temp] = None
+
     for temp in temps:
-        try:
-            run = trader(analysts, debate_result, llm, temperature=temp)
+        run = temp_to_result.get(temp)
+        if run is not None:
             all_runs.append(run)
-        except Exception as exc:  # noqa: BLE001 — nie crashen
-            logger.warning("Ensemble-Run fehlgeschlagen (temp=%.1f): %s", temp, exc)
 
     # Robust: wenn gar kein Run erfolgreich war
     if not all_runs:
