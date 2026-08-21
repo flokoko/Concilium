@@ -79,7 +79,7 @@ class TestAnalystTeamUsesDataText:
             mock_build.assert_not_called()
 
     def test_calls_build_data_text_when_none(self):
-        """Wenn data_text=None ist, wird _build_data_text intern aufgerufen (Abwärtskompatibilität)."""
+        """Wenn data_text=None ist, wird _build_data_text pro Analyst rollenspezifisch aufgerufen."""
         llm = _RecordingLLM(json.dumps({
             "rolle": "Fundamental-Analyst",
             "stimmung": "bullish",
@@ -89,7 +89,14 @@ class TestAnalystTeamUsesDataText:
 
         with patch("concilium.agents._build_data_text", return_value="computed text") as mock_build:
             analyst_team(_MOCK_DATA, llm, data_text=None)
-            mock_build.assert_called_once_with(_MOCK_DATA)
+            # Wird 3x aufgerufen (einmal pro Analyst) mit jeweiliger role
+            assert mock_build.call_count == 3
+            # Jeder Call bekommt data als erstes Argument
+            for call in mock_build.call_args_list:
+                assert call.args[0] is _MOCK_DATA
+            # Die drei Rollen müssen verteilt sein
+            roles = {call.kwargs["role"] for call in mock_build.call_args_list}
+            assert roles == {"fundamental", "technik", "sentiment"}
 
 
 class TestRiskManagerUsesDataText:

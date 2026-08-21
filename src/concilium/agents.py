@@ -227,8 +227,21 @@ def _fmt_num(val: Any, suffix: str = "") -> str:
         return "N/A"
 
 
-def _build_data_text(data: dict[str, Any]) -> str:
-    """Erstellt einen kompakten deutschen Daten-Text für LLM-Prompts."""
+def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
+    """Erstellt einen kompakten deutschen Daten-Text für LLM-Prompts.
+
+    Args:
+        data: Daten-dict aus collect_ticker_data.
+        role: Rollenspezifische Filterung der Daten-Sektionen.
+            - ``"alle"`` (Default): alle Sektionen (rückwärtskompatibel).
+            - ``"fundamental"``: Aktien-Identität, Datenqualitäts-Warnungen,
+              FUNDAMENTALS, Analysten-Erwartungen, Makro/Zinsen, Peer-Vergleich.
+              Keine TECHNIK- oder SENTIMENT-Sektion.
+            - ``"technik"``: Aktien-Identität, TECHNIK-Sektion, aktueller Kurs,
+              Makro-Zinstrend (kurz). Keine FUNDAMENTALS- oder SENTIMENT-Sektion.
+            - ``"sentiment"``: Aktien-Identität, SENTIMENT-Sektion, Headlines.
+              Keine FUNDAMENTALS- oder TECHNIK-Sektion.
+    """
     f = data.get("fundamentals", {})
     t = data.get("technicals", {})
     s = data.get("sentiment", {})
@@ -236,108 +249,127 @@ def _build_data_text(data: dict[str, Any]) -> str:
     macro = data.get("macro", {})
     peers = data.get("peers", [])
 
+    # Aktien-Identität — immer enthalten
     lines = [
         f"Aktie: {data.get('ticker', '?')} ({f.get('name', 'N/A')})",
         f"Sektor: {f.get('sector', 'N/A')} / {f.get('industry', 'N/A')}",
     ]
 
-    # Datenqualitäts-Warnungen — LLM soll betroffene Kennzahlen kritisch bewerten
-    data_warnings = data.get("data_warnings", [])
-    if data_warnings:
-        lines.append("")
-        lines.append("=== DATENQUALITÄTS-WARNUNGEN ===")
-        lines.append(
-            "  Die folgenden Kennzahlen sind möglicherweise unzuverlässig "
-            "(ADR-Fehler, Datenfehler). Werte weiterhin anzeigen, aber kritisch bewerten:"
-        )
-        for w in data_warnings:
-            lines.append(f"  - {w}")
-
-    lines.extend([
-        "",
-        "=== FUNDAMENTALS ===",
-        f"  Marktkapitalisierung: {_fmt_num(f.get('market_cap'), ' ')}",
-        f"  KGV (trailing): {_fmt_num(f.get('pe_ratio'))}",
-        f"  EPS: {_fmt_num(f.get('eps'))}",
-        f"  Umsatz: {_fmt_num(f.get('revenue'), ' ')}",
-        f"  Umsatzwachstum: {_fmt_num(f.get('revenue_growth'))} (als Anteil)",
-        f"  Gewinnmarge: {_fmt_num(f.get('profit_margin'))}",
-        f"  PEG: {_fmt_num(f.get('peg_ratio'))}",
-        f"  Dividendenrendite: {_fmt_num(f.get('dividend_yield'))}",
-        f"  Beta: {_fmt_num(f.get('beta'))}",
-        f"  52W Hoch: {_fmt_num(f.get('fifty_two_week_high'))}",
-        f"  52W Tief: {_fmt_num(f.get('fifty_two_week_low'))}",
-        # Feature 1: Analysten-Erwartungen
-        f"  Analysten-Konsens: {f.get('recommendation_key', 'N/A')}",
-        f"  Analysten-Mean (Skala 1=strong buy … 5=sell): {_fmt_num(f.get('recommendation_mean'))}",
-        f"  Anzahl Analysten: {f.get('analyst_count', 'N/A')}",
-        f"  Zielkurs Ø: {_fmt_num(f.get('analyst_target_mean'))}",
-        f"  Zielkurs hoch: {_fmt_num(f.get('analyst_target_high'))}",
-        f"  Zielkurs tief: {_fmt_num(f.get('analyst_target_low'))}",
-        f"  Upside (geschätzt): {_fmt_num(f.get('analyst_upside_pct'))} %",
-        "",
-        "=== TECHNIK ===",
-        f"  Aktueller Kurs: {_fmt_num(t.get('current_price'))}",
-        f"  SMA50: {_fmt_num(t.get('sma50'))}",
-        f"  SMA200: {_fmt_num(t.get('sma200'))}",
-        f"  RSI(14): {_fmt_num(t.get('rsi14'))}",
-        f"  MACD: {_fmt_num(t.get('macd', {}).get('macd'))} / Signal: {_fmt_num(t.get('macd', {}).get('signal'))}",
-        f"  Bollinger: Unter {_fmt_num(t.get('bollinger', {}).get('lower'))} / Mitte {_fmt_num(t.get('bollinger', {}).get('middle'))} / Ober {_fmt_num(t.get('bollinger', {}).get('upper'))}",
-        f"  Bollinger-Position: {_fmt_num(t.get('bollinger', {}).get('position'))} (0=unteres Band, 1=oberes Band)",
-        f"  Volumen: {_fmt_num(t.get('current_volume'), ' ')}",
-        f"  Ø Volumen 30T: {_fmt_num(t.get('avg_volume_30d'), ' ')}",
-    ])
-
-    # Feature 2: Makro/Zins-Daten
-    if macro:
-        lines.append("")
-        lines.append("=== MAKRO / ZINSEN ===")
-        lines.append(f"  10y US Treasury Yield: {_fmt_num(macro.get('us_10y_yield'))} %")
-        lines.append(f"  10y Yield vor 1 Monat: {_fmt_num(macro.get('us_10y_yield_1m_ago'))} %")
-        lines.append(f"  10y Zinstrend: {macro.get('us_10y_trend', 'N/A')}")
-        source = macro.get("sp500_source", "")
-        source_label = f" ({source})" if source and source != "none" else ""
-        lines.append(f"  S&P 500 KGV{source_label}: {_fmt_num(macro.get('sp500_pe'))}")
-        lines.append(f"  S&P 500 Marktkap: {_fmt_num(macro.get('sp500_market_cap'), ' ')}")
-        lines.append(
-            "  Hinweis: Hohe/steigende Zinsen belasten kapitalintensive "
-            "und erneuerbare Sektoren."
-        )
-
-    # Feature 3: Peer-Vergleich
-    if peers:
-        lines.append("")
-        lines.append("=== PEER-VERGLEICH ===")
-        lines.append(f"  Eigener KGV: {_fmt_num(f.get('pe_ratio'))}")
-        for p in peers:
+    # Datenqualitäts-Warnungen — für fundamental und alle
+    if role in ("alle", "fundamental"):
+        data_warnings = data.get("data_warnings", [])
+        if data_warnings:
+            lines.append("")
+            lines.append("=== DATENQUALITÄTS-WARNUNGEN ===")
             lines.append(
-                f"  {p.get('ticker', '?')}: KGV {_fmt_num(p.get('pe_ratio'))}, "
-                f"Marktkap {_fmt_num(p.get('market_cap'), ' ')} ({p.get('name', 'N/A')})"
+                "  Die folgenden Kennzahlen sind möglicherweise unzuverlässig "
+                "(ADR-Fehler, Datenfehler). Werte weiterhin anzeigen, aber kritisch bewerten:"
             )
-        if macro:
-            lines.append(f"  S&P 500 KGV (Benchmark): {_fmt_num(macro.get('sp500_pe'))}")
+            for w in data_warnings:
+                lines.append(f"  - {w}")
 
-    lines.append("")
-    lines.append("=== SENTIMENT ===")
-    lines.append(f"  Positive Headlines: {s.get('positiv', 0)}")
-    lines.append(f"  Negative Headlines: {s.get('negativ', 0)}")
-    lines.append(f"  Neutrale Headlines: {s.get('neutral', 0)}")
+    # FUNDAMENTALS — für fundamental und alle
+    if role in ("alle", "fundamental"):
+        lines.extend([
+            "",
+            "=== FUNDAMENTALS ===",
+            f"  Marktkapitalisierung: {_fmt_num(f.get('market_cap'), ' ')}",
+            f"  KGV (trailing): {_fmt_num(f.get('pe_ratio'))}",
+            f"  EPS: {_fmt_num(f.get('eps'))}",
+            f"  Umsatz: {_fmt_num(f.get('revenue'), ' ')}",
+            f"  Umsatzwachstum: {_fmt_num(f.get('revenue_growth'))} (als Anteil)",
+            f"  Gewinnmarge: {_fmt_num(f.get('profit_margin'))}",
+            f"  PEG: {_fmt_num(f.get('peg_ratio'))}",
+            f"  Dividendenrendite: {_fmt_num(f.get('dividend_yield'))}",
+            f"  Beta: {_fmt_num(f.get('beta'))}",
+            f"  52W Hoch: {_fmt_num(f.get('fifty_two_week_high'))}",
+            f"  52W Tief: {_fmt_num(f.get('fifty_two_week_low'))}",
+            # Feature 1: Analysten-Erwartungen
+            f"  Analysten-Konsens: {f.get('recommendation_key', 'N/A')}",
+            f"  Analysten-Mean (Skala 1=strong buy … 5=sell): {_fmt_num(f.get('recommendation_mean'))}",
+            f"  Anzahl Analysten: {f.get('analyst_count', 'N/A')}",
+            f"  Zielkurs Ø: {_fmt_num(f.get('analyst_target_mean'))}",
+            f"  Zielkurs hoch: {_fmt_num(f.get('analyst_target_high'))}",
+            f"  Zielkurs tief: {_fmt_num(f.get('analyst_target_low'))}",
+            f"  Upside (geschätzt): {_fmt_num(f.get('analyst_upside_pct'))} %",
+        ])
 
-    # Zeitgewichtete / dominante Stimmung hinzufügen, falls verfügbar
-    is_weighted = s.get("weighted", False)
-    if is_weighted:
-        lines.append("  Zeitgewichtung: ja (Halbwertszeit 7 Tage)")
-        lines.append(f"  Dominante Stimmung: {s.get('dominant', 'N/A')}")
-    else:
-        lines.append("  Zeitgewichtung: nein (ungewichtete Zählung)")
-        if s.get("dominant"):
+    # TECHNIK — für technik und alle
+    if role in ("alle", "technik"):
+        lines.extend([
+            "",
+            "=== TECHNIK ===",
+            f"  Aktueller Kurs: {_fmt_num(t.get('current_price'))}",
+            f"  SMA50: {_fmt_num(t.get('sma50'))}",
+            f"  SMA200: {_fmt_num(t.get('sma200'))}",
+            f"  RSI(14): {_fmt_num(t.get('rsi14'))}",
+            f"  MACD: {_fmt_num(t.get('macd', {}).get('macd'))} / Signal: {_fmt_num(t.get('macd', {}).get('signal'))}",
+            f"  Bollinger: Unter {_fmt_num(t.get('bollinger', {}).get('lower'))} / Mitte {_fmt_num(t.get('bollinger', {}).get('middle'))} / Ober {_fmt_num(t.get('bollinger', {}).get('upper'))}",
+            f"  Bollinger-Position: {_fmt_num(t.get('bollinger', {}).get('position'))} (0=unteres Band, 1=oberes Band)",
+            f"  Volumen: {_fmt_num(t.get('current_volume'), ' ')}",
+            f"  Ø Volumen 30T: {_fmt_num(t.get('avg_volume_30d'), ' ')}",
+        ])
+
+    # Makro/Zins-Daten — für alle (vollständig), fundamental (vollständig),
+    # technik (nur Zinstrend-Kurzform), sentiment (keine)
+    if macro:
+        if role in ("alle", "fundamental"):
+            lines.append("")
+            lines.append("=== MAKRO / ZINSEN ===")
+            lines.append(f"  10y US Treasury Yield: {_fmt_num(macro.get('us_10y_yield'))} %")
+            lines.append(f"  10y Yield vor 1 Monat: {_fmt_num(macro.get('us_10y_yield_1m_ago'))} %")
+            lines.append(f"  10y Zinstrend: {macro.get('us_10y_trend', 'N/A')}")
+            source = macro.get("sp500_source", "")
+            source_label = f" ({source})" if source and source != "none" else ""
+            lines.append(f"  S&P 500 KGV{source_label}: {_fmt_num(macro.get('sp500_pe'))}")
+            lines.append(f"  S&P 500 Marktkap: {_fmt_num(macro.get('sp500_market_cap'), ' ')}")
+            lines.append(
+                "  Hinweis: Hohe/steigende Zinsen belasten kapitalintensive "
+                "und erneuerbare Sektoren."
+            )
+        elif role == "technik":
+            lines.append("")
+            lines.append("=== MAKRO / ZINSEN (Kurz) ===")
+            lines.append(f"  10y US Treasury Yield: {_fmt_num(macro.get('us_10y_yield'))} %")
+            lines.append(f"  10y Zinstrend: {macro.get('us_10y_trend', 'N/A')}")
+
+    # Peer-Vergleich — für fundamental und alle
+    if role in ("alle", "fundamental"):
+        if peers:
+            lines.append("")
+            lines.append("=== PEER-VERGLEICH ===")
+            lines.append(f"  Eigener KGV: {_fmt_num(f.get('pe_ratio'))}")
+            for p in peers:
+                lines.append(
+                    f"  {p.get('ticker', '?')}: KGV {_fmt_num(p.get('pe_ratio'))}, "
+                    f"Marktkap {_fmt_num(p.get('market_cap'), ' ')} ({p.get('name', 'N/A')})"
+                )
+            if macro:
+                lines.append(f"  S&P 500 KGV (Benchmark): {_fmt_num(macro.get('sp500_pe'))}")
+
+    # SENTIMENT — für sentiment und alle
+    if role in ("alle", "sentiment"):
+        lines.append("")
+        lines.append("=== SENTIMENT ===")
+        lines.append(f"  Positive Headlines: {s.get('positiv', 0)}")
+        lines.append(f"  Negative Headlines: {s.get('negativ', 0)}")
+        lines.append(f"  Neutrale Headlines: {s.get('neutral', 0)}")
+
+        # Zeitgewichtete / dominante Stimmung hinzufügen, falls verfügbar
+        is_weighted = s.get("weighted", False)
+        if is_weighted:
+            lines.append("  Zeitgewichtung: ja (Halbwertszeit 7 Tage)")
             lines.append(f"  Dominante Stimmung: {s.get('dominant', 'N/A')}")
-    lines.append(f"  Sample-Größe: {s.get('sample_size', len(news))}")
+        else:
+            lines.append("  Zeitgewichtung: nein (ungewichtete Zählung)")
+            if s.get("dominant"):
+                lines.append(f"  Dominante Stimmung: {s.get('dominant', 'N/A')}")
+        lines.append(f"  Sample-Größe: {s.get('sample_size', len(news))}")
 
-    if news:
-        lines.append("  Headlines (neueste):")
-        for h in news[:10]:
-            lines.append(f"    - {h}")
+        if news:
+            lines.append("  Headlines (neueste):")
+            for h in news[:10]:
+                lines.append(f"    - {h}")
 
     return "\n".join(lines)
 
@@ -345,6 +377,48 @@ def _build_data_text(data: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Agenten-Funktionen
 # ---------------------------------------------------------------------------
+
+
+def _analyst_consistency_warning(stimmung: Any, score: Any) -> str:
+    """Prüft Stimmung/Score-Konsistenz und gibt ggf. eine deutsche Warnung zurück.
+
+    Inkonsistenzen (z.B. bearish + Score 4) deuten auf Modell-Halluzination.
+
+    Regeln:
+        - bullish und score <= 1 → Warnung
+        - bearish und score >= 4 → Warnung
+        - neutral und (score <= 1 oder score >= 5) → Warnung
+        - sonst "" (keine Warnung)
+
+    Args:
+        stimmung: Stimmung als String ("bullish"/"neutral"/"bearish").
+        score: Score als Zahl (1-5).
+
+    Returns:
+        Deutschen Warn-String bei Inkonsistenz, sonst leeren String "".
+    """
+    try:
+        score_int = int(score)
+    except (TypeError, ValueError):
+        return ""
+
+    stim = str(stimmung).strip().lower() if stimmung else ""
+    if stim == "bullish" and score_int <= 1:
+        return (
+            f"Konsistenz-Warnung: Stimmung='bullish' mit Score={score_int} "
+            "ist inkonsistent (bullish erwartet Score ≥ 2). Mögliche Halluzination."
+        )
+    if stim == "bearish" and score_int >= 4:
+        return (
+            f"Konsistenz-Warnung: Stimmung='bearish' mit Score={score_int} "
+            "ist inkonsistent (bearish erwartet Score ≤ 3). Mögliche Halluzination."
+        )
+    if stim == "neutral" and (score_int <= 1 or score_int >= 5):
+        return (
+            f"Konsistenz-Warnung: Stimmung='neutral' mit Score={score_int} "
+            "ist inkonsistent (neutral erwartet Score 2-4). Mögliche Halluzination."
+        )
+    return ""
 
 
 def _call_agent(llm: LLMClient, system_prompt: str, user_text: str, temperature: float = 0.3) -> dict[str, Any]:
@@ -371,14 +445,26 @@ def analyst_team(
     Bei einem Teilfehler wird eine Warnung geloggt und für den betroffenen key
     ein Fehlereintrag geliefert — die Pipeline crasht nicht.
 
+    Jeder Analyst erhält einen rollenspezifischen Daten-Text via _build_data_text
+    (weniger Rauschen). Wenn data_text extern gesetzt ist, wird dieser unverändert
+    für alle Analysten verwendet (nicht übersteuert).
+
+    Nach jedem Analysten-Ergebnis wird _analyst_consistency_warning geprüft;
+    bei Inkonsistenz wird ein Feld "konsistenz_warnung" angehängt.
+
     Args:
         data: Daten-dict aus collect_ticker_data.
         llm: LLMClient für die Agenten-Calls.
         data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
-            _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
+            _build_data_text-Berechnung). Wenn None, wird pro Analyst ein
+            rollenspezifischer Text gebaut.
     """
-    if data_text is None:
-        data_text = _build_data_text(data)
+    # Rollen-Mapping: analyst_team key → _build_data_text role
+    role_map = {
+        "fundamental": "fundamental",
+        "technical": "technik",
+        "sentiment": "sentiment",
+    }
 
     # (key, system_prompt) — Reihenfolge bleibt fundamental/technical/sentiment
     analyst_specs = [
@@ -390,7 +476,11 @@ def analyst_team(
     results: dict[str, Any] = {}
 
     def _run_one(key: str, system_prompt: str) -> tuple[str, dict[str, Any]]:
-        return key, _call_agent(llm, system_prompt, data_text)
+        if data_text is not None:
+            text = data_text
+        else:
+            text = _build_data_text(data, role=role_map[key])
+        return key, _call_agent(llm, system_prompt, text)
 
     max_workers = min(len(analyst_specs), _MAX_PARALLEL)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -407,6 +497,15 @@ def analyst_team(
     # Sicherstellen, dass alle 3 Keys vorhanden sind (defensiv)
     for key, _ in analyst_specs:
         results.setdefault(key, {"_raw": "", "fehler": "nicht ausgeführt"})
+
+    # Konsistenz-Wächter: nach jedem Analysten-Ergebnis prüfen
+    for key in role_map:
+        a = results.get(key)
+        if not isinstance(a, dict):
+            continue
+        warning = _analyst_consistency_warning(a.get("stimmung"), a.get("score"))
+        if warning:
+            a["konsistenz_warnung"] = warning
 
     # technicals durchreichen, damit _extract_current_price sauber arbeiten kann
     results["technicals"] = data.get("technicals", {})
