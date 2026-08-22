@@ -67,6 +67,7 @@ def run_pipeline(
     ensemble: bool = True,
     ensemble_runs: int = 3,
     resume: bool = False,
+    portfolio_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -90,6 +91,9 @@ def run_pipeline(
         resume: Wenn True, wird ein vorhandener Checkpoint geladen und nur die
             fehlenden Schritte ab der letzten abgeschlossenen Stelle ausgeführt.
             Default False — unverändertes Verhalten (von vorn).
+        portfolio_context: Optionaler Gesamt-Portfolio-Kontext (Korrelation,
+            Overlap, Konzentration über alle analysierten Titel). Wenn gesetzt,
+            wird er dem Portfolio-Manager als zusätzlicher Kontext übergeben.
 
     Returns:
         dict mit allen Zwischenergebnissen.
@@ -263,6 +267,7 @@ def run_pipeline(
             portfolio_fit=result.get("portfolio_fit"),
             feedback_context=feedback_context,
             reflection_context=reflection_context,
+            portfolio_context=portfolio_context,
         )
         result["final"] = final
         _save_step(result, ticker, "final")
@@ -282,3 +287,130 @@ def run_pipeline(
     clear_checkpoint(ticker)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Portfolio-Modus: mehrere Ticker als Ganzheit analysieren
+# ---------------------------------------------------------------------------
+
+
+def run_portfolio(
+    tickers: list[str],
+    llm: LLMClient | None = None,
+    backtest: bool = False,
+    ensemble: bool = True,
+    ensemble_runs: int = 3,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Portfolio-Modus: analysiert mehrere Ticker als Depot-Ganzheit.
+
+    Führt für jeden Ticker die Einzel-Pipeline aus (alle Schritte inkl. PM),
+    berechnet dann die Portfolio-Analyse (Korrelation, Overlap, Konzentration)
+    über alle History-Daten + Bestand, und gibt jedem PM-Lauf den
+    Gesamt-Exposure-Kontext mit.
+
+    Genauer Ablauf:
+      1. Phase 1: Für jeden Ticker run_pipeline OHNE portfolio_context
+         (Vor-Schritte: data, analysts, debate, trade, risk, portfolio_fit,
+         trade_revision, final). Der erste PM-Lauf sieht nur seinen eigenen
+         portfolio_fit.
+      2. Portfolio-Analyse über alle Ergebnisse berechnen (Korrelation,
+         Overlap, Konzentration).
+      3. Phase 2: Für jeden Ticker wird der PM ein zweites Mal aufgerufen,
+         diesmal MIT portfolio_context (Gesamt-Exposure). Das finale Ergebnis
+         enthält die PM-Entscheidung mit Portfolio-Kontext.
+
+    Wenn llm=None (--no-llm), werden nur Datensnapshots gesammelt und die
+    Portfolio-Analyse deterministisch berechnet (kein PM).
+
+    Args:
+        tickers: Liste der zu analysierenden Ticker-Symbole.
+        llm: LLMClient oder None für --no-llm Modus.
+        backtest: Ob Backtest-Signalproxy ausgeführt werden soll.
+        ensemble: Ob der Trader als Ensemble ausgeführt wird.
+        ensemble_runs: Anzahl der Ensemble-Runs.
+        resume: Resume-Modus für Einzel-Pipelines.
+
+    Returns:
+        dict mit:
+          - results: {ticker: pipeline_result} (alle Ticker)
+          - portfolio_analysis: Ergebnis von run_portfolio_analysis()
+          - tickers: Liste der analysierten Ticker
+    """
+    from .portfolio_analysis import run_portfolio_analysis
+
+    # --- Phase 1: Einzel-Pipelines für jeden Ticker ---
+    results: dict[str, dict[str, Any]] = {}
+
+    for ticker in tickers:
+        logger.info("Portfolio-Modus Phase 1: Analyse %s", ticker)
+        try:
+            result = run_pipeline(
+                ticker,
+                llm=llm,
+                backtest=backtest,
+                peers=None,
+                ensemble=ensemble,
+                ensemble_runs=ensemble_runs,
+                resume=resume,
+                portfolio_context=None,
+            )
+            results[ticker] = result
+        except Exception as exc:  # noqa: BLE001 — nie crashen
+            logger.warning("Ticker '%s' fehlgeschlagen im Portfolio-Modus: %s", ticker, exc)
+            results[ticker] = {
+                "ticker": ticker,
+                "error": str(exc),
+                "data": {},
+                "no_llm": True,
+            }
+
+    # --- Portfolio-Analyse berechnen (deterministisch) ---
+    positions: list[dict[str, Any]] = []
+    try:
+        positions = fetch_portfolio_positions()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Portfolio-Positionen konnten nicht geladen werden: %s", exc)
+
+    portfolio_analysis = run_portfolio_analysis(results, positions)
+
+    # --- Phase 2: PM mit Portfolio-Kontext (nur im LLM-Modus) ---
+    if llm is not None:
+        for ticker in tickers:
+            result = results.get(ticker, {})
+            if result.get("error"):
+                continue
+            # PM nur neu aufrufen, wenn Vor-Schritte erfolgreich waren
+            trade = result.get("trade")
+            risk = result.get("risk")
+            if not trade or not risk:
+                continue
+
+            logger.info("Portfolio-Modus Phase 2: PM mit Kontext für %s", ticker)
+            try:
+                from .agents import portfolio_manager
+
+                feedback_context = result.get("_feedback_context", "")
+                reflection_context = result.get("_reflection_context", "")
+
+                final = portfolio_manager(
+                    trade,
+                    risk,
+                    llm,
+                    portfolio_fit=result.get("portfolio_fit"),
+                    feedback_context=feedback_context,
+                    reflection_context=reflection_context,
+                    portfolio_context=portfolio_analysis,
+                )
+                result["final"] = final
+                result["portfolio_context"] = portfolio_analysis
+            except Exception as exc:  # noqa: BLE001 — nie crashen
+                logger.warning(
+                    "PM-Zweitrunde für '%s' fehlgeschlagen: %s", ticker, exc
+                )
+
+    return {
+        "results": results,
+        "portfolio_analysis": portfolio_analysis,
+        "tickers": tickers,
+    }

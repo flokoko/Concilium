@@ -1246,6 +1246,7 @@ def portfolio_manager(
     portfolio_fit: dict[str, Any] | None = None,
     feedback_context: str = "",
     reflection_context: str = "",
+    portfolio_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Trifft finale Entscheidung.
 
@@ -1261,6 +1262,9 @@ def portfolio_manager(
         reflection_context: Optionaler Reflexions-Block (leer = keine
             Reflexion). Wird nach feedback_context am Ende des User-Prompts
             angehängt.
+        portfolio_context: Optionaler Gesamt-Portfolio-Kontext (Korrelation,
+            Overlap, Konzentration über alle analysierten Titel). Wenn gesetzt,
+            wird er als „Gesamt-Exposure"-Block in den User-Prompt injiziert.
     """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     risk_text = json.dumps(risk, ensure_ascii=False, indent=2, default=str)
@@ -1270,6 +1274,12 @@ def portfolio_manager(
     if portfolio_fit is not None:
         pf_text = json.dumps(portfolio_fit, ensure_ascii=False, indent=2, default=str)
         user_text += f"\n\nPortfolio-Fit-Einschätzung:\n{pf_text}"
+
+    if portfolio_context is not None:
+        from .portfolio_analysis import portfolio_context_to_text
+
+        pc_text = portfolio_context_to_text(portfolio_context)
+        user_text += f"\n\nGesamt-Exposure (Portfolio-Kontext aller analysierten Titel):\n{pc_text}"
 
     if feedback_context:
         user_text += f"\n\n{feedback_context}"

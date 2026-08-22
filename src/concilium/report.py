@@ -206,6 +206,144 @@ def _management_summary(result: dict[str, Any], no_llm: bool) -> list[str]:
     return lines
 
 
+def _fmt_corr(val: Any) -> str:
+    """Formatiert einen Korrelationskoeffizienten."""
+    if val is None:
+        return "n/a"
+    try:
+        fval = float(val)
+        if math.isnan(fval):
+            return "n/a"
+        return f"{fval:.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _portfolio_blick_section(pa: dict[str, Any]) -> list[str]:
+    """Erstellt die '## Portfolio-Blick'-Sektion aus portfolio_analysis.
+
+    Zeigt:
+    - Ziel-Gewichtungen der analysierten Titel
+    - Korrelations-Matrix (Paare mit |r| > 0.7 hervorgehoben)
+    - Konzentrations-/Overlap-Warnungen
+
+    Robust gegen fehlende Werte (n/a statt Zahlen).
+    """
+    lines: list[str] = []
+    lines.append("## Portfolio-Blick")
+    lines.append("")
+
+    tickers = pa.get("analysed_tickers", [])
+    correlations = pa.get("correlations", {})
+    target_weights = pa.get("target_weights", {})
+    overlap = pa.get("overlap")
+    concentration_warnings = pa.get("concentration_warnings", [])
+
+    # --- Ziel-Gewichtungen ---
+    if target_weights:
+        lines.append("### Ziel-Gewichtungen")
+        lines.append("")
+        lines.append("| Ticker | Ziel-Gewichtung % |")
+        lines.append("|---|---|")
+        for ticker in tickers:
+            w = target_weights.get(ticker)
+            if w is not None:
+                try:
+                    lines.append(f"| {ticker} | {float(w):.1f} % |")
+                except (TypeError, ValueError):
+                    lines.append(f"| {ticker} | n/a |")
+            else:
+                lines.append(f"| {ticker} | n/a |")
+        lines.append("")
+    else:
+        lines.append("_Keine Ziel-Gewichtungen verfügbar._")
+        lines.append("")
+
+    # --- Korrelations-Matrix ---
+    if correlations and len(tickers) >= 2:
+        lines.append("### Korrelations-Matrix (Tagesrenditen, Pearson)")
+        lines.append("")
+
+        # Header-Zeile
+        header = "| Ticker | " + " | ".join(tickers) + " |"
+        sep = "|---|" + "|".join(["---" for _ in tickers]) + "|"
+        lines.append(header)
+        lines.append(sep)
+
+        for t_a in tickers:
+            row_vals: list[str] = []
+            row_data = correlations.get(t_a, {})
+            for t_b in tickers:
+                r = row_data.get(t_b)
+                formatted = _fmt_corr(r)
+                # Hervorheben bei |r| > 0.7 (außer Diagonale)
+                if r is not None and t_a != t_b:
+                    try:
+                        r_float = float(r)
+                        if abs(r_float) > 0.7:
+                            formatted = f"**{formatted}** ⚠️"
+                    except (TypeError, ValueError):
+                        pass
+                row_vals.append(formatted)
+            lines.append(f"| {t_a} | " + " | ".join(row_vals) + " |")
+
+        lines.append("")
+        lines.append(
+            "_Fett markierte Werte (|r| > 0.7) deuten auf hohe Korrelation "
+            "und geringe Diversifikation hin._"
+        )
+        lines.append("")
+    elif len(tickers) >= 2:
+        lines.append("### Korrelations-Matrix")
+        lines.append("")
+        lines.append("_Nicht genügend überlappende Daten für Korrelations-Berechnung._")
+        lines.append("")
+
+    # --- Overlap-Warnungen ---
+    if overlap and isinstance(overlap, dict):
+        direct_overlaps = overlap.get("direct_overlaps", [])
+        total_overlap_pct = overlap.get("total_overlap_pct", 0.0)
+        overlap_warnings = overlap.get("warnings", [])
+
+        if direct_overlaps or total_overlap_pct > 0:
+            lines.append("### Overlap mit bestehendem Depot")
+            lines.append("")
+            if direct_overlaps:
+                lines.append("| Ticker | Depot-Position | Depot-% |")
+                lines.append("|---|---|---|")
+                for ov in direct_overlaps:
+                    lines.append(
+                        f"| {ov.get('ticker', '?')} | "
+                        f"{ov.get('position_name', '?')} | "
+                        f"{ov.get('depot_pct', 0):.1f} % |"
+                    )
+                lines.append("")
+            lines.append(f"**Gesamt-Overlap:** {total_overlap_pct:.1f} % des Depots")
+            lines.append("")
+
+            for w in overlap_warnings:
+                lines.append(f"- ⚠️ {w}")
+            if overlap_warnings:
+                lines.append("")
+
+    # --- Konzentrationswarnungen ---
+    if concentration_warnings:
+        lines.append("### Konzentrationswarnungen")
+        lines.append("")
+        for w in concentration_warnings:
+            marker = "⚠️ " if w.startswith("⚠️") else ""
+            text = w[2:] if w.startswith("⚠️") else w
+            lines.append(f"- {marker}{text}")
+        lines.append("")
+    else:
+        lines.append("### Konzentrationswarnungen")
+        lines.append("")
+        lines.append("_Keine auffälligen Konzentrationsrisiken erkannt._")
+        lines.append("")
+
+    return lines
+
+
 def generate_report(
     result: dict[str, Any],
     reports_dir: str | None = None,
@@ -455,6 +593,11 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         else:
             lines.append(f"_{bt.get('hinweis', 'Backtest nicht möglich.')}_")
             lines.append("")
+
+    # --- Portfolio-Blick (nur wenn portfolio_analysis vorhanden, in jedem Modus) ---
+    portfolio_analysis = result.get("portfolio_analysis")
+    if isinstance(portfolio_analysis, dict):
+        lines.extend(_portfolio_blick_section(portfolio_analysis))
 
     # --- Agenten-Abschnitte (nur mit LLM) ---
     if not no_llm and result.get("analysts"):
