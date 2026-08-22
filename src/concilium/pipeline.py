@@ -68,6 +68,7 @@ def run_pipeline(
     ensemble_runs: int = 3,
     resume: bool = False,
     portfolio_context: dict[str, Any] | None = None,
+    skip_final: bool = False,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -78,6 +79,7 @@ def run_pipeline(
       4. Trade-Vorschlag (1 LLM-Call oder Ensemble) — nur wenn llm gegeben
       5. Risk-Manager (1 LLM-Call) — nur wenn llm gegeben
       5b. Portfolio-Fit-Analyst (1 LLM-Call) — nur wenn llm gegeben
+      5c. Trade-Revision (2nd Pass)
       6. Portfolio-Manager finale Entscheidung (1 LLM-Call) — nur wenn llm gegeben
       7. Optional: Backtest-Signalproxy
 
@@ -94,6 +96,13 @@ def run_pipeline(
         portfolio_context: Optionaler Gesamt-Portfolio-Kontext (Korrelation,
             Overlap, Konzentration über alle analysierten Titel). Wenn gesetzt,
             wird er dem Portfolio-Manager als zusätzlicher Kontext übergeben.
+        skip_final: Wenn True, werden der Portfolio-Manager-Schritt (Schritt 6)
+            UND der Journal-Schritt (append_decision) übersprungen. Stattdessen
+            wird ``result["_final_pending"] = True`` gesetzt und
+            ``result["final"]`` bleibt None. Die Vor-Schritte laufen normal.
+            Dies wird vom Portfolio-Modus (``run_portfolio``) verwendet, um den
+            PM erst nach Berechnung des Portfolio-Kontexts einmalig aufzurufen.
+            Default False — unverändertes Verhalten.
 
     Returns:
         dict mit allen Zwischenergebnissen.
@@ -258,7 +267,14 @@ def run_pipeline(
         _save_step(result, ticker, "trade_revision")
 
     # --- 6. Portfolio-Manager ---
-    if not _is_completed(result, "final"):
+    if skip_final:
+        # Im Portfolio-Modus wird der PM zurückgehalten bis der Portfolio-Kontext
+        # berechnet ist. Nur ein Marker wird gesetzt; final bleibt None.
+        logger.info("Schritt 6 übersprungen (skip_final=True) — PM pending")
+        result["final"] = None
+        result["_final_pending"] = True
+        # "final" wird NICHT in _completed_steps eingetragen.
+    elif not _is_completed(result, "final"):
         logger.info("Schritt 6: Portfolio-Manager trifft finale Entscheidung")
         final = portfolio_manager(
             trade,
@@ -273,18 +289,24 @@ def run_pipeline(
         _save_step(result, ticker, "final")
 
     # --- Feature 4: Entscheidungs-Journal ---
-    # Nur im LLM-Modus (llm nicht None) und wenn final existiert
-    try:
-        from .journal import append_decision
+    # Nur im LLM-Modus (llm nicht None), wenn final existiert, und NICHT
+    # im skip_final-Modus (dort wird das Journal später von run_portfolio
+    # mit dem Portfolio-Kontext-final geschrieben).
+    if not skip_final:
+        try:
+            from .journal import append_decision
 
-        append_decision(result)
-        result["_journal_written"] = True
-    except Exception as exc:  # noqa: BLE001 — nie crashen
-        logger.warning("Entscheidung konnte nicht ins Journal geschrieben werden: %s", exc)
-        result["_journal_written"] = False
+            append_decision(result)
+            result["_journal_written"] = True
+        except Exception as exc:  # noqa: BLE001 — nie crashen
+            logger.warning("Entscheidung konnte nicht ins Journal geschrieben werden: %s", exc)
+            result["_journal_written"] = False
 
     # --- Erfolgreicher Lauf: Checkpoint aufräumen ---
-    clear_checkpoint(ticker)
+    # Im skip_final-Modus wird der Checkpoint NICHT aufgeräumt, da der
+    # PM-Schritt noch aussteht (run_portfolio übernimmt die Endabwicklung).
+    if not skip_final:
+        clear_checkpoint(ticker)
 
     return result
 
@@ -304,21 +326,21 @@ def run_portfolio(
 ) -> dict[str, Any]:
     """Portfolio-Modus: analysiert mehrere Ticker als Depot-Ganzheit.
 
-    Führt für jeden Ticker die Einzel-Pipeline aus (alle Schritte inkl. PM),
-    berechnet dann die Portfolio-Analyse (Korrelation, Overlap, Konzentration)
-    über alle History-Daten + Bestand, und gibt jedem PM-Lauf den
-    Gesamt-Exposure-Kontext mit.
+    Führt für jeden Ticker die Einzel-Pipeline aus (allerdings OHNE den
+    finalen Portfolio-Manager-Schritt), berechnet dann die Portfolio-Analyse
+    (Korrelation, Overlap, Konzentration) über alle History-Daten + Bestand,
+    und ruft den PM erst dann — EINMAL pro Ticker — mit dem Gesamt-Exposure-
+    Kontext auf.
 
     Genauer Ablauf:
-      1. Phase 1: Für jeden Ticker run_pipeline OHNE portfolio_context
-         (Vor-Schritte: data, analysts, debate, trade, risk, portfolio_fit,
-         trade_revision, final). Der erste PM-Lauf sieht nur seinen eigenen
-         portfolio_fit.
+      1. Phase 1: Für jeden Ticker run_pipeline mit ``skip_final=True`` —
+         die Vor-Schritte (data, analysts, debate, trade, risk, portfolio_fit,
+         trade_revision) laufen, aber der PM wird zurückgehalten.
       2. Portfolio-Analyse über alle Ergebnisse berechnen (Korrelation,
          Overlap, Konzentration).
-      3. Phase 2: Für jeden Ticker wird der PM ein zweites Mal aufgerufen,
-         diesmal MIT portfolio_context (Gesamt-Exposure). Das finale Ergebnis
-         enthält die PM-Entscheidung mit Portfolio-Kontext.
+      3. Phase 2: Für jeden Ticker wird der PM EINMAL aufgerufen, diesmal
+         MIT portfolio_context (Gesamt-Exposure). Erst danach wird das
+         Journal geschrieben — konsistent mit der angezeigten Entscheidung.
 
     Wenn llm=None (--no-llm), werden nur Datensnapshots gesammelt und die
     Portfolio-Analyse deterministisch berechnet (kein PM).
@@ -339,7 +361,9 @@ def run_portfolio(
     """
     from .portfolio_analysis import run_portfolio_analysis
 
-    # --- Phase 1: Einzel-Pipelines für jeden Ticker ---
+    # --- Phase 1: Einzel-Pipelines für jeden Ticker (ohne PM) ---
+    # skip_final=True hält den PM+Journal zurück, bis der Portfolio-Kontext
+    # berechnet ist. So läuft der PM nur EINMAL (mit Kontext) pro Ticker.
     results: dict[str, dict[str, Any]] = {}
 
     for ticker in tickers:
@@ -354,6 +378,7 @@ def run_portfolio(
                 ensemble_runs=ensemble_runs,
                 resume=resume,
                 portfolio_context=None,
+                skip_final=llm is not None,
             )
             results[ticker] = result
         except Exception as exc:  # noqa: BLE001 — nie crashen
@@ -375,12 +400,16 @@ def run_portfolio(
     portfolio_analysis = run_portfolio_analysis(results, positions)
 
     # --- Phase 2: PM mit Portfolio-Kontext (nur im LLM-Modus) ---
+    # Der PM wird jetzt EINMAL pro Ticker aufgerufen — mit Portfolio-Kontext.
+    # Erst DANACH wird das Journal geschrieben (konsistent mit angezeigtem final).
     if llm is not None:
+        from .journal import append_decision
+
         for ticker in tickers:
             result = results.get(ticker, {})
             if result.get("error"):
                 continue
-            # PM nur neu aufrufen, wenn Vor-Schritte erfolgreich waren
+            # PM nur aufrufen, wenn Vor-Schritte erfolgreich waren
             trade = result.get("trade")
             risk = result.get("risk")
             if not trade or not risk:
@@ -388,8 +417,6 @@ def run_portfolio(
 
             logger.info("Portfolio-Modus Phase 2: PM mit Kontext für %s", ticker)
             try:
-                from .agents import portfolio_manager
-
                 feedback_context = result.get("_feedback_context", "")
                 reflection_context = result.get("_reflection_context", "")
 
@@ -404,9 +431,25 @@ def run_portfolio(
                 )
                 result["final"] = final
                 result["portfolio_context"] = portfolio_analysis
+                result["_final_pending"] = False
+
+                # Journal EINMAL schreiben — mit dem final MIT Portfolio-Kontext
+                try:
+                    append_decision(result)
+                    result["_journal_written"] = True
+                except Exception as exc:  # noqa: BLE001 — nie crashen
+                    logger.warning(
+                        "Journal für '%s' konnte nicht geschrieben werden: %s",
+                        ticker,
+                        exc,
+                    )
+                    result["_journal_written"] = False
+
+                # Checkpoint aufräumen — PM ist jetzt abgeschlossen
+                clear_checkpoint(ticker)
             except Exception as exc:  # noqa: BLE001 — nie crashen
                 logger.warning(
-                    "PM-Zweitrunde für '%s' fehlgeschlagen: %s", ticker, exc
+                    "PM-Lauf für '%s' fehlgeschlagen: %s", ticker, exc
                 )
 
     return {

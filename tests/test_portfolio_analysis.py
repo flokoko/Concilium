@@ -735,3 +735,263 @@ class TestRunPortfolio:
         assert "AAA" in result["results"]
         assert "BAD" in result["results"]
         assert result["results"]["BAD"].get("error") is not None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline: skip_final / run_portfolio PM-once (Phase-2 Fix)
+# ---------------------------------------------------------------------------
+
+
+class TestSkipFinal:
+    """Testet run_pipeline(skip_final=True) — PM und Journal werden übersprungen."""
+
+    def test_skip_final_no_pm_no_journal(self, tmp_path, monkeypatch):
+        """skip_final=True: result['final'] ist None, _final_pending gesetzt,
+        _completed_steps enthält NICHT 'final', Journal nicht geschrieben."""
+        from unittest.mock import MagicMock, patch
+
+        from concilium.pipeline import run_pipeline
+
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
+
+        mock_trade = {"aktion": "KAUFEN", "rating": "KAUFEN", "_raw": ""}
+        mock_risk = {"risiko_score": 3, "empfehlung": "GENEHMIGT"}
+
+        with patch("concilium.pipeline.collect_ticker_data") as mock_data, \
+             patch("concilium.pipeline.analyst_team", return_value={}), \
+             patch("concilium.pipeline.debate", return_value={}), \
+             patch("concilium.pipeline.trader", return_value=mock_trade), \
+             patch("concilium.pipeline.risk_manager", return_value=mock_risk), \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.pipeline.portfolio_fit_agent", return_value={"portfolio_fit_score": 2}), \
+             patch("concilium.pipeline.trade_revision", return_value=mock_trade), \
+             patch("concilium.pipeline.portfolio_manager") as mock_pm, \
+             patch("concilium.pipeline.build_feedback_context", return_value=""), \
+             patch("concilium.pipeline.build_reflection_context", return_value=""), \
+             patch("concilium.journal.append_decision") as mock_journal:
+
+            mock_data.return_value = {
+                "ticker": "TEST", "fundamentals": {}, "technicals": {},
+                "sentiment": {}, "news": [],
+            }
+
+            result = run_pipeline("TEST", llm=MagicMock(), ensemble=False, skip_final=True)
+
+        # PM wurde NICHT aufgerufen
+        assert mock_pm.call_count == 0
+        # Journal wurde NICHT aufgerufen
+        assert mock_journal.call_count == 0
+        # final ist None
+        assert result.get("final") is None
+        # _final_pending Marker gesetzt
+        assert result.get("_final_pending") is True
+        # 'final' nicht in _completed_steps
+        assert "final" not in result.get("_completed_steps", [])
+        # Vor-Schritte aber vorhanden
+        assert "trade_revision" in result.get("_completed_steps", [])
+        assert result.get("trade") is not None
+        assert result.get("risk") is not None
+
+    def test_skip_final_false_runs_pm_and_journal(self, tmp_path, monkeypatch):
+        """skip_final=False (Default): PM wird aufgerufen, Journal geschrieben."""
+        from unittest.mock import MagicMock, patch
+
+        from concilium.pipeline import run_pipeline
+
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
+
+        mock_trade = {"aktion": "KAUFEN", "rating": "KAUFEN", "_raw": ""}
+
+        with patch("concilium.pipeline.collect_ticker_data") as mock_data, \
+             patch("concilium.pipeline.analyst_team", return_value={}), \
+             patch("concilium.pipeline.debate", return_value={}), \
+             patch("concilium.pipeline.trader", return_value=mock_trade), \
+             patch("concilium.pipeline.risk_manager", return_value={"risiko_score": 3}), \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.pipeline.portfolio_fit_agent", return_value={"portfolio_fit_score": 2}), \
+             patch("concilium.pipeline.trade_revision", return_value=mock_trade), \
+             patch("concilium.pipeline.portfolio_manager", return_value={"entscheidung": "GENEHMIGT"}) as mock_pm, \
+             patch("concilium.pipeline.build_feedback_context", return_value=""), \
+             patch("concilium.pipeline.build_reflection_context", return_value=""), \
+             patch("concilium.journal.append_decision") as mock_journal:
+
+            mock_data.return_value = {
+                "ticker": "TEST", "fundamentals": {}, "technicals": {},
+                "sentiment": {}, "news": [],
+            }
+
+            result = run_pipeline("TEST", llm=MagicMock(), ensemble=False, skip_final=False)
+
+        # PM wurde aufgerufen
+        assert mock_pm.call_count == 1
+        # Journal wurde aufgerufen
+        assert mock_journal.call_count == 1
+        # final ist gesetzt
+        assert result["final"]["entscheidung"] == "GENEHMIGT"
+        # 'final' in _completed_steps
+        assert "final" in result["_completed_steps"]
+
+
+class TestRunPortfolioPMOnce:
+    """Testet dass run_portfolio den PM pro Ticker genau EINMAL aufruft."""
+
+    def test_pm_called_once_per_ticker(self):
+        """PM wird pro Ticker genau einmal aufgerufen (mit Portfolio-Kontext),
+        Journal wird genau einmal pro Ticker geschrieben."""
+        from unittest.mock import MagicMock, patch
+
+        from concilium.pipeline import run_portfolio
+
+        def mock_run_pipeline(ticker, **kwargs):
+            # Simuliere skip_final=True Verhalten (PM übersprungen)
+            return {
+                "ticker": ticker,
+                "data": {
+                    "ticker": ticker,
+                    "fundamentals": {"name": f"Company {ticker}"},
+                    "technicals": {},
+                    "sentiment": {},
+                    "news": [],
+                    "history": _linear_history(60),
+                },
+                "no_llm": False,
+                "trade": {"aktion": "KAUFEN", "rating": "KAUFEN", "_raw": ""},
+                "risk": {"risiko_score": 3, "empfehlung": "GENEHMIGT"},
+                "portfolio_fit": {"portfolio_fit_score": 2},
+                "final": None,
+                "_final_pending": True,
+                "_completed_steps": ["data", "analysts", "debate", "trade", "risk",
+                                     "portfolio_fit", "trade_revision"],
+                "_feedback_context": "",
+                "_reflection_context": "",
+            }
+
+        with patch("concilium.pipeline.run_pipeline", side_effect=mock_run_pipeline), \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.pipeline.portfolio_manager", return_value={"entscheidung": "GENEHMIGT", "confidence": 4}) as mock_pm, \
+             patch("concilium.journal.append_decision") as mock_journal:
+
+            result = run_portfolio(["AAA", "BBB"], llm=MagicMock(), ensemble=False)
+
+        # PM wurde genau 2x aufgerufen (einmal pro Ticker)
+        assert mock_pm.call_count == 2
+        # Journal wurde genau 2x aufgerufen (einmal pro Ticker)
+        assert mock_journal.call_count == 2
+
+        # Beide Ticker haben final mit Entscheidung
+        for t in ["AAA", "BBB"]:
+            assert result["results"][t]["final"]["entscheidung"] == "GENEHMIGT"
+            assert result["results"][t]["_final_pending"] is False
+            assert result["results"][t]["_journal_written"] is True
+
+    def test_pm_receives_portfolio_context(self):
+        """PM wird mit portfolio_context aufgerufen (nicht None)."""
+        from unittest.mock import MagicMock, patch
+
+        from concilium.pipeline import run_portfolio
+
+        def mock_run_pipeline(ticker, **kwargs):
+            return {
+                "ticker": ticker,
+                "data": {
+                    "ticker": ticker,
+                    "fundamentals": {}, "technicals": {},
+                    "sentiment": {}, "news": [],
+                    "history": _linear_history(60),
+                },
+                "no_llm": False,
+                "trade": {"aktion": "KAUFEN", "_raw": ""},
+                "risk": {"risiko_score": 3},
+                "portfolio_fit": None,
+                "final": None,
+                "_final_pending": True,
+                "_completed_steps": ["data", "analysts", "debate", "trade", "risk",
+                                     "portfolio_fit", "trade_revision"],
+                "_feedback_context": "",
+                "_reflection_context": "",
+            }
+
+        with patch("concilium.pipeline.run_pipeline", side_effect=mock_run_pipeline), \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.pipeline.portfolio_manager", return_value={"entscheidung": "GENEHMIGT"}) as mock_pm, \
+             patch("concilium.journal.append_decision"):
+
+            run_portfolio(["AAA"], llm=MagicMock(), ensemble=False)
+
+        # PM-Aufruf sollte portfolio_context als Keyword-Arg haben (nicht None)
+        call_kwargs = mock_pm.call_args.kwargs
+        assert call_kwargs.get("portfolio_context") is not None
+
+    def test_pm_skipped_for_failed_ticker(self):
+        """Ticker mit error oder ohne trade/risk → PM wird nicht aufgerufen."""
+        from unittest.mock import MagicMock, patch
+
+        from concilium.pipeline import run_portfolio
+
+        def mock_run_pipeline(ticker, **kwargs):
+            if ticker == "BAD":
+                raise ValueError("Ungültiger Ticker")
+            return {
+                "ticker": ticker,
+                "data": {
+                    "ticker": ticker,
+                    "fundamentals": {}, "technicals": {},
+                    "sentiment": {}, "news": [],
+                    "history": _linear_history(60),
+                },
+                "no_llm": False,
+                "trade": {"aktion": "KAUFEN", "_raw": ""},
+                "risk": {"risiko_score": 3},
+                "portfolio_fit": None,
+                "final": None,
+                "_final_pending": True,
+                "_completed_steps": ["data", "analysts", "debate", "trade", "risk",
+                                     "portfolio_fit", "trade_revision"],
+                "_feedback_context": "",
+                "_reflection_context": "",
+            }
+
+        with patch("concilium.pipeline.run_pipeline", side_effect=mock_run_pipeline), \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.pipeline.portfolio_manager", return_value={"entscheidung": "GENEHMIGT"}) as mock_pm, \
+             patch("concilium.journal.append_decision") as mock_journal:
+
+            result = run_portfolio(["AAA", "BAD"], llm=MagicMock(), ensemble=False)
+
+        # PM wurde nur 1x aufgerufen (für AAA, nicht für BAD)
+        assert mock_pm.call_count == 1
+        # Journal wurde nur 1x aufgerufen
+        assert mock_journal.call_count == 1
+        # BAD hat error
+        assert result["results"]["BAD"].get("error") is not None
+
+    def test_no_llm_mode_no_pm(self):
+        """Im --no-llm Modus wird kein PM aufgerufen."""
+        from unittest.mock import patch
+
+        from concilium.pipeline import run_portfolio
+
+        def mock_run_pipeline(ticker, **kwargs):
+            return {
+                "ticker": ticker,
+                "data": {
+                    "ticker": ticker,
+                    "fundamentals": {}, "technicals": {},
+                    "sentiment": {}, "news": [],
+                    "history": _linear_history(60),
+                },
+                "no_llm": True,
+                "portfolio_fit": None,
+            }
+
+        with patch("concilium.pipeline.run_pipeline", side_effect=mock_run_pipeline), \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.pipeline.portfolio_manager") as mock_pm, \
+             patch("concilium.journal.append_decision") as mock_journal:
+
+            result = run_portfolio(["AAA", "BBB"], llm=None)
+
+        # Kein PM, kein Journal im no-llm Modus
+        assert mock_pm.call_count == 0
+        assert mock_journal.call_count == 0
+        assert result["portfolio_analysis"]["analysed_tickers"] == ["AAA", "BBB"]
