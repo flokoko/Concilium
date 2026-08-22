@@ -46,10 +46,19 @@ def _clean_debate_text(agent: dict[str, Any]) -> str:
     Die Bull/Bear-Agenten geben einen JSON-Block (confidence/name) gefolgt vom
     Fließtext zurück. Der Report soll nur den lesbaren Fließtext zeigen.
 
+    Im strukturierten Pfad enthält das dict ein ``argumente``-Feld mit dem
+    Fließtext direkt — dieses wird bevorzugt. Im Fallback-Pfad wird ``_raw``
+    gesäubert (JSON-Preamble entfernt).
+
     Wenn ``_raw`` leer ist oder nach Entfernung des JSON-Blocks nichts übrig
     bleibt, wird ein klarer Platzhalter zurückgegeben statt nacktem "N/A".
     """
     import re as _re
+
+    # Strukturierter Pfad: argumente-Feld direkt verwenden
+    argumente = agent.get("argumente")
+    if argumente and str(argumente).strip():
+        return str(argumente).strip()
 
     raw = str(agent.get("_raw", ""))
     if not raw or not raw.strip():

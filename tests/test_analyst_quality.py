@@ -305,33 +305,38 @@ class _FakeLLM:
     eine andere (inkonsistente) Antwort bekommt.
     """
 
-    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str:
+    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str | object:
         role = messages[0]["content"]
         if "Fundamental" in role:
             # Inkonsistent: bullish + score 1
-            return json.dumps({
+            text = json.dumps({
                 "rolle": "Fundamental-Analyst",
                 "stimmung": "bullish",
                 "score": 1,
                 "zusammenfassung": "Gut aber Score inkonsistent",
             })
-        if "technisch" in role or "Technik" in role:
+        elif "technisch" in role or "Technik" in role:
             # Konsistent: neutral + score 3
-            return json.dumps({
+            text = json.dumps({
                 "rolle": "Technik-Analyst",
                 "stimmung": "neutral",
                 "score": 3,
                 "zusammenfassung": "Seitwärts",
             })
-        if "Sentiment" in role:
+        elif "Sentiment" in role:
             # Inkonsistent: bearish + score 5
-            return json.dumps({
+            text = json.dumps({
                 "rolle": "Sentiment-Analyst",
                 "stimmung": "bearish",
                 "score": 5,
                 "zusammenfassung": "Negativ aber Score inkonsistent",
             })
-        return json.dumps({"rolle": "Unknown", "stimmung": "neutral", "score": 3})
+        else:
+            text = json.dumps({"rolle": "Unknown", "stimmung": "neutral", "score": 3})
+        if kwargs.get("as_structured") and kwargs.get("response_format"):
+            from concilium.llm import StructuredChatResult
+            return StructuredChatResult(text=text, response_format_used=True)
+        return text
 
 
 _MINIMAL_DATA = {

@@ -290,8 +290,11 @@ class _CapturingLLM:
         self._response = response
         self.captured_messages: list[list[dict]] = []
 
-    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str:
+    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str | object:
         self.captured_messages.append(messages)
+        if kwargs.get("as_structured") and kwargs.get("response_format"):
+            from concilium.llm import StructuredChatResult
+            return StructuredChatResult(text=self._response, response_format_used=True)
         return self._response
 
 
@@ -481,22 +484,27 @@ class TestPipelineIntegration:
                 self.captured.append(messages)
                 system = messages[0]["content"]
                 if "Fundamental" in system:
-                    return json.dumps({"rolle": "F", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
-                if "technisch" in system:
-                    return json.dumps({"rolle": "T", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
-                if "Sentiment" in system:
-                    return json.dumps({"rolle": "S", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
-                if "Bull" in system:
-                    return '{"confidence": 4, "name": "Bull"}\nBull text'
-                if "Bear" in system:
-                    return '{"confidence": 3, "name": "Bear"}\nBear text'
-                if "Trader" in system:
-                    return json.dumps({"rolle": "Trader", "aktion": "KAUFEN", "zielkurs": 110, "stop_loss": 90, "positionsanteil": 5, "begründung": "Test", "zeithorizont": "Mittelfristig"})
-                if "Risk" in system:
-                    return json.dumps({"rolle": "Risk", "risiko_score": 3, "empfehlung": "GENEHMIGT", "auflagen": "keine", "volatilität_bewertung": "moderat", "max_drawdown_schaetzung": "10%", "positionsgröße_empfohlen": "5"})
-                if "Portfolio-Manager" in system:
-                    return json.dumps({"rolle": "PM", "entscheidung": "GENEHMIGT", "begründung": "Test", "confidence": 4})
-                return '{"error": "unknown role"}'
+                    text = json.dumps({"rolle": "F", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
+                elif "technisch" in system:
+                    text = json.dumps({"rolle": "T", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
+                elif "Sentiment" in system:
+                    text = json.dumps({"rolle": "S", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
+                elif "Bull" in system:
+                    text = '{"confidence": 4, "name": "Bull"}\nBull text'
+                elif "Bear" in system:
+                    text = '{"confidence": 3, "name": "Bear"}\nBear text'
+                elif "Trader" in system:
+                    text = json.dumps({"rolle": "Trader", "aktion": "KAUFEN", "zielkurs": 110, "stop_loss": 90, "positionsanteil": 5, "begründung": "Test", "zeithorizont": "Mittelfristig"})
+                elif "Risk" in system:
+                    text = json.dumps({"rolle": "Risk", "risiko_score": 3, "empfehlung": "GENEHMIGT", "auflagen": "keine", "volatilität_bewertung": "moderat", "max_drawdown_schaetzung": "10%", "positionsgröße_empfohlen": "5"})
+                elif "Portfolio-Manager" in system:
+                    text = json.dumps({"rolle": "PM", "entscheidung": "GENEHMIGT", "begründung": "Test", "confidence": 4})
+                else:
+                    text = '{"error": "unknown role"}'
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    from concilium.llm import StructuredChatResult
+                    return StructuredChatResult(text=text, response_format_used=True)
+                return text
 
         llm = _PipelineLLM()
 
@@ -548,22 +556,27 @@ class TestPipelineIntegration:
                 self.captured.append(messages)
                 system = messages[0]["content"]
                 if "Fundamental" in system:
-                    return json.dumps({"rolle": "F", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
-                if "technisch" in system:
-                    return json.dumps({"rolle": "T", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
-                if "Sentiment" in system:
-                    return json.dumps({"rolle": "S", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
-                if "Bull" in system:
-                    return '{"confidence": 4, "name": "Bull"}\nBull text'
-                if "Bear" in system:
-                    return '{"confidence": 3, "name": "Bear"}\nBear text'
-                if "Trader" in system:
-                    return json.dumps({"rolle": "Trader", "aktion": "HALTEN", "zielkurs": None, "stop_loss": None, "positionsanteil": 0, "begründung": "Test", "zeithorizont": "N/A"})
-                if "Risk" in system:
-                    return json.dumps({"rolle": "Risk", "risiko_score": 3, "empfehlung": "GENEHMIGT", "auflagen": "keine", "volatilität_bewertung": "ok", "max_drawdown_schaetzung": "5%", "positionsgröße_empfohlen": "5"})
-                if "Portfolio-Manager" in system:
-                    return json.dumps({"rolle": "PM", "entscheidung": "ABGELEHNT", "begründung": "Test", "confidence": 2})
-                return '{}'
+                    text = json.dumps({"rolle": "F", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
+                elif "technisch" in system:
+                    text = json.dumps({"rolle": "T", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
+                elif "Sentiment" in system:
+                    text = json.dumps({"rolle": "S", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
+                elif "Bull" in system:
+                    text = '{"confidence": 4, "name": "Bull"}\nBull text'
+                elif "Bear" in system:
+                    text = '{"confidence": 3, "name": "Bear"}\nBear text'
+                elif "Trader" in system:
+                    text = json.dumps({"rolle": "Trader", "aktion": "HALTEN", "zielkurs": None, "stop_loss": None, "positionsanteil": 0, "begründung": "Test", "zeithorizont": "N/A"})
+                elif "Risk" in system:
+                    text = json.dumps({"rolle": "Risk", "risiko_score": 3, "empfehlung": "GENEHMIGT", "auflagen": "keine", "volatilität_bewertung": "ok", "max_drawdown_schaetzung": "5%", "positionsgröße_empfohlen": "5"})
+                elif "Portfolio-Manager" in system:
+                    text = json.dumps({"rolle": "PM", "entscheidung": "ABGELEHNT", "begründung": "Test", "confidence": 2})
+                else:
+                    text = '{}'
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    from concilium.llm import StructuredChatResult
+                    return StructuredChatResult(text=text, response_format_used=True)
+                return text
 
         llm = _PipelineLLM()
 

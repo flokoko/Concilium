@@ -44,14 +44,24 @@ class _FakeLLM:
         self.temperatures_seen: list[float] = []
         self._lock = threading.Lock()
 
-    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.3,
+        **kwargs,
+    ) -> str | object:
         with self._lock:
             self.temperatures_seen.append(temperature)
         key = round(temperature, 2)
         if key in self._temp_map:
-            return self._temp_map[key]
-        # Fallback: erste verfügbare Antwort
-        return list(self._temp_map.values())[0] if self._temp_map else ""
+            text = self._temp_map[key]
+        else:
+            text = list(self._temp_map.values())[0] if self._temp_map else ""
+        # Strukturierter Pfad: StructuredChatResult zurückgeben
+        if kwargs.get("as_structured") and kwargs.get("response_format"):
+            from concilium.llm import StructuredChatResult
+            return StructuredChatResult(text=text, response_format_used=True)
+        return text
 
 
 # Helper: JSON-String für Trader-Antwort bauen
@@ -356,10 +366,15 @@ class TestAnalystTeamParallel:
                 # Jeder Thread gibt eine andere Antwort
                 role = messages[0]["content"]
                 if "Fundamental" in role:
-                    return json.dumps({"rolle": "Fundamental-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
-                if "technisch" in role:
-                    return json.dumps({"rolle": "Technik-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
-                return json.dumps({"rolle": "Sentiment-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Positiv"})
+                    text = json.dumps({"rolle": "Fundamental-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
+                elif "technisch" in role:
+                    text = json.dumps({"rolle": "Technik-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
+                else:
+                    text = json.dumps({"rolle": "Sentiment-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Positiv"})
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    from concilium.llm import StructuredChatResult
+                    return StructuredChatResult(text=text, response_format_used=True)
+                return text
 
         data = {
             "ticker": "TEST",
@@ -392,8 +407,13 @@ class TestAnalystTeamParallel:
                 if "Sentiment" in role:
                     raise RuntimeError("Sentiment-API down")
                 if "Fundamental" in role:
-                    return json.dumps({"rolle": "Fundamental-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
-                return json.dumps({"rolle": "Technik-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
+                    text = json.dumps({"rolle": "Fundamental-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Gut"})
+                else:
+                    text = json.dumps({"rolle": "Technik-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    from concilium.llm import StructuredChatResult
+                    return StructuredChatResult(text=text, response_format_used=True)
+                return text
 
         data = {
             "ticker": "TEST",

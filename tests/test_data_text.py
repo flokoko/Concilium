@@ -27,6 +27,9 @@ class _RecordingLLM:
 
     def chat(self, messages, temperature=0.3, **kwargs):
         self.last_messages = messages
+        if kwargs.get("as_structured") and kwargs.get("response_format"):
+            from concilium.llm import StructuredChatResult
+            return StructuredChatResult(text=self._response, response_format_used=True)
         return self._response
 
 

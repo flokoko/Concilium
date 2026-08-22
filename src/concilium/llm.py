@@ -6,11 +6,26 @@ import logging
 import os
 import random
 import time
-from typing import Any
+from typing import Any, NamedTuple
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+class StructuredChatResult(NamedTuple):
+    """Ergebnis eines strukturierten chat()-Aufrufs.
+
+    Felder:
+        text: Der Text-Inhalt der LLM-Antwort.
+        response_format_used: True, wenn das response_format vom Provider
+            akzeptiert wurde. False, wenn der Provider 400/4xx zurückgegeben
+            hat und der Aufruf ohne response_format wiederholt wurde (Fallback).
+    """
+
+    text: str
+    response_format_used: bool
+
 
 # ---------------------------------------------------------------------------
 # Umgebungsvariablen
@@ -74,13 +89,24 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float = 0.3,
         max_tokens: int | None = None,
-    ) -> str:
+        response_format: dict[str, Any] | None = None,
+        as_structured: bool = False,
+    ) -> str | StructuredChatResult:
         """Sendet Messages an /chat/completions und gibt den Text zurück.
 
         Retry bei 5xx und 429 (max. MAX_RETRIES Mal mit Backoff).
         Wenn ein Fallback-Modell konfiguriert ist und der primäre Request nach
         allen Retries mit 429/5xx fehlschlägt, wird ein Versuch mit dem
         Fallback-Modell unternommen.
+
+        Wenn ``response_format`` gesetzt ist, wird es in den Payload als
+        ``"response_format"`` aufgenommen (OpenAI-kompatibel). Antwortet die
+        API mit 400/4xx (invalid response_format), wird EINMALIG ohne
+        response_format wiederholt und ``response_format_used=False`` gesetzt.
+
+        Wenn ``as_structured=True`` und ``response_format`` gesetzt ist, wird
+        ein :class:`StructuredChatResult` zurückgegeben. Sonst immer ``str``
+        (Rückwärtskompatibilität).
         """
         url = f"{self.base_url}/chat/completions"
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -94,11 +120,15 @@ class LLMClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if response_format is not None:
+            payload["response_format"] = response_format
 
         try:
-            return self._send_with_retries(url, headers, payload)
+            text, response_format_used = self._send_with_retries(
+                url, headers, payload, response_format=response_format,
+            )
         except _RetryableHTTPError as exc:
-            # Primärer Request nach allen Retries mit 429/5xx fehlgesehen.
+            # Primärer Request nach allen Retries mit 429/5xx fehlgeschlagen.
             # Fallback-Modell versuchen, falls konfiguriert.
             if self.fallback_model is not None:
                 logger.warning(
@@ -110,14 +140,25 @@ class LLMClient:
                 fallback_payload = dict(payload)
                 fallback_payload["model"] = self.fallback_model
                 try:
-                    return self._send_with_retries(url, headers, fallback_payload, is_fallback=True)
+                    text, response_format_used = self._send_with_retries(
+                        url, headers, fallback_payload,
+                        is_fallback=True,
+                        response_format=response_format,
+                    )
                 except _RetryableHTTPError as fb_exc:
                     raise RuntimeError(
                         f"LLM-Anfrage fehlgeschlagen: Primärmodell ({exc}), "
                         f"Fallback-Modell '{self.fallback_model}' ({fb_exc})"
                     ) from None
-            # Ohne Fallback-Modell: Original-Fehler weitergeben
-            raise RuntimeError(f"LLM-Anfrage fehlgeschlagen nach {MAX_RETRIES + 1} Versuchen: {exc}") from None
+            else:
+                # Ohne Fallback-Modell: Original-Fehler weitergeben
+                raise RuntimeError(
+                    f"LLM-Anfrage fehlgeschlagen nach {MAX_RETRIES + 1} Versuchen: {exc}"
+                ) from None
+
+        if as_structured and response_format is not None:
+            return StructuredChatResult(text=text, response_format_used=response_format_used)
+        return text
 
     def _send_with_retries(
         self,
@@ -126,12 +167,22 @@ class LLMClient:
         payload: dict[str, Any],
         *,
         is_fallback: bool = False,
-    ) -> str:
+        response_format: dict[str, Any] | None = None,
+    ) -> tuple[str, bool]:
         """Sendet den Request mit Retries bei 429/5xx.
 
         Löst _RetryableHTTPError aus, wenn alle Retries mit 429/5xx fehlschlagen
         (damit der Aufrufer einen Modell-Fallback durchführen kann).
         Andere Fehler (Timeout, ConnectionError) werden als RuntimeError geworfen.
+
+        Wenn ``response_format`` gesetzt ist und die API mit 400/4xx antwortet
+        (nicht 429/5xx), wird EINMALIG ohne response_format wiederholt und
+        ``response_format_used=False`` zurückgegeben. Bei 429/5xx verhält sich
+        die Methode wie bisher (retry + ggf. Fallback-Modell).
+
+        Returns:
+            Tuple (text, response_format_used). response_format_used ist True,
+            wenn response_format erfolgreich gesendet wurde (oder None war).
         """
         model_label = payload.get("model", "?")
         last_error: str | None = None
@@ -149,10 +200,32 @@ class LLMClient:
                         continue
                     raise _RetryableHTTPError(last_error)
 
+                # 400/4xx-Fallback: wenn response_format im Payload und die API
+                # 400/4xx (aber NICHT 429/5xx) zurückgibt → einmalig ohne
+                # response_format wiederholen, response_format_used=False melden.
+                if (
+                    response_format is not None
+                    and 400 <= resp.status_code < 500
+                ):
+                    logger.info(
+                        "Provider lehnt response_format ab (HTTP %d) — "
+                        "Fallback ohne response_format, Versuch %d/%d",
+                        resp.status_code, attempt + 1, MAX_RETRIES + 1,
+                    )
+                    fallback_payload = dict(payload)
+                    fallback_payload.pop("response_format", None)
+                    resp2 = requests.post(
+                        url, json=fallback_payload, headers=headers, timeout=TIMEOUT_SECONDS,
+                    )
+                    resp2.raise_for_status()
+                    data2 = resp2.json()
+                    content2 = data2["choices"][0]["message"]["content"]
+                    return (content2 if content2 is not None else "", False)
+
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
-                return content if content is not None else ""
+                return (content if content is not None else "", True)
 
             except requests.Timeout:
                 last_error = f"Timeout nach {TIMEOUT_SECONDS}s"

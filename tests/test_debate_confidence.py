@@ -227,13 +227,18 @@ class _DebateFakeLLM:
     Dispatcht basierend auf dem System-Prompt-Inhalt.
     """
 
-    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str:
+    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str | object:
         system = messages[0]["content"]
         if "Bull" in system and "STÄRKEN" in system:
-            return '{"confidence": 4, "name": "Bull-Argumentation"}\nDie Aktie zeigt starkes Wachstum.'
-        if "Bear" in system and "RISIKEN" in system:
-            return '{"confidence": 2, "name": "Bear-Argumentation"}\nBewertung ist zu hoch.'
-        return '{"confidence": 3, "name": "Unknown"}\nUnbekannt.'
+            text = '{"confidence": 4, "name": "Bull-Argumentation"}\nDie Aktie zeigt starkes Wachstum.'
+        elif "Bear" in system and "RISIKEN" in system:
+            text = '{"confidence": 2, "name": "Bear-Argumentation"}\nBewertung ist zu hoch.'
+        else:
+            text = '{"confidence": 3, "name": "Unknown"}\nUnbekannt.'
+        if kwargs.get("as_structured") and kwargs.get("response_format"):
+            from concilium.llm import StructuredChatResult
+            return StructuredChatResult(text=text, response_format_used=True)
+        return text
 
 
 _MINIMAL_ANALYSTS = {
@@ -273,6 +278,9 @@ class TestDebateConfidence:
 
         class _EmptyLLM:
             def chat(self, messages, temperature=0.3, **kwargs):
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    from concilium.llm import StructuredChatResult
+                    return StructuredChatResult(text="", response_format_used=True)
                 return ""
 
         result = debate(_MINIMAL_ANALYSTS, _EmptyLLM())
@@ -284,7 +292,11 @@ class TestDebateConfidence:
 
         class _NoJsonLLM:
             def chat(self, messages, temperature=0.3, **kwargs):
-                return "Nur Fließtext, kein JSON hier."
+                text = "Nur Fließtext, kein JSON hier."
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    from concilium.llm import StructuredChatResult
+                    return StructuredChatResult(text=text, response_format_used=True)
+                return text
 
         result = debate(_MINIMAL_ANALYSTS, _NoJsonLLM())
         assert result["bull_confidence"] is None
@@ -313,8 +325,11 @@ class _CapturingTraderLLM:
         self._response = response
         self.captured_messages: list[list[dict]] = []
 
-    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str:
+    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str | object:
         self.captured_messages.append(messages)
+        if kwargs.get("as_structured") and kwargs.get("response_format"):
+            from concilium.llm import StructuredChatResult
+            return StructuredChatResult(text=self._response, response_format_used=True)
         return self._response
 
 

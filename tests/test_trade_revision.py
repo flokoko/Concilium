@@ -30,9 +30,12 @@ class _CapturingLLM:
         self.captured_messages: list[list[dict]] = []
         self.captured_temperature: float | None = None
 
-    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str:
+    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3, **kwargs) -> str | object:
         self.captured_messages.append(messages)
         self.captured_temperature = temperature
+        if kwargs.get("as_structured") and kwargs.get("response_format"):
+            from concilium.llm import StructuredChatResult
+            return StructuredChatResult(text=self._response, response_format_used=True)
         return self._response
 
 

@@ -13,7 +13,16 @@ import re
 from typing import Any
 
 from .factors import compute_multi_factor_score
-from .llm import LLMClient
+from .llm import LLMClient, StructuredChatResult
+from .schemas import (
+    ANALYST_FUNDAMENTAL_SCHEMA,
+    ANALYST_SENTIMENT_SCHEMA,
+    ANALYST_TECHNICAL_SCHEMA,
+    DEBATE_SCHEMA,
+    FINAL_SCHEMA,
+    RISK_SCHEMA,
+    TRADE_SCHEMA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -487,14 +496,62 @@ def _analyst_consistency_warning(stimmung: Any, score: Any) -> str:
     return ""
 
 
-def _call_agent(llm: LLMClient, system_prompt: str, user_text: str, temperature: float = 0.3) -> dict[str, Any]:
-    """Führt einen einzelnen Agenten-Call aus und parst das Ergebnis."""
+def _call_agent(
+    llm: LLMClient,
+    system_prompt: str,
+    user_text: str,
+    temperature: float = 0.3,
+    response_format: dict[str, Any] | None = None,
+    structured: bool = False,
+) -> dict[str, Any]:
+    """Führt einen einzelnen Agenten-Call aus und parst das Ergebnis.
+
+    Bei ``structured=True`` und gesetztem ``response_format`` wird
+    ``llm.chat(...)`` mit ``as_structured=True`` aufgerufen. Wenn der
+    Provider response_format unterstützt (``response_format_used=True``),
+    wird der Text direkt als JSON geparsed (json.loads). Andernfalls
+    (Fallback-Pfad) wird ``parse_json`` verwendet.
+
+    Bei ``structured=False`` (Default) wird kein response_format gesendet und
+    das Ergebnis wird wie bisher via ``parse_json`` extrahiert.
+
+    In beiden Fällen wird ``_raw`` auf den rohen Text gesetzt, damit
+    Downstream-Consumer (z.B. _clean_debate_text, _parse_debate_confidence)
+    darauf zugreifen können.
+    """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_text},
     ]
-    raw = llm.chat(messages, temperature=temperature)
-    parsed = parse_json(raw)
+
+    if structured and response_format is not None:
+        result_obj = llm.chat(
+            messages,
+            temperature=temperature,
+            response_format=response_format,
+            as_structured=True,
+        )
+        if isinstance(result_obj, StructuredChatResult):
+            raw = result_obj.text
+            if result_obj.response_format_used:
+                # Strukturierter Pfad: direktes json.loads
+                try:
+                    parsed = json.loads(raw) if raw else {}
+                except (json.JSONDecodeError, TypeError):
+                    parsed = parse_json(raw)
+            else:
+                # Fallback-Pfad: parse_json auf Fließtext
+                parsed = parse_json(raw)
+        else:
+            # Sollte nicht passieren, aber sicherheitshalber
+            raw = str(result_obj)
+            parsed = parse_json(raw)
+    else:
+        raw = llm.chat(messages, temperature=temperature)
+        parsed = parse_json(raw)
+
+    if not isinstance(parsed, dict):
+        parsed = {"_raw": raw}
     parsed["_raw"] = raw
     return parsed
 
@@ -532,25 +589,25 @@ def analyst_team(
         "sentiment": "sentiment",
     }
 
-    # (key, system_prompt) — Reihenfolge bleibt fundamental/technical/sentiment
+    # (key, system_prompt, response_format) — strukturierte Schemas pro Rolle
     analyst_specs = [
-        ("fundamental", SYSTEM_FUNDAMENTAL),
-        ("technical", SYSTEM_TECHNICAL),
-        ("sentiment", SYSTEM_SENTIMENT),
+        ("fundamental", SYSTEM_FUNDAMENTAL, ANALYST_FUNDAMENTAL_SCHEMA),
+        ("technical", SYSTEM_TECHNICAL, ANALYST_TECHNICAL_SCHEMA),
+        ("sentiment", SYSTEM_SENTIMENT, ANALYST_SENTIMENT_SCHEMA),
     ]
 
     results: dict[str, Any] = {}
 
-    def _run_one(key: str, system_prompt: str) -> tuple[str, dict[str, Any]]:
+    def _run_one(key: str, system_prompt: str, resp_format: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if data_text is not None:
             text = data_text
         else:
             text = _build_data_text(data, role=role_map[key])
-        return key, _call_agent(llm, system_prompt, text)
+        return key, _call_agent(llm, system_prompt, text, response_format=resp_format, structured=True)
 
     max_workers = min(len(analyst_specs), _MAX_PARALLEL)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_run_one, key, prompt): key for key, prompt in analyst_specs}
+        futures = {pool.submit(_run_one, key, prompt, fmt): key for key, prompt, fmt in analyst_specs}
         for future in concurrent.futures.as_completed(futures):
             key = futures[future]
             try:
@@ -561,7 +618,7 @@ def analyst_team(
                 results[key] = {"_raw": "", "fehler": str(exc)}
 
     # Sicherstellen, dass alle 3 Keys vorhanden sind (defensiv)
-    for key, _ in analyst_specs:
+    for key, _, _ in analyst_specs:
         results.setdefault(key, {"_raw": "", "fehler": "nicht ausgeführt"})
 
     # Konsistenz-Wächter: nach jedem Analysten-Ergebnis prüfen
@@ -668,11 +725,27 @@ def debate(analysts: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
     Returns dict mit 'bull', 'bear', 'bull_confidence' und 'bear_confidence'
     Schlüsseln. Die Konfidenzen werden via _parse_debate_confidence aus den
     jeweiligen Agent-Ergebnissen extrahiert (None bei Fehlschlag).
+
+    Verwendet DEBATE_SCHEMA für strukturierte LLM-Outputs. Bei Fallback
+    (Provider unterstützt response_format nicht) wird die Konfidenz aus dem
+    Fließtext via _parse_debate_confidence extrahiert.
     """
     summary = _analyst_summary_text(analysts)
 
-    bull = _call_agent(llm, SYSTEM_BULL, f"Analysten-Einschätzungen:\n{summary}", temperature=0.5)
-    bear = _call_agent(llm, SYSTEM_BEAR, f"Analysten-Einschätzungen:\n{summary}", temperature=0.5)
+    bull = _call_agent(
+        llm, SYSTEM_BULL,
+        f"Analysten-Einschätzungen:\n{summary}",
+        temperature=0.5,
+        response_format=DEBATE_SCHEMA,
+        structured=True,
+    )
+    bear = _call_agent(
+        llm, SYSTEM_BEAR,
+        f"Analysten-Einschätzungen:\n{summary}",
+        temperature=0.5,
+        response_format=DEBATE_SCHEMA,
+        structured=True,
+    )
 
     bull_conf = _parse_debate_confidence(bull)
     bear_conf = _parse_debate_confidence(bear)
@@ -683,6 +756,21 @@ def debate(analysts: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
         "bull_confidence": bull_conf,
         "bear_confidence": bear_conf,
     }
+
+
+def _get_debate_argument(agent: dict[str, Any]) -> str:
+    """Extrahiert den Debatten-Fließtext aus einem Bull/Bear-Agent-Dict.
+
+    Liest zuerst das ``argumente``-Feld (strukturierter Pfad), dann
+    ``_raw`` (Fallback-Pfad). Gibt einen leeren String zurück, wenn keines
+    vorhanden ist.
+    """
+    if not isinstance(agent, dict):
+        return ""
+    val = agent.get("argumente")
+    if val and str(val).strip():
+        return str(val)
+    return str(agent.get("_raw", ""))
 
 
 def trader(
@@ -711,8 +799,10 @@ def trader(
             angehängt.
     """
     summary = _analyst_summary_text(analysts)
-    bull_text = debate_result.get("bull", {}).get("_raw", "")
-    bear_text = debate_result.get("bear", {}).get("_raw", "")
+    # debate_result bull/bear kann "argumente" (strukturierter Pfad) oder
+    # "_raw" (Fallback-Pfad) enthalten — beide unterstützen.
+    bull_text = _get_debate_argument(debate_result.get("bull", {}))
+    bear_text = _get_debate_argument(debate_result.get("bear", {}))
 
     # Debatten-Konfidenz extrahieren und Kontext-Block bauen
     bull_conf = debate_result.get("bull_confidence")
@@ -734,7 +824,12 @@ def trader(
         user_text += f"\n\n{feedback_context}"
     if reflection_context:
         user_text += f"\n\n{reflection_context}"
-    result = _call_agent(llm, SYSTEM_TRADER, user_text, temperature=temperature)
+    result = _call_agent(
+        llm, SYSTEM_TRADER, user_text,
+        temperature=temperature,
+        response_format=TRADE_SCHEMA,
+        structured=True,
+    )
     # 5-stufige Rating normalisieren: rohes Rating in 'rating', 3-stufige Aktion in 'aktion'
     raw_rating = str(result.get("aktion", "")).strip().upper()
     result["rating"] = raw_rating
@@ -1124,7 +1219,7 @@ def risk_manager(
     user_text = f"Trade-Vorschlag:\n{trade_text}\n\nMarktdaten:\n{data_text}{risk_block}"
     if feedback_context:
         user_text += f"\n\n{feedback_context}"
-    risk = _call_agent(llm, SYSTEM_RISK, user_text)
+    risk = _call_agent(llm, SYSTEM_RISK, user_text, response_format=RISK_SCHEMA, structured=True)
 
     # Rechnerische Werte ins Rückgabedict übernehmen (einmal berechnet, nicht doppelt)
     risk["volatilität_annualisiert_pct"] = vol_pct
@@ -1171,7 +1266,7 @@ def portfolio_manager(
     if reflection_context:
         user_text += f"\n\n{reflection_context}"
 
-    return _call_agent(llm, SYSTEM_PM, user_text)
+    return _call_agent(llm, SYSTEM_PM, user_text, response_format=FINAL_SCHEMA, structured=True)
 
 
 def trade_revision(
@@ -1215,7 +1310,12 @@ def trade_revision(
     if reflection_context:
         user_text += f"\n\n{reflection_context}"
 
-    result = _call_agent(llm, SYSTEM_TRADE_REVISION, user_text, temperature=0.3)
+    result = _call_agent(
+        llm, SYSTEM_TRADE_REVISION, user_text,
+        temperature=0.3,
+        response_format=TRADE_SCHEMA,
+        structured=True,
+    )
     # 5-stufige Rating normalisieren (wie bei trader())
     raw_rating = str(result.get("aktion", "")).strip().upper()
     result["rating"] = raw_rating

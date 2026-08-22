@@ -42,15 +42,29 @@ JOURNAL_HEADER = [
 
 
 def _parse_confidence_from_debate(agent: dict[str, Any]) -> str:
-    """Versucht, die confidence aus dem JSON-Preamble eines Bull/Bear-Agenten zu extrahieren.
+    """Extrahiert die confidence aus einem Bull/Bear-Agent-Dict.
 
-    Die Bull/Bear-Agenten geben einen JSON-Block wie {"confidence": 4, "name": "..."}
-    gefolgt von Fließtext zurück.
+    Im strukturierten Pfad hat das dict ein direktes ``confidence``-Feld —
+    dieses wird zuerst geprüft. Als Fallback wird der JSON-Block aus
+    ``agent["_raw"]`` via Regex extrahiert (nicht-strukturierter Pfad).
+
+    Gibt einen leeren String zurück bei fehlender/ungültiger confidence.
     """
+    if not isinstance(agent, dict):
+        return ""
+
+    # 1. Versuch: direktes confidence-Feld im Agent-Dict (strukturierter Pfad)
+    direct = agent.get("confidence")
+    if direct is not None:
+        try:
+            return str(int(direct))
+        except (TypeError, ValueError):
+            pass
+
+    # 2. Versuch: JSON-Block aus _raw parsen (Fallback-Pfad)
     raw = str(agent.get("_raw", ""))
     if not raw:
         return ""
-    # JSON-Block am Anfang suchen
     match = re.search(r"\{.*?\}", raw, re.DOTALL)
     if match:
         try:
