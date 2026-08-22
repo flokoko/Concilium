@@ -285,6 +285,79 @@ def _validate_against_schema(value: Any, schema: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _default_for_field(field_schema: dict[str, Any]) -> Any:
+    """Bestimmt einen sicheren, schema-konformen Default-Wert für ein Feld.
+
+    Regeln:
+      - anyOf mit null → None (null ist explizit erlaubt)
+      - anyOf ohne null → erster sinnvoller non-null Typ (bevorzugt string → "")
+      - string mit enum → neutrales enum-Wert oder erstes enum-Wert
+      - string ohne enum → ""
+      - integer mit minimum → minimum (sicherster gültiger Wert)
+      - integer ohne minimum → 0
+      - number → 0.0
+      - boolean → False
+      - null → None
+    """
+    # anyOf-Handling
+    if "anyOf" in field_schema:
+        options = field_schema["anyOf"]
+        # Wenn null explizit erlaubt ist → None
+        for sub in options:
+            if sub.get("type") == "null":
+                return None
+        # Sonst: bevorzuge string (leerer String ist sicher für Rendering)
+        for sub in options:
+            if sub.get("type") == "string":
+                return ""
+        for sub in options:
+            if sub.get("type") == "number":
+                return 0.0
+            if sub.get("type") == "integer":
+                return sub.get("minimum", 0)
+        return None
+
+    type_name = field_schema.get("type")
+    if type_name == "string":
+        # Bei enum: neutrales/erstes enum-Wert wählen (schema-konform)
+        if "enum" in field_schema:
+            enum = field_schema["enum"]
+            for neutral in ("HALTEN", "neutral", "GENEHMIGT"):
+                if neutral in enum:
+                    return neutral
+            return enum[0]
+        return ""
+    if type_name == "integer":
+        if "minimum" in field_schema:
+            return field_schema["minimum"]
+        return 0
+    if type_name == "number":
+        return 0.0
+    if type_name == "boolean":
+        return False
+    if type_name == "null":
+        return None
+    return None
+
+
+def defaults_for_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Baut ein dict mit sicheren Defaults für JEDE property eines response_format-Schemas.
+
+    Nur Top-Level properties werden berücksichtigt (kein deep-nesting).
+    Die Defaults sind so gewählt, dass sie schema-konform sind —
+    ``validate_structured(defaults_for_schema(schema), schema)`` gibt ``[]`` zurück.
+
+    Args:
+        schema: Ein response_format-dict wie TRADE_SCHEMA, RISK_SCHEMA etc.
+
+    Returns:
+        dict mit allen property-Keys und ihren sicheren Default-Werten.
+    """
+    inner = schema.get("json_schema", {}).get("schema", schema)
+    properties = inner.get("properties", {})
+    return {key: _default_for_field(prop) for key, prop in properties.items()}
+
+
 def validate_structured(result: dict[str, Any], schema: dict[str, Any]) -> list[str]:
     """Validiert ein dict gegen ein Top-Level response_format-Schema.
 

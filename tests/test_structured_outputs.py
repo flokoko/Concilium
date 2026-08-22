@@ -489,8 +489,9 @@ class TestAnalystTeamStructured:
         # bearish + score 5 → inkonsistent
         assert "konsistenz_warnung" in result["sentiment"]
         assert result["sentiment"]["konsistenz_warnung"] != ""
-        # neutral + score 3 → konsistent → kein Feld
-        assert "konsistenz_warnung" not in result["technical"]
+        # neutral + score 3 → konsistent → konsistenz_warnung ist None
+        # (Schema-Default, nicht vom Analysten gesetzt)
+        assert result["technical"].get("konsistenz_warnung") is None
 
 
 class _AnalystStructuredLLM:

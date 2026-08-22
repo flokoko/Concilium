@@ -274,7 +274,7 @@ class TestDebateConfidence:
         assert "bear_confidence" in result
 
     def test_confidence_none_on_empty_raw(self):
-        """Bei leerem _raw → confidence ist None."""
+        """Bei leerem _raw → confidence ist der Schema-Default (1)."""
 
         class _EmptyLLM:
             def chat(self, messages, temperature=0.3, **kwargs):
@@ -284,11 +284,12 @@ class TestDebateConfidence:
                 return ""
 
         result = debate(_MINIMAL_ANALYSTS, _EmptyLLM())
-        assert result["bull_confidence"] is None
-        assert result["bear_confidence"] is None
+        # Durch Struktur-Garantie bekommt confidence den Default 1 (minimum)
+        assert result["bull_confidence"] == 1
+        assert result["bear_confidence"] == 1
 
     def test_confidence_none_on_no_json(self):
-        """Bei Fließtext ohne JSON-Block → confidence ist None."""
+        """Bei Fließtext ohne JSON-Block → confidence ist der Schema-Default (1)."""
 
         class _NoJsonLLM:
             def chat(self, messages, temperature=0.3, **kwargs):
@@ -299,8 +300,9 @@ class TestDebateConfidence:
                 return text
 
         result = debate(_MINIMAL_ANALYSTS, _NoJsonLLM())
-        assert result["bull_confidence"] is None
-        assert result["bear_confidence"] is None
+        # Durch Struktur-Garantie bekommt confidence den Default 1 (minimum)
+        assert result["bull_confidence"] == 1
+        assert result["bear_confidence"] == 1
 
 
 # ===========================================================================

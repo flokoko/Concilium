@@ -359,11 +359,12 @@ class TestAnalystTeamConsistencyWarning:
         assert result["fundamental"]["konsistenz_warnung"] != ""
 
     def test_consistent_analyst_no_warning(self):
-        """Technical (neutral+3) bekommt KEINE Warnung."""
+        """Technical (neutral+3) bekommt KEINE Warnung (Default ist None)."""
         result = analyst_team(_MINIMAL_DATA, _FakeLLM())
 
-        # Technical: neutral + score 3 → konsistent → kein Feld
-        assert "konsistenz_warnung" not in result["technical"]
+        # Technical: neutral + score 3 → konsistent → konsistenz_warnung ist
+        # None (Schema-Default, nicht vom Analysten gesetzt)
+        assert result["technical"].get("konsistenz_warnung") is None
 
     def test_sentiment_inconsistent_gets_warning(self):
         """Sentiment (bearish+5) bekommt Warnung."""

@@ -22,6 +22,7 @@ from .schemas import (
     FINAL_SCHEMA,
     RISK_SCHEMA,
     TRADE_SCHEMA,
+    defaults_for_schema,
 )
 
 logger = logging.getLogger(__name__)
@@ -552,6 +553,16 @@ def _call_agent(
 
     if not isinstance(parsed, dict):
         parsed = {"_raw": raw}
+
+    # Struktur-Garantie: fehlende Schema-Felder mit sicheren Defaults auffüllen.
+    # Nur im strukturierten Pfad (response_format gesetzt) — stellt sicher,
+    # dass das zurückgegebene dict IMMER alle Schema-Keys enthält.
+    # setdefault überschreibt keine vorhandenen Werte (Modell-Antwort hat Vorrang).
+    if structured and response_format is not None:
+        defaults = defaults_for_schema(response_format)
+        for key, default in defaults.items():
+            parsed.setdefault(key, default)
+
     parsed["_raw"] = raw
     return parsed
 
