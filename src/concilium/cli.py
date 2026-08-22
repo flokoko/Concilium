@@ -79,6 +79,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Anzahl der Ensemble-Runs für den Trader (Default: 3). "
         "Wird ignoriert, wenn --no-ensemble gesetzt ist.",
     )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume",
+        action="store_true",
+        help="Setzt einen abgebrochenen Lauf fort (Checkpoint unter state/ wird geladen, "
+        "nur fehlende Schritte werden neu ausgeführt).",
+    )
+    resume_group.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Explizit kein Resume (Default-Verhalten). Schließt sich mit --resume aus.",
+    )
     args = parser.parse_args(argv)
 
     # --- Frühe Validierung: Kombinations-Verbote ---
@@ -167,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
                     peers=peers_list,
                     ensemble=not args.no_ensemble,
                     ensemble_runs=args.ensemble_runs,
+                    resume=args.resume,
                 )
                 report = generate_report(result, reports_dir=reports_dir)
                 print(report)
@@ -181,6 +194,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"\n---\nReport gespeichert: {filepath}", file=sys.stderr)
                 successes += 1
 
+            except KeyboardInterrupt:
+                print(
+                    f"\nABGEBROCHEN (Ticker '{ticker}') — "
+                    "Checkpoint bleibt unter state/ erhalten.",
+                    file=sys.stderr,
+                )
+                return 130
             except ValueError as exc:
                 print(f"FEHLER bei Ticker '{ticker}': {exc}", file=sys.stderr)
                 logging.warning("Ticker '%s' fehlgeschlagen: %s", ticker, exc)
@@ -208,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
             peers=peers_list,
             ensemble=not args.no_ensemble,
             ensemble_runs=args.ensemble_runs,
+            resume=args.resume,
         )
 
         # Report generieren
@@ -227,6 +248,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n---\nReport gespeichert: {filepath}", file=sys.stderr)
         return 0
 
+    except KeyboardInterrupt:
+        print(
+            "\nABGEBROCHEN — Checkpoint bleibt unter state/ erhalten.",
+            file=sys.stderr,
+        )
+        return 130
     except ValueError as exc:
         print(f"FEHLER: {exc}", file=sys.stderr)
         return 1
