@@ -344,6 +344,26 @@ def _portfolio_blick_section(pa: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _source_label(source: str) -> str:
+    """Mappt einen internen Source-Bezeichner auf ein lesbares Label für den Report.
+
+    Bekannte Werte: yfinance → "yfinance", google/google_news → "Google",
+    stocktwits/StockTwits → "StockTwits", reddit → "Reddit".
+    Unbekannte Werte werden capitalized zurückgegeben.
+    """
+    s = source.lower().strip()
+    if s in ("yfinance", "yahoo"):
+        return "yfinance"
+    if s in ("google", "google_news", "googlenews"):
+        return "Google"
+    if s in ("stocktwits",):
+        return "StockTwits"
+    if s in ("reddit",):
+        return "Reddit"
+    # Best-effort: ersten Buchstaben groß
+    return source.capitalize() if source else "unknown"
+
+
 def generate_report(
     result: dict[str, Any],
     reports_dir: str | None = None,
@@ -511,13 +531,36 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(f"**Dominante Stimmung:** {s.get('dominant', 'N/A')}")
         lines.append(f"**Anzahl Headlines (Sample):** {s.get('sample_size', 0)}")
 
+    # Quellen anzeigen (Phase 3)
+    sentiment_sources = s.get("sources")
+    if sentiment_sources:
+        source_labels = [_source_label(src) for src in sentiment_sources]
+        lines.append(f"**Quellen:** {', '.join(source_labels)}")
+
     lines.append("")
 
     if news:
         lines.append("### Aktuelle Headlines")
         lines.append("")
+        # news_with_dates enthält optionale source-Felder (Phase 3)
+        news_wd = data.get("news_with_dates", [])
+        # Mapping title → source für schnelle Lookup (erste Fundstelle)
+        source_map: dict[str, str] = {}
+        if news_wd:
+            for item in news_wd:
+                if isinstance(item, dict):
+                    title = item.get("title", "")
+                    src = item.get("source")
+                    if title and src and title not in source_map:
+                        source_map[title] = src
         for h in news[:15]:
-            lines.append(f"- {h}")
+            src = source_map.get(h)
+            if src:
+                # Quelle als Tag anzeigen: [StockTwits]/[Reddit]/[yfinance]/[Google]
+                src_label = _source_label(src)
+                lines.append(f"- [{src_label}] {h}")
+            else:
+                lines.append(f"- {h}")
         lines.append("")
 
     # === Makro / Zinsen (Feature 2) ===

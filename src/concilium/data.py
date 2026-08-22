@@ -721,6 +721,148 @@ def _fetch_google_news(
 
 
 # ---------------------------------------------------------------------------
+# Social-Sentiment-Quellen (Phase 3): StockTwits + Reddit
+# ---------------------------------------------------------------------------
+
+# StockTwits öffentlicher Stream-Endpoint (kein API-Key nötig)
+_STOCKTWITS_URL = "https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+
+# Reddit Suche-Endpoint (öffentlich, kein OAuth — aber eigener UA Pflicht)
+_REDDIT_SEARCH_URL = (
+    "https://www.reddit.com/search.json?q={ticker}&sort=top&t=week&limit={limit}"
+)
+_REDDIT_USER_AGENT = "Concilium/1.0 (python-requests, contact=flokoko@googlemail.com)"
+
+
+def _fetch_stocktwits(ticker: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Holt Nachrichten von StockTwits für einen Ticker (öffentlich, kein Key).
+
+    URL: https://api.stocktwits.com/api/2/streams/symbol/{TICKER}.json
+    Liefert ``messages[]`` mit ``body``, ``created_at`` und ``entities``.
+
+    Args:
+        ticker: Ticker-Symbol (z. B. "NVDA"). Bei Tickers mit Punkt-Suffix
+            (z. B. "RWE.DE") wird der rohe Ticker best-effort verwendet —
+            StockTwits nutzt Cashtags wie ``$RWE``; ein Fehlschlag → ``[]``.
+        limit: Maximale Anzahl Posts, die zurückgegeben werden.
+
+    Returns:
+        Liste von dicts ``{text, date, source}`` (gleiche Struktur wie
+        ``news_with_dates``). Bei Fehler/leer → leere Liste. Crasht NIE.
+    """
+    # Ticker normalisieren: Punkt-Suffix für StockTwits oft problematisch →
+    # Best-effort: verwende den Teil vor dem Punkt (z. B. "RWE.DE" → "RWE")
+    st_ticker = ticker.split(".")[0] if "." in ticker else ticker
+    url = _STOCKTWITS_URL.format(ticker=st_ticker)
+
+    try:
+        resp = requests.get(
+            url, timeout=10, headers={"User-Agent": _USER_AGENT}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001 — niemals crashen
+        logger.warning("StockTwits-Anfrage fehlgeschlagen für '%s': %s", ticker, exc)
+        return []
+
+    messages = data.get("messages", [])
+    if not messages:
+        logger.info("StockTwits lieferte keine Messages für '%s'.", ticker)
+        return []
+
+    items: list[dict[str, Any]] = []
+    for msg in messages:
+        body = msg.get("body", "")
+        if not body or not body.strip():
+            continue
+        created_at = msg.get("created_at", "")
+        # ISO-datetime parsen (StockTwits liefert ISO-8601 mit Z)
+        try:
+            date_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if date_dt.tzinfo is None:
+                date_dt = date_dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            date_dt = datetime.now(timezone.utc)
+
+        # Quelle auf StockTwits-Plattform setzen (z. B. "web", oder direkt "StockTwits")
+        source = msg.get("source", {})
+        source_id = source.get("id", "StockTwits") if isinstance(source, dict) else "StockTwits"
+        items.append({
+            "title": body.strip(),
+            "published": date_dt,
+            "source": source_id,
+        })
+
+        if len(items) >= limit:
+            break
+
+    logger.info("StockTwits: %d Messages für '%s' erhalten.", len(items), ticker)
+    return items
+
+
+def _fetch_reddit(ticker: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Holt Reddit-Posts für einen Ticker (öffentliche JSON-Suche, kein OAuth).
+
+    URL: https://www.reddit.com/search.json?q={ticker}&sort=top&t=week&limit={limit}
+
+    **Pflicht:** Eigener User-Agent (Reddit blockt Default-UAs mit 403).
+    Rate-limit-respektvoll: genau EIN Call, Timeout, bei 403/429 → ``[]``.
+
+    Args:
+        ticker: Ticker-Symbol (z. B. "NVDA").
+        limit: Maximale Anzahl Posts, die zurückgegeben werden.
+
+    Returns:
+        Liste von dicts ``{text, date, source}``. Bei Fehler/leer → leere Liste.
+        Crasht NIE.
+    """
+    url = _REDDIT_SEARCH_URL.format(ticker=ticker, limit=limit)
+
+    try:
+        resp = requests.get(
+            url, timeout=10, headers={"User-Agent": _REDDIT_USER_AGENT}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001 — niemals crashen
+        logger.warning("Reddit-Anfrage fehlgeschlagen für '%s': %s", ticker, exc)
+        return []
+
+    children = data.get("data", {}).get("children", [])
+    if not children:
+        logger.info("Reddit lieferte keine Posts für '%s'.", ticker)
+        return []
+
+    items: list[dict[str, Any]] = []
+    for child in children:
+        post_data = child.get("data", {})
+        title = post_data.get("title", "")
+        selftext = post_data.get("selftext", "")
+        # title + selftext kombinieren
+        combined = f"{title} {selftext}".strip() if selftext else title.strip()
+        if not combined:
+            continue
+
+        created_utc = post_data.get("created_utc")
+        try:
+            date_dt = datetime.fromtimestamp(float(created_utc), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            date_dt = datetime.now(timezone.utc)
+
+        items.append({
+            "title": combined,
+            "published": date_dt,
+            "source": "reddit",
+        })
+
+        if len(items) >= limit:
+            break
+
+    logger.info("Reddit: %d Posts für '%s' erhalten.", len(items), ticker)
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Technische Indikatoren
 # ---------------------------------------------------------------------------
 
@@ -1167,33 +1309,86 @@ def collect_ticker_data(
     if peers:
         peers_data = _fetch_peer_data(peers)
 
-    # --- Sentiment aus News ---
+    # --- Sentiment aus News (Phase 3: yfinance + Google + StockTwits + Reddit) ---
     news_list = None
     try:
         news_list = t.news
     except Exception as exc:  # noqa: BLE001
         logger.warning("Konnte .news nicht abrufen: %s", exc)
 
-    headlines = _extract_headlines(news_list)
+    headlines: list[str] = []
     news_with_dates: list[dict[str, Any]] = []
+    active_sources: list[str] = []  # welche Quellen lieferten Daten
 
-    if headlines:
-        news_source = "yfinance"
-        # yfinance-News haben (meist) keine verlässlichen Zeitstempel → ungewichtet
-    else:
-        # Fallback: Google News RSS, wenn yfinance keine Headlines liefert
+    # 1. yfinance (Primärquelle)
+    yf_headlines = _extract_headlines(news_list)
+    if yf_headlines:
+        headlines.extend(yf_headlines)
+        # yfinance-News als news_with_dates ohne verlässliche Zeitstempel
+        for h in yf_headlines:
+            news_with_dates.append({
+                "title": h,
+                "published": None,
+                "source": "yfinance",
+            })
+        active_sources.append("yfinance")
+
+    # 2. Google News RSS (Fallback, wenn yfinance leer — aber immer versuchen
+    #    als Ergänzung, um die Dichte zu erhöhen)
+    if not yf_headlines:
         logger.info("yfinance lieferte keine News für %s — versuche Google News RSS …", ticker)
-        company = info.get("longName") or info.get("shortName") or ""
-        news_with_dates = _fetch_google_news(ticker, company_name=company)
-        headlines = [item["title"] for item in news_with_dates]
-        news_source = "google_news" if headlines else "none"
+    company = info.get("longName") or info.get("shortName") or ""
+    google_items = _fetch_google_news(ticker, company_name=company)
+    if google_items:
+        for item in google_items:
+            entry = {"title": item["title"], "published": item["published"], "source": "google"}
+            news_with_dates.append(entry)
+            headlines.append(item["title"])
+        if "google" not in active_sources:
+            active_sources.append("google")
+
+    # 3. StockTwits (ergänzend — nie ersetzend)
+    try:
+        stocktwits_items = _fetch_stocktwits(ticker)
+    except Exception as exc:  # noqa: BLE001 — defensive, nie crashen
+        logger.warning("StockTwits-Fetch fehlerhaft für '%s': %s", ticker, exc)
+        stocktwits_items = []
+    if stocktwits_items:
+        for item in stocktwits_items:
+            news_with_dates.append(item)
+            headlines.append(item["title"])
+        active_sources.append("stocktwits")
+
+    # 4. Reddit (ergänzend — nie ersetzend)
+    try:
+        reddit_items = _fetch_reddit(ticker)
+    except Exception as exc:  # noqa: BLE001 — defensive, nie crashen
+        logger.warning("Reddit-Fetch fehlerhaft für '%s': %s", ticker, exc)
+        reddit_items = []
+    if reddit_items:
+        for item in reddit_items:
+            news_with_dates.append(item)
+            headlines.append(item["title"])
+        active_sources.append("reddit")
+
+    # news_source: Fallback-Kaskade dokumentieren
+    news_source = ", ".join(active_sources) if active_sources else "none"
 
     # Zeitgewichtete Sentiment-Zählung, wenn Zeitstempel verfügbar sind;
     # sonst ungewichtete Keyword-Zählung.
-    if news_with_dates:
+    # StockTwits/Reddit liefern immer Zeitstempel → gewichtete Zählung,
+    # sobald mindestens ein Eintrag mit published != None existiert.
+    has_dates = any(
+        item.get("published") is not None
+        for item in news_with_dates
+        if isinstance(item, dict)
+    )
+
+    if has_dates:
         sentiment = _count_sentiment_weighted(news_with_dates)
-        # sample_size und dominant sind bereits enthalten
-    else:
+        # sources im sentiment vermerken
+        sentiment["sources"] = active_sources
+    elif headlines:
         base = _count_sentiment(headlines)
         # Dominante Stimmung auch im ungewichteten Fall ermitteln
         max_val = max(base["positiv"], base["negativ"], base["neutral"])
@@ -1208,6 +1403,18 @@ def collect_ticker_data(
             "dominant": dominant,
             "sample_size": len(headlines),
             "weighted": False,
+            "sources": active_sources,
+        }
+    else:
+        # Keine Headlines aus irgendeiner Quelle
+        sentiment = {
+            "positiv": 0,
+            "negativ": 0,
+            "neutral": 0,
+            "dominant": "neutral",
+            "sample_size": 0,
+            "weighted": False,
+            "sources": [],
         }
 
     # --- Historie als Records (für Backtest / Report) ---
