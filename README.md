@@ -12,12 +12,6 @@ den Portfolio-Manager. Alle Marktdaten werden via yfinance (kostenlos, kein
 API-Key) bezogen. Die Agenten kommunizieren über eine OpenAI-kompatible
 `/chat/completions` Schnittstelle.
 
-**Konzept-Hinweis:** Das Projekt nähert sich strukturell an das Vorbild
-TauricResearch/TradingAgents an, verzichtet aber bewusst auf dessen Framework-Lock-in
-(LangGraph, viele LLM-Provider, Broker-Execution) und setzt stattdessen auf schlanke
-Eigenbau-Lösungen plus eigene Differenzierung (Portfolio-Ebene, Kalibrierung).
-Siehe [`docs/ROADMAP.md`](docs/ROADMAP.md) für die vollständige Einordnung.
-
 ## Installation
 
 ```bash
