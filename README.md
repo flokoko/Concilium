@@ -12,6 +12,12 @@ den Portfolio-Manager. Alle Marktdaten werden via yfinance (kostenlos, kein
 API-Key) bezogen. Die Agenten kommunizieren über eine OpenAI-kompatible
 `/chat/completions` Schnittstelle.
 
+**Konzept-Hinweis:** Das Projekt nähert sich strukturell an das Vorbild
+TauricResearch/TradingAgents an, verzichtet aber bewusst auf dessen Framework-Lock-in
+(LangGraph, viele LLM-Provider, Broker-Execution) und setzt stattdessen auf schlanke
+Eigenbau-Lösungen plus eigene Differenzierung (Portfolio-Ebene, Kalibrierung).
+Siehe [`docs/ROADMAP.md`](docs/ROADMAP.md) für die vollständige Einordnung.
+
 ## Installation
 
 ```bash
@@ -44,30 +50,39 @@ python main.py --ticker TSM --peers NVDA,AMD
 # Batch-Modus: mehrere Ticker nacheinander (ein Fehler crasht den Batch nicht)
 python main.py --tickers NVDA,MSFT,RWE.DE
 
+# Portfolio-Modus: mehrere Ticker als Depot-Ganzheit
+# (Korrelations-Matrix, Overlap, Konzentrationswarnung, "Portfolio-Blick"-Sektion)
+python main.py --portfolio RWE.DE,SHEL.L,NEE
+
+# Track-Record-Evaluierung (Journal vs. tatsächliche Kursentwicklung,
+# inkl. Konfidenz-Kalibrierung / Brier-Score / Reliability-Bänder)
+python main.py --evaluate
+
 # Ensemble-Trader deaktivieren / Anzahl Runs steuern
 python main.py --ticker AAPL --no-ensemble
 python main.py --ticker AAPL --ensemble-runs 5
 
-# Track-Record-Evaluierung (Journal vs. tatsächliche Kursentwicklung)
-python main.py --evaluate
+# Crash-Resume: abgebrochenen Lauf an der letzten Stelle fortsetzen
+python main.py --ticker AAPL --resume
 ```
 
 Der Report wird auf stdout ausgegeben und zusätzlich als Datei unter
-`reports/{ticker}_{YYYYMMDD}_{HHMM}.md` gespeichert. Jeder Report beginnt mit
-einer **Management-Summary** (Gesamturteil, Scores, Kernrisiken, Kurz-Begründung)
-gefolgt von den Detail-Abschnitten.
+`reports/{ticker}_{YYYYMMDD}_{HHMM}.md` gespeichert (im Portfolio-Modus als
+`reports/portfolio_{ticker}_{YYYYMMDD}_{HHMM}.md`, plus eine Portfolio-Zusammenfassung
+auf stderr). Jeder Report beginnt mit einer **Management-Summary** (Gesamturteil,
+Scores, Kernrisiken, Kurz-Begründung) gefolgt von den Detail-Abschnitten.
 
 ## Agenten-Architektur
 
-Die Pipeline simuliert ein Team von Agenten, die nacheinander arbeiten —
-inspiriert von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
+Die Pipeline simuliert ein Team von Agenten, die nacheinander arbeiten — inspiriert
+von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
 
 1. **Analysten-Team** — drei Rollen, die **parallel** laufen und jeweils einen
    **rollenspezifischen Datenkontext** erhalten (nur die für ihre Rolle
    relevanten Kennzahlen, kein Rauschen):
    - **Fundamental-Analyst**: Fundamentals (MarketCap, KGV, EPS, Revenue, Margen, Wachstum) + Analysten-Erwartungen + **quantitativer Multi-Faktor-Score** (deterministischer Value/Momentum/Qualität-Anker, den der LLM kritisch einordnet)
    - **Technik-Analyst**: Technische Indikatoren (SMA50/200, RSI14, MACD, Bollinger)
-   - **Sentiment-Analyst**: News-Headlines (yfinance, Fallback auf Google-News-RSS), Positiv/Negativ/Neutral-Zählung (zeitgewichtet wenn Zeitstempel verfügbar)
+   - **Sentiment-Analyst**: News-Headlines (yfinance, Fallback auf Google-News-RSS, **ergänzt durch StockTwits + Reddit**), Positiv/Negativ/Neutral-Zählung (zeitgewichtet wenn Zeitstempel verfügbar), **mit Quellen-Kennzeichnung je Headline**
 
    Jeder Analyst liefert eine Stimmung (`bullish`/`neutral`/`bearish`) und einen
    Score (1-5). Ein **Konsistenz-Wächter** erkennt Stimmungs-/Score-Widersprüche
@@ -106,20 +121,55 @@ inspiriert von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
 
 7. **Portfolio-Manager** — trifft die finale Entscheidung mit drei Optionen:
    `GENEHMIGT` / `MODIFIZIERT` (genehmigen mit Auflagen) / `ABGELEHNT`.
+   Im Portfolio-Modus berücksichtigt er zusätzlich den **Gesamt-Exposure-Kontext**
+   (Korrelationen und Overlap über alle analysierten Titel).
+
+## Strukturierte LLM-Outputs
+
+Seit Phase 0 (Fundament) liefern alle strukturierten Agent-Ergebnisse (trader,
+risk, portfolio-manager, debate, analysten) **getyptes JSON** über OpenAI-kompatibles
+`response_format` / `json_schema` (`schemas.py`). Kein fragiles Regex-Parsing mehr in
+diesen Pfaden. Wenn der Provider kein `response_format` unterstützt (z. B. lokales
+Ollama), fällt der Client automatisch auf das bisherige Text-Parsing zurück
+(rückwärtskompatibel). Fehlende Schema-Felder werden mit sicheren Defaults
+aufgefüllt, sodass der Report nie durch fehlende Keys oder `+nan%` bricht.
+
+## Portfolio-Ebene (`--portfolio`)
+
+Concilium kann mehrere Ticker **als Depot-Ganzheit** analysieren (nicht isoliert):
+
+- **Korrelations-Matrix** der Tagesrenditen zwischen den analysierten Titeln.
+- **Overlap** mit dem realen Depot (Sheet) + **Konzentrationswarnungen**
+  (Einzelposition > ~5 %, Sektor-/Regions-Kumulation).
+- Der Portfolio-Manager bekommt den **Gesamt-Exposure-Kontext** im Prompt.
+- Report-Sektion **„Portfolio-Blick"** mit Ziel-Gewichtungen, Korrelations-Matrix
+  (Paare mit |r| > 0.7 hervorgehoben) und Warnungen.
+
+## Crash-Resume (Checkpoint)
+
+Seit Phase 1 speichert Concilium nach **jedem Agent-Schritt** einen Checkpoint unter
+`state/` (`.gitignore`). Bei Crash, Timeout oder 429 setzt `--resume` den Lauf an der
+letzten abgeschlossenen Stelle fort — die bereits berechneten Agent-Schritte werden
+nicht erneut ausgeführt. Erfolgreiche Läufe räumen ihren Checkpoint auf. Bei
+`SIGINT` wird sauber beendet (Exit-Code 130) und der Checkpoint bleibt erhalten.
 
 ## Lernen aus dem Track-Record
 
-Concilium ist explizit lernend über zwei Mechanismen:
+Concilium ist explizit lernend über mehrere Mechanismen:
 
 - **Kontext-Feedback**: Vor jeder Analyse liest Concilium das Entscheidungs-Journal
   (`journal/decisions.csv`) und injiziert neutrale Track-Record-Statistiken
-  (Aktions-Verteilung, Ø Confidence, Portfolio-Fit, KAUFEN-Genehmigungsquote) in
-  die Trader-/Risk-/PM-Prompts, damit die Agenten ihre Kalibrierung an der
-  eigenen Historie ausrichten.
+  (Aktions-Verteilung, Ø Confidence, Portfolio-Fit, KAUFEN-Genehmigungsquote, **Kalibrierungs-Tendenz**) in die Trader-/Risk-/PM-Prompts, damit die Agenten ihre
+  Kalibrierung an der eigenen Historie ausrichten.
 - **Reflexion**: Vor jeder Analyse desselben Tickers holt Concilium den
   **realisierten Return** der letzten Entscheidung zu diesem Ticker (roh **und
   Alpha vs. SPY**), generiert eine kurze deutsche **Reflexion** und injiziert sie
   in den Trader- und Portfolio-Manager-Prompt.
+- **Konfidenz-Kalibrierung** (seit Phase 4): `--evaluate` misst die Kalibrierung
+  über den **Brier-Score**, den **Kalibrierungs-Gap** (Ø-Konfidenz vs. tatsächliche
+  Hit-Rate) und **Reliability-Bänder** — und klassifiziert die Tendenz als über-/
+  unterkonfident oder gut kalibriert. Diese Information fließt als Feedback in die
+  Agenten zurück, damit sie gezielt gegen Fehlkalibrierung korrigieren.
 
 Die 5-stufige Skala macht zudem die `--evaluate`-Track-Record-Auswertung
 granularer: zusätzlich zur Hit-Rate wird die **durchschnittliche Rating-Distanz**
@@ -137,6 +187,7 @@ Die Agenten verwenden eine OpenAI-kompatible Schnittstelle, konfiguriert über U
 | `LLM_MODEL` | `glm-5.2:cloud` | Modellname |
 | `LLM_FALLBACK_MODEL` | – | Fallback-Modell nach erschöpften Retries bei 429/5xx |
 | `CONCILIUM_CACHE_DIR` | `<repo>/cache` | Tages-Cache für Marktdaten; leer = deaktiviert |
+| `CONCILIUM_STATE_DIR` | `<repo>/state` | Checkpoint-Verzeichnis für `--resume`; leer = deaktiviert |
 
 Beispiel:
 
@@ -146,6 +197,13 @@ export LLM_API_KEY="sk-..."
 export LLM_MODEL="gpt-4o"
 python main.py --ticker AAPL
 ```
+
+## Hinweis zu externen Sentiment-Quellen
+
+StockTwits und Reddit (Sozial-Sentiment, Phase 3) werden über öffentliche Endpoints
+ohne API-Key bezogen. Beide können in Netzwerkumgebungen blockiert sein (HTTP 403,
+z. B. Container-IPs); dann greift automatisch die Fallback-Kaskade (yfinance →
+Google-News), sodass der Report nie leer bricht.
 
 ## Disclaimer
 
