@@ -888,6 +888,46 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
         )
         lines.append("")
 
+    # --- Konfidenz-Kalibrierung (Brier-Score, Gap, Reliability-Bänder) ---
+    kal = eval_result.get("konfidenz_kalibrierung") or {}
+    reliability_bins = eval_result.get("reliability_bins") or []
+    if kal.get("brier_score") is not None or reliability_bins:
+        lines.append("## Konfidenz-Kalibrierung")
+        lines.append("")
+        lines.append("| Kennzahl | Wert |")
+        lines.append("|---|---|")
+        brier = kal.get("brier_score")
+        lines.append(f"| Brier-Score | {_fmt_num(brier)} |")
+        lines.append(
+            f"| Ø Konfidenz (normalisiert) | {_fmt_num(kal.get('durchschnittliche_konfidenz'))} |"
+        )
+        lines.append(
+            f"| Ø tatsächliche Hit-Rate | {_fmt_num(kal.get('durchschnittliche_tatsaechliche_hit_rate'))} |"
+        )
+        gap = kal.get("kalibrierungs_gap")
+        lines.append(f"| Kalibrierungs-Gap | {_fmt_num(gap)} |")
+        lines.append(f"| Tendenz | {kal.get('tendenz', 'N/A')} |")
+        lines.append(f"| n (bewertete Zeilen) | {kal.get('n', 0)} |")
+        lines.append("")
+
+        # Reliability-Bänder-Tabelle
+        if reliability_bins:
+            lines.append("### Reliability-Bänder")
+            lines.append("")
+            lines.append("| Konfidenz-Bin | n | Ø Konfidenz | Hit-Rate |")
+            lines.append("|---|---|---|---|")
+            for rb in reliability_bins:
+                lines.append(
+                    f"| {rb.get('bin', '?')} | {rb.get('n', 0)} | "
+                    f"{_fmt_num(rb.get('mittlere_konfidenz'))} | "
+                    f"{_fmt_pct2(rb.get('hit_rate'))} |"
+                )
+            lines.append("")
+            lines.append(
+                "_Ideale Kalibrierung: Hit-Rate ≈ Konfidenz pro Bin._"
+            )
+            lines.append("")
+
     # --- Portfolio-Fit ---
     pf = eval_result.get("portfolio_fit_hoch")
     if pf is not None:

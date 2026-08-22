@@ -60,6 +60,71 @@ def _read_journal_rows(journal_file: str) -> list[dict[str, str]]:
         return []
 
 
+def _compute_kalibrierung_proxy(rows: list[dict[str, str]]) -> dict[str, Any]:
+    """Berechnet eine netzfreie Kalibrierungs-Näherung aus Journal-CSV-Feldern.
+
+    Da feedback.py kein yfinance laden darf, wird die final_decision als
+    Proxy für hit verwendet: GENEHMIGT → 1 (Erfolg), ABGELEHNT → 0 (kein Erfolg).
+    Ø Confidence wird auf 0-1 normalisiert (conf/5).
+
+    Gap = Ø_Konfidenz - Genehmigungs-Rate (positiv = überkonfident).
+
+    Returns:
+        dict mit avg_confidence, genehmigungs_rate, gap, tendenz.
+        Alle None bei zu wenigen / fehlenden Daten. Crasht nie.
+    """
+    empty: dict[str, Any] = {
+        "avg_confidence": None,
+        "genehmigungs_rate": None,
+        "gap": None,
+        "tendenz": None,
+        "n": 0,
+    }
+
+    # Nur Zeilen mit confidence und final_decision verwenden
+    valid: list[dict[str, str]] = []
+    for row in rows:
+        conf = _safe_float(row.get("confidence"))
+        final = (row.get("final_decision") or "").strip().upper()
+        if conf is None or not math.isfinite(conf) or conf <= 0:
+            continue
+        if "GENEHMIGT" not in final and "ABGELEHNT" not in final:
+            continue
+        valid.append(row)
+
+    if not valid:
+        return empty
+
+    n = len(valid)
+    conf_sum = 0.0
+    genehmigt_sum = 0
+    for row in valid:
+        conf = _safe_float(row.get("confidence"))
+        conf_sum += conf / 5.0
+        final = (row.get("final_decision") or "").strip().upper()
+        if "GENEHMIGT" in final:
+            genehmigt_sum += 1
+
+    avg_conf = conf_sum / n
+    genehmigungs_rate = genehmigt_sum / n
+    gap = avg_conf - genehmigungs_rate
+
+    if gap > 0.15:
+        tendenz = "überkonfident"
+    elif gap < -0.15:
+        tendenz = "unterkonfident"
+    else:
+        tendenz = "gut kalibriert"
+
+    return {
+        "avg_confidence": avg_conf,
+        "genehmigungs_rate": genehmigungs_rate,
+        "gap": gap,
+        "tendenz": tendenz,
+        "n": n,
+    }
+
+
 def _compute_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
     """Berechnet Track-Record-Statistiken aus Journal-Zeilen.
 
@@ -109,6 +174,13 @@ def _compute_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
     )
     kauf_genehmigt_pct = (kaufen_genehmigt / len(kaufen_rows) * 100) if kaufen_rows else None
 
+    # --- Kalibrierungs-Proxy (netzfrei) ---
+    # Da feedback.py kein yfinance laden darf, nutzen wir die final_decision
+    # (GENEHMIGT = "Erfolg", ABGELEHNT = "kein Erfolg") als Proxy für hit.
+    # Ø Confidence (normalisiert auf 0-1: conf/5) vs. Genehmigungs-Rate.
+    # Gap > 0.15 → überkonfident, < -0.15 → unterkonfident, sonst gut kalibriert.
+    kalibrierung = _compute_kalibrierung_proxy(rows)
+
     return {
         "n_total": n_total,
         "actions": actions,
@@ -120,6 +192,7 @@ def _compute_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
         "avg_portfolio_fit": avg_portfolio_fit,
         "avg_ziel_gewichtung": avg_ziel_gewichtung,
         "kauf_genehmigt_pct": kauf_genehmigt_pct,
+        "kalibrierung": kalibrierung,
     }
 
 
@@ -176,6 +249,28 @@ def build_feedback_context(
         avg_zg = _format_pct(stats["avg_ziel_gewichtung"])
         kauf_pct = _format_pct(stats["kauf_genehmigt_pct"])
 
+        # Kalibrierungs-Proxy-Zeile (netzfrei)
+        kal = stats.get("kalibrierung", {})
+        kal_gap = kal.get("gap")
+        kal_tendenz = kal.get("tendenz")
+        kal_avg_conf = kal.get("avg_confidence")
+        kal_genehm_rate = kal.get("genehmigungs_rate")
+        if kal_gap is not None and math.isfinite(kal_gap):
+            avg_conf_display = (
+                f"{kal_avg_conf * 5:.1f}/5" if kal_avg_conf is not None else "N/A"
+            )
+            genehm_display = (
+                f"{kal_genehm_rate * 100:.0f}%" if kal_genehm_rate is not None else "N/A"
+            )
+            kalibrierung_line = (
+                f"Konfidenz-Kalibrierung: Ø Confidence {avg_conf_display} vs. "
+                f"Genehmigungs-Rate {genehm_display}. Tendenz: {kal_tendenz}."
+            )
+        else:
+            kalibrierung_line = (
+                "Konfidenz-Kalibrierung: noch zu wenige Daten für eine Aussage."
+            )
+
         lines = [
             f"=== DEIN TRACK-RECORD (letzte {n} Entscheidungen) ===",
             f"Gesamt: {n} Entscheidungen (KAUFEN: {a['KAUFEN']}, HALTEN: {a['HALTEN']}, VERKAUFEN: {a['VERKAUFEN']})",
@@ -184,6 +279,7 @@ def build_feedback_context(
             f"Ø Confidence: {avg_conf} / 5 | Ø Ensemble-Confidence: {avg_ens}",
             f"Ø Portfolio-Fit-Score: {avg_pf} / 5 | Ø Ziel-Gewichtung: {avg_zg} %",
             f"KAUFEN-Empfehlungen final genehmigt: {kauf_pct} %",
+            kalibrierung_line,
             "",
             "Berücksichtige diese Historie bei deiner Einschätzung und kalibriere "
             "deine Empfehlungen entsprechend. Bleib sachlich und faktenbasiert.",

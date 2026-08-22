@@ -421,7 +421,156 @@ def _empty_result() -> dict[str, Any]:
         "portfolio_fit_hoch": None,
         "zusammenfassung": None,
         "fehler": [],
+        "konfidenz_kalibrierung": {
+            "brier_score": None,
+            "n": 0,
+            "durchschnittliche_konfidenz": None,
+            "durchschnittliche_tatsaechliche_hit_rate": None,
+            "kalibrierungs_gap": None,
+            "tendenz": None,
+        },
+        "reliability_bins": [],
     }
+
+
+def _compute_konfidenz_kalibrierung(
+    evaluations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Berechnet die Konfidenz-Kalibrierung (Brier-Score, Gap, Tendenz).
+
+    Brier-Score (binär): Für jede bewertete Zeile mit confidence und hit:
+        p = confidence / 5  (normalisierte Wahrscheinlichkeit 0.2..1.0)
+        hit_int = 1 wenn hit True, 0 wenn hit False
+        brier_i = (p - hit_int) ** 2
+    Brier-Score = Ø aller brier_i (niedriger = besser, 0 = perfekt).
+
+    Kalibrierungs-Gap = Ø_Konfidenz - Ø_Hit-Rate (positiv = überkonfident).
+
+    Tendenz:
+        gap > +0.15 → "überkonfident"
+        gap < -0.15 → "unterkonfident"
+        sonst       → "gut kalibriert"
+
+    Nur Zeilen mit confidence (nicht None, isfinite) und hit (nicht None)
+    werden verwendet. Bei 0 gültigen Zeilen → None-Werte.
+    """
+    empty = {
+        "brier_score": None,
+        "n": 0,
+        "durchschnittliche_konfidenz": None,
+        "durchschnittliche_tatsaechliche_hit_rate": None,
+        "kalibrierungs_gap": None,
+        "tendenz": None,
+    }
+
+    # Nur Zeilen mit confidence und hit verwenden
+    valid: list[dict[str, Any]] = []
+    for e in evaluations:
+        conf = e.get("confidence")
+        hit = e.get("hit")
+        if conf is None or hit is None:
+            continue
+        conf_f = float(conf)
+        if not math.isfinite(conf_f) or conf_f <= 0:
+            continue
+        valid.append(e)
+
+    if not valid:
+        return empty
+
+    n = len(valid)
+    brier_sum = 0.0
+    conf_sum = 0.0
+    hit_sum = 0.0
+
+    for e in valid:
+        conf_f = float(e["confidence"])
+        p = conf_f / 5.0
+        hit_int = 1 if e["hit"] is True else 0
+        brier_sum += (p - hit_int) ** 2
+        conf_sum += p
+        hit_sum += hit_int
+
+    brier_score = brier_sum / n
+    avg_conf = conf_sum / n
+    avg_hit = hit_sum / n
+    gap = avg_conf - avg_hit
+
+    if gap > 0.15:
+        tendenz = "überkonfident"
+    elif gap < -0.15:
+        tendenz = "unterkonfident"
+    else:
+        tendenz = "gut kalibriert"
+
+    return {
+        "brier_score": brier_score,
+        "n": n,
+        "durchschnittliche_konfidenz": avg_conf,
+        "durchschnittliche_tatsaechliche_hit_rate": avg_hit,
+        "kalibrierungs_gap": gap,
+        "tendenz": tendenz,
+    }
+
+
+# Reliability-Bin-Grenzen: [untere, obere) Grenzen
+# [0.2, 0.4), [0.4, 0.6), [0.6, 0.8), [0.8, 1.0+1)
+_RELIABILITY_BIN_EDGES: list[tuple[float, float]] = [
+    (0.2, 0.4),
+    (0.4, 0.6),
+    (0.6, 0.8),
+    (0.8, 1.01),  # 1.01 um 1.0 inklusiv zu erfassen
+]
+
+
+def _compute_reliability_bins(
+    evaluations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Gruppiert bewertete Zeilen in Konfidenz-Intervalle (Reliability-Bänder).
+
+    Bins: [0.2-0.4), [0.4-0.6), [0.6-0.8), [0.8-1.0]
+    Pro Bin: n, mittlere_konfidenz (Ø p), hit_rate.
+
+    Nur Zeilen mit confidence (nicht None, isfinite, > 0) und hit (nicht None).
+    Leere Bins werden nicht in die Liste aufgenommen.
+    """
+    valid: list[dict[str, Any]] = []
+    for e in evaluations:
+        conf = e.get("confidence")
+        hit = e.get("hit")
+        if conf is None or hit is None:
+            continue
+        conf_f = float(conf)
+        if not math.isfinite(conf_f) or conf_f <= 0:
+            continue
+        valid.append(e)
+
+    if not valid:
+        return []
+
+    bins: list[dict[str, Any]] = []
+    for lo, hi in _RELIABILITY_BIN_EDGES:
+        bin_evals = [
+            e for e in valid
+            if lo <= float(e["confidence"]) / 5.0 < hi
+        ]
+        if not bin_evals:
+            continue
+        n = len(bin_evals)
+        conf_vals = [float(e["confidence"]) / 5.0 for e in bin_evals]
+        hits = [e for e in bin_evals if e["hit"] is True]
+        rated = len(hits) + len([e for e in bin_evals if e["hit"] is False])
+        mittlere_konfidenz = sum(conf_vals) / n
+        hit_rate = len(hits) / rated if rated > 0 else None
+        bins.append(
+            {
+                "bin": f"[{lo:.1f}-{hi:.1f})" if hi <= 1.0 else f"[{lo:.1f}-1.0]",
+                "n": n,
+                "mittlere_konfidenz": mittlere_konfidenz,
+                "hit_rate": hit_rate,
+            }
+        )
+    return bins
 
 
 def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
@@ -523,6 +672,12 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     result["durchschnitt_rating_distanz"] = (
         sum(rating_distances) / len(rating_distances) if rating_distances else None
     )
+
+    # --- Konfidenz-Kalibrierung (Brier-Score, Gap, Tendenz) ---
+    result["konfidenz_kalibrierung"] = _compute_konfidenz_kalibrierung(evaluations)
+
+    # --- Reliability-Bänder (feinere Konfidenz-Intervalle) ---
+    result["reliability_bins"] = _compute_reliability_bins(evaluations)
 
     return result
 
