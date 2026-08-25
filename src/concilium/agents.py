@@ -889,6 +889,57 @@ def _extract_current_price(analysts: dict[str, Any]) -> float | None:
     return None
 
 
+def _is_plausible_value(
+    trade: dict[str, Any], field: str, current_price: float, *, expected_above: bool,
+) -> bool:
+    """Prüft, ob ein Ziel-/Stop-Wert plausibel bezüglich current_price ist.
+
+    expected_above=True  → Wert muss > current_price (z.B. zielkurs bei KAUFEN).
+    expected_above=False → Wert muss < current_price (z.B. stop_loss bei KAUFEN).
+    """
+    val = trade.get(field)
+    if val is None:
+        return False
+    try:
+        val_f = float(val)
+    except (TypeError, ValueError):
+        return False
+    if expected_above:
+        return val_f > current_price
+    return val_f < current_price
+
+
+def _ensure_ziel_stop(
+    result: dict[str, Any], action: str, current_price: float,
+) -> dict[str, Any]:
+    """Setzt deterministisch plausible zielkurs/stop_loss, falls fehlend/unplausibel.
+
+    KAUFEN / STARK KAUFEN:
+      zielkurs = current_price * 1.10, stop_loss = current_price * 0.90
+    VERKAUFEN / STARK VERKAUFEN:
+      zielkurs = current_price * 0.90, stop_loss = current_price * 1.10
+    HALTEN: keine Werte erzwungen (bleiben None wenn nicht vom Trader geliefert).
+
+    Bereits plausible Werte werden NICHT überschrieben.
+    """
+    action_upper = action.strip().upper()
+
+    if action_upper in ("KAUFEN", "STARK KAUFEN"):
+        if not _is_plausible_value(result, "zielkurs", current_price, expected_above=True):
+            result["zielkurs"] = round(current_price * 1.10, 2)
+        if not _is_plausible_value(result, "stop_loss", current_price, expected_above=False):
+            result["stop_loss"] = round(current_price * 0.90, 2)
+
+    elif action_upper in ("VERKAUFEN", "STARK VERKAUFEN"):
+        if not _is_plausible_value(result, "zielkurs", current_price, expected_above=False):
+            result["zielkurs"] = round(current_price * 0.90, 2)
+        if not _is_plausible_value(result, "stop_loss", current_price, expected_above=True):
+            result["stop_loss"] = round(current_price * 1.10, 2)
+
+    # HALTEN: keine Erzwingung — Trader-Werte bleiben, None bleibt None
+    return result
+
+
 def _is_plausible_kauf(trade: dict[str, Any], current_price: float | None) -> bool:
     """Prüft, ob ein KAUFEN-Trade plausible Ziel-/Stop-Werte hat.
 
@@ -1297,11 +1348,16 @@ def trade_revision(
     llm: LLMClient,
     feedback_context: str = "",
     reflection_context: str = "",
+    current_price: float | None = None,
 ) -> dict[str, Any]:
     """Trade-Revision (2nd Pass) — der Trader überarbeitet seinen Trade.
 
     Nachdem Risk-Manager und Portfolio-Fit-Analyst den Trade bewertet haben,
     bekommt der Trader eine zweite Runde, um seinen Trade anzupassen.
+
+    Nach dem LLM-Call werden zielkurs/stop_loss auf plausible Werte erzwungen,
+    falls sie fehlen oder unplausibel sind (deterministischer Fallback basierend
+    auf current_price). HALTEN-Trades behalten None-Werte.
 
     Args:
         trade: Ursprünglicher Trade-Vorschlag vom Trader/Ensemble.
@@ -1310,6 +1366,8 @@ def trade_revision(
         llm: LLMClient.
         feedback_context: Optionaler Track-Record-Kontext-Block.
         reflection_context: Optionaler Reflexions-Block.
+        current_price: Aktueller Kurs — für deterministischen Ziel-/Stop-Fallback.
+            Bei None wird der Fallback übersprungen (kein Crash).
 
     Returns:
         dict mit dem revidierten Trade (gleiche Felder wie trader(),
@@ -1341,4 +1399,12 @@ def trade_revision(
     raw_rating = str(result.get("aktion", "")).strip().upper()
     result["rating"] = raw_rating
     result["aktion"] = _rating_to_action(raw_rating)
+
+    # Ziel-/Stop-Erzwingung: deterministischer Fallback bei fehlenden/unplausiblen Werten
+    if current_price is not None:
+        try:
+            _ensure_ziel_stop(result, result["aktion"], float(current_price))
+        except (TypeError, ValueError):
+            pass  # current_price nicht konvertierbar — kein Fallback, kein Crash
+
     return result

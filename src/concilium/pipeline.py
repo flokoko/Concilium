@@ -7,6 +7,7 @@ from typing import Any
 
 from .agents import (
     _build_data_text,
+    _extract_current_price,
     analyst_team,
     debate,
     ensemble_trader,
@@ -243,13 +244,15 @@ def run_pipeline(
             result["portfolio_fit"] = None
         _save_step(result, ticker, "portfolio_fit")
 
-    # --- 5c. Trade-Revision (2nd Pass) ---
+    # --- 5c. Trade-Revision (2nd Pass) --- #
     if not _is_completed(result, "trade_revision"):
         result["trade_original"] = None
         result["trade_revised"] = False
         try:
             logger.info("Schritt 5c: Trade-Revision (2nd Pass)")
             original_trade = trade
+            # current_price aus Analysten-Daten extrahieren (für Ziel-/Stop-Fallback)
+            rev_current_price = _extract_current_price(analysts)
             revised = trade_revision(
                 original_trade,
                 risk,
@@ -257,6 +260,7 @@ def run_pipeline(
                 llm,
                 feedback_context=feedback_context,
                 reflection_context=reflection_context,
+                current_price=rev_current_price,
             )
             result["trade_original"] = original_trade
             result["trade"] = revised

@@ -125,6 +125,77 @@ def _compute_kalibrierung_proxy(rows: list[dict[str, str]]) -> dict[str, Any]:
     }
 
 
+def _compute_kalibrierung_proxy_per_action(
+    rows: list[dict[str, str]],
+) -> dict[str, dict[str, Any]]:
+    """Berechnet eine netzfreie Kalibrierungs-Näherung pro Aktion (3-stufig).
+
+    Wie ``_compute_kalibrierung_proxy``, aber aufgespalten nach KAUFEN / HALTEN /
+    VERKAUFEN.  Nutzt ebenfalls die final_decision als Hit-Proxy.
+
+    Returns:
+        dict {aktion: {avg_confidence, genehmigungs_rate, gap, tendenz, n}}.
+        Nur Aktionen mit ≥3 gültigen Zeilen. Leeres dict bei zu wenigen Daten.
+    """
+    # Zeilen nach Aktion gruppieren (nur 3-stufig)
+    per_action: dict[str, list[dict[str, str]]] = {
+        "KAUFEN": [],
+        "HALTEN": [],
+        "VERKAUFEN": [],
+    }
+    for row in rows:
+        action = (row.get("action") or "").strip().upper()
+        if action in per_action:
+            per_action[action].append(row)
+
+    result: dict[str, dict[str, Any]] = {}
+    for action, action_rows in per_action.items():
+        # Gleiche Filter-Logik wie _compute_kalibrierung_proxy
+        valid: list[dict[str, str]] = []
+        for row in action_rows:
+            conf = _safe_float(row.get("confidence"))
+            final = (row.get("final_decision") or "").strip().upper()
+            if conf is None or not math.isfinite(conf) or conf <= 0:
+                continue
+            if "GENEHMIGT" not in final and "ABGELEHNT" not in final:
+                continue
+            valid.append(row)
+
+        if len(valid) < 3:
+            continue  # Rauschen vermeiden
+
+        n = len(valid)
+        conf_sum = 0.0
+        genehmigt_sum = 0
+        for row in valid:
+            conf = _safe_float(row.get("confidence"))
+            conf_sum += conf / 5.0
+            final = (row.get("final_decision") or "").strip().upper()
+            if "GENEHMIGT" in final:
+                genehmigt_sum += 1
+
+        avg_conf = conf_sum / n
+        genehmigungs_rate = genehmigt_sum / n
+        gap = avg_conf - genehmigungs_rate
+
+        if gap > 0.15:
+            tendenz = "überkonfident"
+        elif gap < -0.15:
+            tendenz = "unterkonfident"
+        else:
+            tendenz = "gut kalibriert"
+
+        result[action] = {
+            "avg_confidence": avg_conf,
+            "genehmigungs_rate": genehmigungs_rate,
+            "gap": gap,
+            "tendenz": tendenz,
+            "n": n,
+        }
+
+    return result
+
+
 def _compute_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
     """Berechnet Track-Record-Statistiken aus Journal-Zeilen.
 
@@ -174,12 +245,15 @@ def _compute_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
     )
     kauf_genehmigt_pct = (kaufen_genehmigt / len(kaufen_rows) * 100) if kaufen_rows else None
 
-    # --- Kalibrierungs-Proxy (netzfrei) ---
+    # --- Kalibrierungs-Proxy (netzfrei) --- #
     # Da feedback.py kein yfinance laden darf, nutzen wir die final_decision
     # (GENEHMIGT = "Erfolg", ABGELEHNT = "kein Erfolg") als Proxy für hit.
     # Ø Confidence (normalisiert auf 0-1: conf/5) vs. Genehmigungs-Rate.
     # Gap > 0.15 → überkonfident, < -0.15 → unterkonfident, sonst gut kalibriert.
     kalibrierung = _compute_kalibrierung_proxy(rows)
+
+    # --- Kalibrierungs-Proxy pro Aktion (granular) --- #
+    kalibrierung_pro_aktion = _compute_kalibrierung_proxy_per_action(rows)
 
     return {
         "n_total": n_total,
@@ -193,6 +267,7 @@ def _compute_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
         "avg_ziel_gewichtung": avg_ziel_gewichtung,
         "kauf_genehmigt_pct": kauf_genehmigt_pct,
         "kalibrierung": kalibrierung,
+        "kalibrierung_pro_aktion": kalibrierung_pro_aktion,
     }
 
 
@@ -280,10 +355,41 @@ def build_feedback_context(
             f"Ø Portfolio-Fit-Score: {avg_pf} / 5 | Ø Ziel-Gewichtung: {avg_zg} %",
             f"KAUFEN-Empfehlungen final genehmigt: {kauf_pct} %",
             kalibrierung_line,
+        ]
+
+        # --- Kalibrierung pro Aktion (nur wenn Daten vorhanden) --- #
+        kal_pro_aktion = stats.get("kalibrierung_pro_aktion", {})
+        if kal_pro_aktion:
+            lines.append("")
+            lines.append("Kalibrierung pro Aktion:")
+            for action_name in ("KAUFEN", "HALTEN", "VERKAUFEN"):
+                entry = kal_pro_aktion.get(action_name)
+                if entry is None:
+                    continue
+                ak_avg_conf = entry.get("avg_confidence")
+                ak_genehm = entry.get("genehmigungs_rate")
+                ak_gap = entry.get("gap")
+                ak_tendenz = entry.get("tendenz")
+                gap_sign = f"{ak_gap:+.2f}" if ak_gap is not None else "N/A"
+                conf_display = (
+                    f"{ak_avg_conf:.2f}" if ak_avg_conf is not None else "N/A"
+                )
+                genehm_display = (
+                    f"{ak_genehm:.2f}" if ak_genehm is not None else "N/A"
+                )
+                lines.append(
+                    f"- {action_name}: Ø Confidence {conf_display}, "
+                    f"Genehmigungs-Rate {genehm_display}, "
+                    f"Gap {gap_sign} ({ak_tendenz})"
+                )
+
+        lines.extend([
             "",
             "Berücksichtige diese Historie bei deiner Einschätzung und kalibriere "
             "deine Empfehlungen entsprechend. Bleib sachlich und faktenbasiert.",
-        ]
+            "Passe deine Konfidenz an die historische Trefferquote deiner Aktion an "
+            "— bei überkonfidenter Historie sei vorsichtiger mit hohen Konfidenzwerten.",
+        ])
 
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001 — crasht nie
