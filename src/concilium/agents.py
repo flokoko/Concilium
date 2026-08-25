@@ -868,6 +868,8 @@ def trader(
     raw_rating = str(result.get("aktion", "")).strip().upper()
     result["rating"] = raw_rating
     result["aktion"] = _rating_to_action(raw_rating)
+    # Entscheidungs-Disziplin: STARK KAUFEN/STARK VERKAUFEN dämpfen wenn überkonfident
+    _dampen_stark_rating(result, raw_rating)
     return result
 
 
@@ -1114,6 +1116,114 @@ def _smooth_weight(hit_rate: float) -> float:
     return 0.5 + 0.5 * max(0.0, min(1.0, hit_rate))
 
 
+# --------------------------------------------------------------------------- #
+# Entscheidungs-Disziplin — aggressive Ratings dämpfen bei überkonfidenter Historie
+# --------------------------------------------------------------------------- #
+
+_DAMPEN_MIN_DECISIONS = 5
+_DAMPEN_GAP_THRESHOLD = 0.15
+
+
+def _should_dampen_stark(action: str | None = None) -> bool:
+    """Prüft, ob aggressive Ratings (STARK KAUFEN/STARK VERKAUFEN) gedämpft werden sollen.
+
+    Liest ``state/calibration.json`` (netzfrei, gleicher Mechanismus wie
+    ``_load_ensemble_weights``: ``CONCILIUM_STATE_DIR``-Übersteuerung, <7 Tage
+    aktuell, ``anzahl_entscheidungen`` >= 5).
+
+    Gibt ``True`` zurück, wenn die Kalibrierungs-Tendenz überkonfident ist:
+    - Gesamt-Gap (Ø-Confidence - hit_rate_gesamt) > 0.15, ODER
+    - Gap der betroffenen Aktion (avg_confidence - hit_rate) > 0.15
+      (nur geprüft, wenn ``action`` angegeben, z.B. "KAUFEN" oder "VERKAUFEN").
+
+    Gibt ``False`` zurück bei fehlender/zu alter/ungültiger JSON oder
+    anzahl_entscheidungen < 5. Crasht nie.
+    """
+    try:
+        cal_path = os.path.join(_ensemble_state_dir(), "calibration.json")
+        if not os.path.isfile(cal_path):
+            return False
+        with open(cal_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return False
+
+        # Alters-Check
+        erstellt_am = data.get("erstellt_am")
+        if not isinstance(erstellt_am, str) or not erstellt_am.strip():
+            return False
+        try:
+            erstellt_dt = datetime.fromisoformat(erstellt_am)
+        except (ValueError, TypeError):
+            return False
+        age = datetime.now() - erstellt_dt
+        if age > timedelta(days=_ENSEMBLE_CALIBRATION_MAX_AGE_DAYS):
+            return False
+
+        # Mindest-Anzahl Entscheidungen
+        anzahl = data.get("anzahl_entscheidungen")
+        if not isinstance(anzahl, (int, float)) or anzahl < _DAMPEN_MIN_DECISIONS:
+            return False
+
+        nach_aktion = data.get("nach_aktion")
+        if not isinstance(nach_aktion, dict):
+            return False
+
+        # Gesamt-Gap: gewichtete Ø-Confidence - hit_rate_gesamt
+        hit_rate_gesamt = data.get("hit_rate_gesamt")
+        total_n = 0
+        conf_sum = 0.0
+        for a, adata in nach_aktion.items():
+            if not isinstance(adata, dict):
+                continue
+            n = adata.get("n", 0)
+            avg_conf = adata.get("avg_confidence")
+            if isinstance(n, (int, float)) and n > 0 and isinstance(avg_conf, (int, float)):
+                total_n += n
+                conf_sum += avg_conf * n
+        if total_n > 0 and isinstance(hit_rate_gesamt, (int, float)):
+            avg_confidence = conf_sum / total_n
+            gap_gesamt = avg_confidence - hit_rate_gesamt
+            if gap_gesamt > _DAMPEN_GAP_THRESHOLD:
+                return True
+
+        # Per-Action Gap der betroffenen Aktion
+        if action is not None:
+            adata = nach_aktion.get(action)
+            if isinstance(adata, dict):
+                avg_conf = adata.get("avg_confidence")
+                hit_rate = adata.get("hit_rate")
+                if isinstance(avg_conf, (int, float)) and isinstance(hit_rate, (int, float)):
+                    gap = avg_conf - hit_rate
+                    if gap > _DAMPEN_GAP_THRESHOLD:
+                        return True
+
+        return False
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.debug("Dämpfungs-Check fehlgeschlagen: %s", exc)
+        return False
+
+
+def _dampen_stark_rating(result: dict[str, Any], raw_rating: str) -> None:
+    """Dämpft STARK KAUFEN/STARK VERKAUFEN im result-dict in-place.
+
+    Wenn ``_should_dampen_stark`` True liefert:
+    - STARK KAUFEN → Rating KAUFEN, Aktion KAUFEN
+    - STARK VERKAUFEN → Rating VERKAUFEN, Aktion VERKAUFEN
+    Setzt ``result["rating_gedämpft"]`` und ``result["rating_original"]``.
+    """
+    result["rating_gedämpft"] = False
+    if raw_rating not in ("STARK KAUFEN", "STARK VERKAUFEN"):
+        return
+    action_to_check = "KAUFEN" if raw_rating == "STARK KAUFEN" else "VERKAUFEN"
+    if _should_dampen_stark(action_to_check):
+        damped = "KAUFEN" if raw_rating == "STARK KAUFEN" else "VERKAUFEN"
+        result["rating_original"] = raw_rating
+        result["rating"] = damped
+        result["aktion"] = _rating_to_action(damped)
+        result["rating_gedämpft"] = True
+
+
 def ensemble_trader(
     analysts: dict[str, Any],
     debate_result: dict[str, Any],
@@ -1300,7 +1410,36 @@ def ensemble_trader(
         "aktion_gewichte": aktion_gewichte,
     }
 
+    # Entscheidungs-Disziplin: finales Rating dämpfen wenn überkonfident
+    # (pro-Run-Dämpfung ist bereits via trader() passiert; hier wird das
+    # finale Rating nach Mehrheitsabstimmung zusätzlich gedämpft)
+    _final_dampen_ensemble(result)
+
     return result
+
+
+def _final_dampen_ensemble(result: dict[str, Any]) -> None:
+    """Dämpft das finale Ensemble-Rating wenn es STARK KAUFEN/STARK VERKAUFEN ist.
+
+    Wird NACH der Mehrheitsabstimmung auf das finale result angewendet.
+    Nutzt die gleiche ``_should_dampen_stark``-Logik wie ``_dampen_stark_rating``.
+    """
+    final_rating = str(result.get("rating", "")).strip().upper()
+    if final_rating not in ("STARK KAUFEN", "STARK VERKAUFEN"):
+        # rating_gedämpft sicherstellen, falls noch nicht gesetzt
+        if "rating_gedämpft" not in result:
+            result["rating_gedämpft"] = False
+        return
+    action_to_check = "KAUFEN" if final_rating == "STARK KAUFEN" else "VERKAUFEN"
+    if _should_dampen_stark(action_to_check):
+        damped = "KAUFEN" if final_rating == "STARK KAUFEN" else "VERKAUFEN"
+        result["rating_original"] = final_rating
+        result["rating"] = damped
+        result["aktion"] = _rating_to_action(damped)
+        result["rating_gedämpft"] = True
+    else:
+        if "rating_gedämpft" not in result:
+            result["rating_gedämpft"] = False
 
 
 def compute_position_size(

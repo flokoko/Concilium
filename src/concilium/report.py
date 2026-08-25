@@ -112,6 +112,14 @@ def _management_summary(result: dict[str, Any], no_llm: bool) -> list[str]:
 
         lines.append(f"**Urteil:** {emoji} {entscheidung} — {', '.join(trade_parts)}")
 
+        # Entscheidungs-Disziplin: Hinweis bei gedämpftem Rating
+        if trade.get("rating_gedämpft"):
+            original = trade.get("rating_original", "STARK KAUFEN/STARK VERKAUFEN")
+            lines.append(
+                f"_⚠️ Rating gedämpft ({original} → {trade.get('rating', 'N/A')}) "
+                f"wegen überkonfidenter Historie_"
+            )
+
     # --- 2. Score-Zeile ---
     score_parts: list[str] = []
 
@@ -719,6 +727,13 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(f"**Aktion:** {trade.get('aktion', 'N/A')}")
         if trade.get("rating"):
             lines.append(f"**Rating (5-stufig):** {trade['rating']}")
+        # Entscheidungs-Disziplin: Hinweis bei gedämpftem Rating
+        if trade.get("rating_gedämpft"):
+            original = trade.get("rating_original", "STARK KAUFEN/STARK VERKAUFEN")
+            lines.append(
+                f"_⚠️ Rating gedämpft ({original} → {trade['rating']}) "
+                f"wegen überkonfidenter Historie_"
+            )
         lines.append(f"**Zielkurs:** {_fmt(trade.get('zielkurs'))}")
         lines.append(f"**Stop-Loss:** {_fmt(trade.get('stop_loss'))}")
         lines.append(f"**Positionsanteil:** {trade.get('positionsanteil', 'N/A')} %")
