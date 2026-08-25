@@ -177,7 +177,7 @@ class TestHaltenBewertung:
     """Testet die HALTEN-Bewertung."""
 
     def test_halten_stable_is_hit(self):
-        """HALTEN mit stabilem Kurs (±5%) → Hit."""
+        """HALTEN mit stabilem Kurs (±2%) → Hit."""
         prices = _make_prices(100, 60, drift=0.0)  # stabil
         row = _make_journal_row(action="HALTEN", timestamp="2026-01-01 10:00:00")
         result = _evaluate_single(row, prices, 90)
@@ -249,6 +249,169 @@ class TestZielkursAndStop:
         row = _make_journal_row(action="KAUFEN", target="", timestamp="2026-01-01 10:00:00")
         result = _evaluate_single(row, prices, 90)
         assert result["ziel_erreicht"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Tests: Verfeinerte Hit-Definition (Stop gerissen = Miss, Ziel erreicht = Hit)
+# --------------------------------------------------------------------------- #
+
+
+class TestRefinedHitDefinition:
+    """Testet die verfeinerte Hit-Definition mit Stop/Ziel-Priorität."""
+
+    def test_kaufen_stop_gerissen_ist_miss(self):
+        """KAUFEN: Stop gerissen → hit=False, auch wenn Kurs danach stieg."""
+        # Preisverlauf: fällt erst auf 94 (Stop bei 95 wird gerissen),
+        # steigt dann aber wieder auf 102 → rendite_pct > 0.
+        prices = _make_prices(100, 60, drift=0.0)
+        # Low-Dip am Anfang einbauen: ersten Preis auf 94 setzen
+        prices[0]["low"] = 94.0
+        prices[0]["close"] = 94.0
+        # Letzten Preis auf 102 setzen → rendite positiv
+        prices[-1]["close"] = 102.0
+        prices[-1]["high"] = 103.0
+        prices[-1]["low"] = 101.0
+        row = _make_journal_row(
+            action="KAUFEN",
+            stop="95",  # Stop bei 95 → wird gerissen (Low 94 ≤ 95)
+            timestamp="2026-01-01 10:00:00",
+        )
+        result = _evaluate_single(row, prices, 90)
+        assert result["stop_gerissen"] is True
+        assert result["hit"] is False  # Stop hat Vorrang, trotz positivem Return
+
+    def test_kaufen_stop_und_ziel_beide_gerissen_ist_miss(self):
+        """KAUFEN: Stop gerissen + Ziel erreicht → hit=False (Stop hat Vorrang)."""
+        prices = _make_prices(100, 60, drift=0.0)
+        # Erster Tag: Low = 94 (Stop bei 95 gerissen)
+        prices[0]["low"] = 94.0
+        prices[0]["close"] = 94.0
+        # Letzter Tag: High = 106 (Ziel bei 105 erreicht), Close = 102
+        prices[-1]["high"] = 106.0
+        prices[-1]["close"] = 102.0
+        prices[-1]["low"] = 101.0
+        row = _make_journal_row(
+            action="KAUFEN",
+            target="105",  # Ziel bei 105 → erreicht (High 106 ≥ 105)
+            stop="95",  # Stop bei 95 → gerissen (Low 94 ≤ 95)
+            timestamp="2026-01-01 10:00:00",
+        )
+        result = _evaluate_single(row, prices, 90)
+        assert result["stop_gerissen"] is True
+        assert result["ziel_erreicht"] is True
+        assert result["hit"] is False  # Stop-Vorrang: Miss trotz erreichtem Ziel
+
+    def test_kaufen_ziel_erreicht_ohne_stop_ist_hit(self):
+        """KAUFEN: Ziel erreicht, kein Stop → hit=True."""
+        prices = _make_prices(100, 60, drift=0.01)  # steigend
+        row = _make_journal_row(
+            action="KAUFEN",
+            target="105",  # Ziel bei 105 → wird erreicht
+            stop="",  # kein Stop
+            timestamp="2026-01-01 10:00:00",
+        )
+        result = _evaluate_single(row, prices, 90)
+        assert result["ziel_erreicht"] is True
+        assert result["stop_gerissen"] is None  # kein Stop angegeben
+        assert result["hit"] is True
+
+    def test_kaufen_kein_stop_kein_ziel_fallback_rendite(self):
+        """KAUFEN: weder Stop noch Ziel → Fallback auf rendite_pct > 0."""
+        prices = _make_prices(100, 60, drift=0.005)  # steigend
+        row = _make_journal_row(
+            action="KAUFEN",
+            target="",
+            stop="",
+            timestamp="2026-01-01 10:00:00",
+        )
+        result = _evaluate_single(row, prices, 90)
+        assert result["ziel_erreicht"] is None
+        assert result["stop_gerissen"] is None
+        assert result["hit"] is True  # rendite > 0
+
+    def test_verkaufen_stop_gerissen_ist_miss(self):
+        """VERKAUFEN: Stop gerissen → hit=False (Stop oberhalb, High ≥ stop)."""
+        prices = _make_prices(100, 60, drift=-0.005)  # fallend
+        # Ersten Preis auf 106 setzen → High 106 ≥ Stop 105 → Stop gerissen
+        prices[0]["high"] = 106.0
+        prices[0]["close"] = 99.0
+        prices[0]["low"] = 98.0
+        # Letzten Preis auf 95 → rendite invertiert > 0 (Kurs gefallen)
+        prices[-1]["close"] = 95.0
+        prices[-1]["high"] = 96.0
+        prices[-1]["low"] = 94.0
+        row = _make_journal_row(
+            action="VERKAUFEN",
+            stop="105",  # Stop bei 105 → gerissen (High 106 ≥ 105)
+            timestamp="2026-01-01 10:00:00",
+        )
+        result = _evaluate_single(row, prices, 90)
+        assert result["stop_gerissen"] is True
+        assert result["hit"] is False  # Stop-Vorrang trotz positivem Return
+
+    def test_verkaufen_ziel_erreicht_ohne_stop_ist_hit(self):
+        """VERKAUFEN: Ziel erreicht (Low ≤ target), kein Stop → hit=True."""
+        prices = _make_prices(100, 60, drift=-0.01)  # fallend
+        row = _make_journal_row(
+            action="VERKAUFEN",
+            target="95",  # Ziel bei 95 → wird erreicht (Low ≤ 95)
+            stop="",
+            timestamp="2026-01-01 10:00:00",
+        )
+        result = _evaluate_single(row, prices, 90)
+        assert result["ziel_erreicht"] is True
+        assert result["stop_gerissen"] is None
+        assert result["hit"] is True
+
+    def test_halten_stop_gerissen_ist_miss(self):
+        """HALTEN: Stop gerissen → hit=False, auch bei stabilem Kurs."""
+        prices = _make_prices(100, 60, drift=0.0)  # stabil
+        # Low-Dip einbauen: Stop wird gerissen
+        prices[0]["low"] = 94.0
+        row = _make_journal_row(
+            action="HALTEN",
+            stop="95",  # Stop bei 95 → gerissen
+            timestamp="2026-01-01 10:00:00",
+        )
+        result = _evaluate_single(row, prices, 90)
+        assert result["stop_gerissen"] is True
+        assert result["hit"] is False  # Stop-Verletzung = Miss beim Halten
+
+    def test_halten_2_pct_boundary_is_hit(self):
+        """HALTEN: rendite genau ±2.0% → Hit (Grenze inklusiv)."""
+        prices = _make_prices(100, 60, drift=0.0)
+        # Entry = 100, Exit = 102 → rendite = +2.0%
+        prices[-1]["close"] = 102.0
+        prices[-1]["high"] = 102.5
+        prices[-1]["low"] = 101.5
+        row = _make_journal_row(action="HALTEN", timestamp="2026-01-01 10:00:00")
+        result = _evaluate_single(row, prices, 90)
+        assert abs(result["rendite_pct"] - 2.0) < 0.01 or result["rendite_pct"] <= 2.0
+        assert result["hit"] is True
+
+    def test_halten_above_2_pct_is_miss(self):
+        """HALTEN: rendite > 2% → Miss (verschärft von ±5%)."""
+        prices = _make_prices(100, 60, drift=0.0)
+        # Entry = 100, Exit = 102.1 → rendite = +2.1% → Miss
+        prices[-1]["close"] = 102.1
+        prices[-1]["high"] = 102.6
+        prices[-1]["low"] = 101.6
+        row = _make_journal_row(action="HALTEN", timestamp="2026-01-01 10:00:00")
+        result = _evaluate_single(row, prices, 90)
+        assert result["rendite_pct"] > 2.0
+        assert result["hit"] is False
+
+    def test_halten_3_pct_is_miss(self):
+        """HALTEN: rendite 3% → Miss (war bei ±5% noch ein Hit)."""
+        prices = _make_prices(100, 60, drift=0.0)
+        # Entry = 100, Exit = 103 → rendite = +3.0% → Miss bei ±2%
+        prices[-1]["close"] = 103.0
+        prices[-1]["high"] = 103.5
+        prices[-1]["low"] = 102.5
+        row = _make_journal_row(action="HALTEN", timestamp="2026-01-01 10:00:00")
+        result = _evaluate_single(row, prices, 90)
+        assert result["rendite_pct"] > 2.0
+        assert result["hit"] is False
 
 
 # --------------------------------------------------------------------------- #
