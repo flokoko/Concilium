@@ -21,6 +21,42 @@ except ImportError:  # pragma: no cover — Windows hat kein fcntl
     fcntl = None
 
 
+def _default_watchlist_path() -> str:
+    """Liefert den Standardpfad für watchlist.txt (Repo-Root)."""
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "watchlist.txt"
+    )
+
+
+def _read_watchlist(path: str | None = None) -> list[str]:
+    """Liest die Watchlist-Datei und gibt eine Liste der Ticker zurück.
+
+    - Ein Ticker pro Zeile, '#'-Kommentare und Leerzeilen werden ignoriert.
+    - Whitespace wird getrimmt.
+    - Crasht nie: leere Liste bei fehlender Datei oder Lesefehler.
+    - Pfad: expliziter Parameter > CONCILIUM_WATCHLIST-Env > Standardpfad.
+    """
+    if path is None:
+        path = os.environ.get("CONCILIUM_WATCHLIST") or _default_watchlist_path()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        logging.debug("Watchlist-Datei nicht gefunden: %s", path)
+        return []
+    except OSError as exc:  # noqa: BLE001 — nie crashen
+        logging.warning("Watchlist-Datei konnte nicht gelesen werden: %s", exc)
+        return []
+
+    tickers: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        tickers.append(stripped)
+    return tickers
+
+
 def _state_dir(state_dir: str | None = None) -> str:
     """Löst das State-Verzeichnis auf (gleicher Mechanismus wie checkpoint.py).
 
@@ -183,6 +219,14 @@ def main(argv: list[str] | None = None) -> int:
         "Standard: journal/decisions.csv. Führt NICHT die Pipeline aus.",
     )
     parser.add_argument(
+        "--watchlist",
+        action="store_true",
+        help="Watchlist-Analyse: liest watchlist.txt (Env CONCILIUM_WATCHLIST = Pfad), "
+        "führt ZUERST --evaluate + calibration.json aus, dann Batch-Analyse aller Ticker. "
+        "Kann mit --evaluate, --no-llm, --no-ensemble, --ensemble-runs, --peers, "
+        "--lookback kombiniert werden. Schließt sich mit --ticker/--tickers/--portfolio aus.",
+    )
+    parser.add_argument(
         "--lookback",
         type=int,
         default=90,
@@ -237,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Frühe Validierung: Kombinations-Verbote ---
     # --evaluate + --ticker/--tickers/--portfolio → Fehler (vor jeglicher Ausführung)
+    # --watchlist schließt sich mit --ticker/--tickers/--portfolio aus, KANN mit --evaluate kombiniert werden
     if args.evaluate is not None and (args.ticker or args.tickers or args.portfolio):
         print(
             "FEHLER: --evaluate kann nicht mit --ticker, --tickers oder --portfolio "
@@ -245,8 +290,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if args.watchlist and (args.ticker or args.tickers or args.portfolio):
+        print(
+            "FEHLER: --watchlist kann nicht mit --ticker, --tickers oder --portfolio "
+            "kombiniert werden.",
+            file=sys.stderr,
+        )
+        return 1
+
     # --evaluate ist eigenständig: Pipeline wird nicht ausgeführt
-    if args.evaluate is not None:
+    # (außer bei --watchlist, dort läuft evaluate vorn mit — siehe unten)
+    if args.evaluate is not None and not args.watchlist:
         level = logging.DEBUG if args.verbose else logging.INFO
         logging.basicConfig(
             level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -281,6 +335,126 @@ def main(argv: list[str] | None = None) -> int:
             logging.exception("Track-Record-Fehler")
             return 1
 
+    # --- Watchlist-Modus (--watchlist) ---
+    # Führt ZUERST evaluate_journal + _write_calibration_json aus, dann Batch-Analyse
+    # aller Ticker aus watchlist.txt (analog --tickers).
+    if args.watchlist:
+        ticker_list = _read_watchlist()
+        if not ticker_list:
+            print(
+                "FEHLER: Watchlist ist leer oder watchlist.txt nicht gefunden.",
+                file=sys.stderr,
+            )
+            return 1
+
+        level = logging.DEBUG if args.verbose else logging.INFO
+        logging.basicConfig(
+            level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        )
+        llm = None if args.no_llm else LLMClient()
+
+        # Peers-Liste parsen (kommagetrennt)
+        peers_list: list[str] | None = None
+        if args.peers:
+            peers_list = [p.strip() for p in args.peers.split(",") if p.strip()]
+
+        reports_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "reports"
+        )
+        os.makedirs(reports_dir, exist_ok=True)
+
+        # Schritt 1: evaluate_journal + calibration.json (damit Feedback aktuell ist)
+        eval_journal_path = args.evaluate if args.evaluate is not None else "journal/decisions.csv"
+        try:
+            print("--- Watchlist: Track-Record-Evaluierung ---", file=sys.stderr)
+            eval_result = evaluate_journal(
+                eval_journal_path,
+                lookback_days=args.lookback,
+                llm=llm,
+            )
+            _write_calibration_json(eval_result)
+            report = generate_track_record_report(eval_result)
+            print(report)
+
+            # Track-Record-Report speichern
+            date_str = datetime.now().strftime("%Y%m%d")
+            track_filepath = os.path.join(reports_dir, f"track_record_{date_str}.md")
+            with open(track_filepath, "w", encoding="utf-8") as fh:
+                fh.write(report)
+            print(
+                f"\n---\nTrack-Record-Report gespeichert: {track_filepath}",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"FEHLER bei Track-Record-Evaluierung (Watchlist): {exc}",
+                file=sys.stderr,
+            )
+            logging.exception("Track-Record-Fehler (Watchlist)")
+            return 1
+
+        # Schritt 2: Batch-Analyse aller Watchlist-Ticker (analog --tickers)
+        print(
+            f"\n--- Watchlist: Analyse von {len(ticker_list)} Tickern ---",
+            file=sys.stderr,
+        )
+        failures = 0
+        successes = 0
+
+        for i, ticker in enumerate(ticker_list):
+            if i > 0:
+                print("\n" + "=" * 70 + "\n", file=sys.stderr)
+
+            try:
+                result = run_pipeline(
+                    ticker,
+                    llm=llm,
+                    backtest=args.backtest,
+                    peers=peers_list,
+                    ensemble=not args.no_ensemble,
+                    ensemble_runs=args.ensemble_runs,
+                    resume=args.resume,
+                )
+                report = generate_report(result, reports_dir=reports_dir)
+                print(report)
+
+                # Report-Datei speichern
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+                resolved_ticker = result.get("ticker", ticker.upper())
+                filename = f"{resolved_ticker}_{timestamp}.md"
+                filepath = os.path.join(reports_dir, filename)
+                with open(filepath, "w", encoding="utf-8") as fh:
+                    fh.write(report)
+                print(f"\n---\nReport gespeichert: {filepath}", file=sys.stderr)
+                successes += 1
+
+            except KeyboardInterrupt:
+                print(
+                    f"\nABGEBROCHEN (Ticker '{ticker}') — "
+                    "Checkpoint bleibt unter state/ erhalten.",
+                    file=sys.stderr,
+                )
+                return 130
+            except ValueError as exc:
+                print(f"FEHLER bei Ticker '{ticker}': {exc}", file=sys.stderr)
+                logging.warning("Ticker '%s' fehlgeschlagen: %s", ticker, exc)
+                failures += 1
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"UNERWARTETER FEHLER bei Ticker '{ticker}': {exc}",
+                    file=sys.stderr,
+                )
+                logging.exception("Unerwarteter Fehler bei Ticker '%s'", ticker)
+                failures += 1
+
+        if failures > 0:
+            print(
+                f"\nWARNUNG: {failures} von {len(ticker_list)} Tickern fehlgeschlagen.",
+                file=sys.stderr,
+            )
+
+        return 0 if successes > 0 else 1
+
     # --- Pipeline-Modus: --ticker, --tickers oder --portfolio required ---
     # Mutual exclusion: --ticker, --tickers, --portfolio
     mode_count = sum(1 for x in (args.ticker, args.tickers, args.portfolio) if x)
@@ -291,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.ticker and not args.tickers and not args.portfolio:
         parser.error(
-            "--ticker, --tickers oder --portfolio ist erforderlich, "
+            "--ticker, --tickers, --portfolio oder --watchlist ist erforderlich, "
             "wenn --evaluate nicht gesetzt ist."
         )
 

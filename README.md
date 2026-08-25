@@ -55,6 +55,9 @@ python main.py --portfolio RWE.DE,SHEL.L,NEE
 # inkl. Konfidenz-Kalibrierung / Brier-Score / Reliability-Bänder)
 python main.py --evaluate
 
+# Watchlist analysieren (pflegt state/calibration.json automatisch vor)
+python main.py --watchlist
+
 # Ensemble-Trader deaktivieren / Anzahl Runs steuern
 python main.py --ticker AAPL --no-ensemble
 python main.py --ticker AAPL --ensemble-runs 5
