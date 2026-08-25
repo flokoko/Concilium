@@ -98,6 +98,30 @@ def _save_price_cache(
         logger.debug("Price-Cache-Schreiben fehlgeschlagen für %s: %s", ticker, exc)
 
 
+def _delete_price_cache(ticker: str, today_key: str | None = None) -> None:
+    """Entfernt den Tages-Cache-Eintrag für einen Ticker (best effort).
+
+    Wird für den Retry-Mechanismus verwendet: Wenn ein leerer oder korrupter
+    Cache-Eintrag das Laden von Kursdaten blockiert, kann der Cache-Eintrag
+    gelöscht und erneut von yfinance geladen werden.
+
+    Crasht niemals — Löschen ist best effort.
+    """
+    cache_dir = _get_cache_dir()
+    if cache_dir is None:
+        return
+    if today_key is None:
+        today_key = _get_today_key()
+
+    path = _price_cache_path(cache_dir, today_key, ticker)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            logger.info("Price-Cache gelöscht für %s (%s)", ticker, today_key)
+    except Exception as exc:  # noqa: BLE001 — Cache-Löschen crasht nie
+        logger.debug("Price-Cache-Löschen fehlgeschlagen für %s: %s", ticker, exc)
+
+
 # --------------------------------------------------------------------------- #
 # Kursdaten laden (yfinance, mit Tages-Cache)
 # --------------------------------------------------------------------------- #
@@ -429,7 +453,12 @@ def _empty_result() -> dict[str, Any]:
             "kalibrierungs_gap": None,
             "tendenz": None,
         },
+        "konfidenz_kalibrierung_segmentiert": {
+            "nach_aktion": {},
+            "nach_rating": {},
+        },
         "reliability_bins": [],
+        "uebersprungen": 0,
     }
 
 
@@ -511,6 +540,97 @@ def _compute_konfidenz_kalibrierung(
         "kalibrierungs_gap": gap,
         "tendenz": tendenz,
     }
+
+
+def _compute_konfidenz_kalibrierung_segmentiert(
+    evaluations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Berechnet segmentierte Brier-Scores pro Aktion und pro Rating-Stufe.
+
+    Verwendet dieselbe Brier-Formel wie _compute_konfidenz_kalibrierung:
+        p = confidence / 5  (normalisierte Wahrscheinlichkeit 0.2..1.0)
+        hit_int = 1 wenn hit True, 0 wenn hit False
+        brier_i = (p - hit_int) ** 2
+
+    Segmente:
+        - nach_aktion: KAUFEN, HALTEN, VERKAUFEN
+        - nach_rating: STARK KAUFEN, KAUFEN, HALTEN, VERKAUFEN, STARK VERKAUFEN
+
+    Leere Segmente (n=0) werden weggelassen.
+
+    Returns:
+        dict: {"nach_aktion": {action: {brier_score, n, ...}}, "nach_rating": {...}}
+    """
+    _AKTIONEN = ("KAUFEN", "HALTEN", "VERKAUFEN")
+    _RATINGS = ("STARK KAUFEN", "KAUFEN", "HALTEN", "VERKAUFEN", "STARK VERKAUFEN")
+
+    def _compute_segment(segment_evals: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Berechnet Brier-Kalibrierung für eine Teilmenge von Evaluations."""
+        valid: list[dict[str, Any]] = []
+        for e in segment_evals:
+            conf = e.get("confidence")
+            hit = e.get("hit")
+            if conf is None or hit is None:
+                continue
+            conf_f = float(conf)
+            if not math.isfinite(conf_f) or conf_f <= 0:
+                continue
+            valid.append(e)
+
+        if not valid:
+            return None
+
+        n = len(valid)
+        brier_sum = 0.0
+        conf_sum = 0.0
+        hit_sum = 0.0
+
+        for e in valid:
+            conf_f = float(e["confidence"])
+            p = conf_f / 5.0
+            hit_int = 1 if e["hit"] is True else 0
+            brier_sum += (p - hit_int) ** 2
+            conf_sum += p
+            hit_sum += hit_int
+
+        brier_score = brier_sum / n
+        avg_conf = conf_sum / n
+        avg_hit = hit_sum / n
+        gap = avg_conf - avg_hit
+
+        if gap > 0.15:
+            tendenz = "überkonfident"
+        elif gap < -0.15:
+            tendenz = "unterkonfident"
+        else:
+            tendenz = "gut kalibriert"
+
+        return {
+            "brier_score": brier_score,
+            "n": n,
+            "durchschnittliche_konfidenz": avg_conf,
+            "durchschnittliche_tatsaechliche_hit_rate": avg_hit,
+            "kalibrierungs_gap": gap,
+            "tendenz": tendenz,
+        }
+
+    nach_aktion: dict[str, Any] = {}
+    for action in _AKTIONEN:
+        seg = _compute_segment(
+            [e for e in evaluations if e.get("action") == action]
+        )
+        if seg is not None:
+            nach_aktion[action] = seg
+
+    nach_rating: dict[str, Any] = {}
+    for rating in _RATINGS:
+        seg = _compute_segment(
+            [e for e in evaluations if (e.get("rating") or "").strip().upper() == rating]
+        )
+        if seg is not None:
+            nach_rating[rating] = seg
+
+    return {"nach_aktion": nach_aktion, "nach_rating": nach_rating}
 
 
 # Reliability-Bin-Grenzen: [untere, obere) Grenzen
@@ -676,6 +796,11 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     # --- Konfidenz-Kalibrierung (Brier-Score, Gap, Tendenz) ---
     result["konfidenz_kalibrierung"] = _compute_konfidenz_kalibrierung(evaluations)
 
+    # --- Segmentierte Konfidenz-Kalibrierung (pro Aktion, pro Rating) ---
+    result["konfidenz_kalibrierung_segmentiert"] = (
+        _compute_konfidenz_kalibrierung_segmentiert(evaluations)
+    )
+
     # --- Reliability-Bänder (feinere Konfidenz-Intervalle) ---
     result["reliability_bins"] = _compute_reliability_bins(evaluations)
 
@@ -780,6 +905,7 @@ def evaluate_journal(
     # Jede Zeile auswerten
     evaluations: list[dict[str, Any]] = []
     fehler: list[str] = []
+    uebersprungen = 0
     price_cache: dict[str, list[dict[str, Any]] | None] = {}
 
     for row in rows:
@@ -796,20 +922,34 @@ def evaluate_journal(
 
             prices = price_cache[ticker]
             if not prices:
-                fehler.append(
-                    f"{row.get('timestamp', '?')} {ticker}: "
-                    f"Keine Kursdaten verfügbar."
+                # Retry: Cache löschen und EINMAL erneut versuchen,
+                # damit ein evtl. korrupter/leerer Cache-Eintrag nicht blockiert.
+                _delete_price_cache(ticker)
+                retry_prices = _load_price_history(
+                    ticker, lookback_days=lookback_days
                 )
-                continue
+                if retry_prices:
+                    price_cache[ticker] = retry_prices
+                    prices = retry_prices
+                else:
+                    price_cache[ticker] = None
+                    uebersprungen += 1
+                    fehler.append(
+                        f"{row.get('timestamp', '?')} {ticker}: "
+                        f"Keine Kursdaten verfügbar (auch nach Retry)."
+                    )
+                    continue
 
             eval_result = _evaluate_single(row, prices, lookback_days)
             evaluations.append(eval_result)
         except Exception as exc:  # noqa: BLE001 — jede Zeile einzeln
+            uebersprungen += 1
             fehler.append(f"{row.get('timestamp', '?')} {ticker}: {exc}")
 
     # Aggregieren
     result = _aggregate(evaluations)
     result["fehler"] = fehler
+    result["uebersprungen"] = uebersprungen
 
     # LLM-Zusammenfassung (falls llm gegeben)
     if llm is not None and result["anzahl_entscheidungen"] > 0:

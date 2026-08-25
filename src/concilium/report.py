@@ -877,7 +877,17 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
     )
     lines.append("")
 
+    # Warnung bei übersprungenen Zeilen
+    uebersprungen = eval_result.get("uebersprungen", 0)
     n = eval_result.get("anzahl_entscheidungen", 0)
+    if uebersprungen and uebersprungen > 0:
+        total = uebersprungen + n
+        lines.append(
+            f"> ⚠️ **Hinweis:** {uebersprungen} von {total} Journal-Entscheidungen "
+            "konnten wegen fehlender Kursdaten nicht bewertet werden und wurden "
+            "übersprungen. Die Kennzahlen basieren auf einer Teilmenge."
+        )
+        lines.append("")
 
     # --- Übersicht ---
     lines.append("## Übersicht")
@@ -969,6 +979,49 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
             lines.append(
                 "_Ideale Kalibrierung: Hit-Rate ≈ Konfidenz pro Bin._"
             )
+            lines.append("")
+
+        # Segmentierte Brier-Scores (pro Aktion / pro Rating)
+        seg = eval_result.get("konfidenz_kalibrierung_segmentiert") or {}
+        nach_aktion_seg = seg.get("nach_aktion", {})
+        nach_rating_seg = seg.get("nach_rating", {})
+
+        if nach_aktion_seg:
+            lines.append("### Nach Aktion")
+            lines.append("")
+            lines.append("| Aktion | n | Brier | Ø Konfidenz | Hit-Rate | Tendenz |")
+            lines.append("|---|---|---|---|---|---|")
+            for action in ("KAUFEN", "HALTEN", "VERKAUFEN"):
+                a = nach_aktion_seg.get(action)
+                if a is None:
+                    continue
+                lines.append(
+                    f"| {action} | {a.get('n', 0)} | "
+                    f"{_fmt_num(a.get('brier_score'))} | "
+                    f"{_fmt_num(a.get('durchschnittliche_konfidenz'))} | "
+                    f"{_fmt_pct2(a.get('durchschnittliche_tatsaechliche_hit_rate'))} | "
+                    f"{a.get('tendenz', 'N/A')} |"
+                )
+            lines.append("")
+
+        if nach_rating_seg:
+            lines.append("### Nach Rating")
+            lines.append("")
+            lines.append("| Rating | n | Brier | Ø Konfidenz | Hit-Rate | Tendenz |")
+            lines.append("|---|---|---|---|---|---|")
+            for rating in (
+                "STARK KAUFEN", "KAUFEN", "HALTEN", "VERKAUFEN", "STARK VERKAUFEN",
+            ):
+                r = nach_rating_seg.get(rating)
+                if r is None:
+                    continue
+                lines.append(
+                    f"| {rating} | {r.get('n', 0)} | "
+                    f"{_fmt_num(r.get('brier_score'))} | "
+                    f"{_fmt_num(r.get('durchschnittliche_konfidenz'))} | "
+                    f"{_fmt_pct2(r.get('durchschnittliche_tatsaechliche_hit_rate'))} | "
+                    f"{r.get('tendenz', 'N/A')} |"
+                )
             lines.append("")
 
     # --- Portfolio-Fit ---
