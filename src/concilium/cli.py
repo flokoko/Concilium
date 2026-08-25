@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -12,6 +13,83 @@ from .evaluate import evaluate_journal
 from .llm import LLMClient
 from .pipeline import run_pipeline, run_portfolio
 from .report import generate_report, generate_track_record_report
+
+# Platform-Guard: fcntl ist Linux/Unix-only; auf anderen Plattformen None.
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — Windows hat kein fcntl
+    fcntl = None
+
+
+def _state_dir(state_dir: str | None = None) -> str:
+    """Löst das State-Verzeichnis auf (gleicher Mechanismus wie checkpoint.py).
+
+    Priorität: expliziter Parameter > CONCILIUM_STATE_DIR-Env > 'state'.
+    """
+    if state_dir is not None:
+        return state_dir
+    env = os.environ.get("CONCILIUM_STATE_DIR")
+    if env:
+        return env
+    return "state"
+
+
+def _write_calibration_json(eval_result: dict, *, state_dir: str | None = None) -> None:
+    """Schreibt eine netzfreie Kalibrierungs-JSON aus den evaluierten Kennzahlen.
+
+    Inhalt: nur aggregierte Werte (hit_rate_gesamt, nach_aktion mit hit_rate
+    und avg_confidence) — KEINE Rohdaten, KEINE Kurse.
+
+    Atomar (tmpfile + os.replace) mit fcntl-Lock (best effort).
+    Crasht nie — bei Fehler wird nur gewarnt.
+    """
+    try:
+        base_dir = _state_dir(state_dir)
+        os.makedirs(base_dir, exist_ok=True)
+        cal_path = os.path.join(base_dir, "calibration.json")
+
+        nach_aktion_out: dict[str, dict] = {}
+        for action in ("KAUFEN", "HALTEN", "VERKAUFEN"):
+            adata = eval_result.get("nach_aktion", {}).get(action, {})
+            if adata.get("n", 0) == 0:
+                continue
+            nach_aktion_out[action] = {
+                "n": adata["n"],
+                "hit_rate": adata.get("hit_rate"),
+                "avg_confidence": adata.get("avg_confidence"),
+            }
+
+        payload = {
+            "erstellt_am": datetime.now().isoformat(),
+            "anzahl_entscheidungen": eval_result.get("anzahl_entscheidungen", 0),
+            "hit_rate_gesamt": eval_result.get("hit_rate_gesamt"),
+            "nach_aktion": nach_aktion_out,
+        }
+
+        tmp_path = cal_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                except Exception:  # noqa: BLE001 — best effort
+                    pass
+            try:
+                json.dump(payload, fh, ensure_ascii=False)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            finally:
+                if fcntl is not None:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    except Exception:  # noqa: BLE001 — best effort
+                        pass
+        os.replace(tmp_path, cal_path)
+        logging.debug("Kalibrierungs-JSON gespeichert: %s", cal_path)
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logging.warning("Kalibrierungs-JSON konnte nicht gespeichert werden: %s", exc)
 
 
 def _print_portfolio_summary(pa: dict, file=None) -> None:
@@ -180,6 +258,10 @@ def main(argv: list[str] | None = None) -> int:
                 lookback_days=args.lookback,
                 llm=llm,
             )
+
+            # Kalibrierungs-JSON schreiben (netzfreie Aggregate für feedback.py)
+            _write_calibration_json(eval_result)
+
             report = generate_track_record_report(eval_result)
             print(report)
 

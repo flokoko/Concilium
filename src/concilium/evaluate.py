@@ -442,9 +442,9 @@ def _empty_result() -> dict[str, Any]:
     return {
         "anzahl_entscheidungen": 0,
         "nach_aktion": {
-            "KAUFEN": {"n": 0, "hit_rate": None, "avg_rendite": None},
-            "HALTEN": {"n": 0, "hit_rate": None, "avg_rendite": None},
-            "VERKAUFEN": {"n": 0, "hit_rate": None, "avg_rendite": None},
+            "KAUFEN": {"n": 0, "hit_rate": None, "avg_rendite": None, "avg_confidence": None},
+            "HALTEN": {"n": 0, "hit_rate": None, "avg_rendite": None, "avg_confidence": None},
+            "VERKAUFEN": {"n": 0, "hit_rate": None, "avg_rendite": None, "avg_confidence": None},
         },
         "hit_rate_gesamt": None,
         "durchschnitt_rendite_gesamt": None,
@@ -717,10 +717,21 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
         rated = len(hits) + len(misses)
         renditen = [e["rendite_pct"] for e in action_evals if e["rendite_pct"] is not None]
 
+        # Ø Confidence pro Aktion (normalisiert auf 0-1: conf/5)
+        conf_vals = [
+            float(e["confidence"]) / 5.0
+            for e in action_evals
+            if e.get("confidence") is not None
+            and math.isfinite(float(e["confidence"]))
+            and float(e["confidence"]) > 0
+        ]
+        avg_conf = sum(conf_vals) / len(conf_vals) if conf_vals else None
+
         result["nach_aktion"][action] = {
             "n": n,
             "hit_rate": len(hits) / rated if rated > 0 else None,
             "avg_rendite": sum(renditen) / len(renditen) if renditen else None,
+            "avg_confidence": avg_conf,
         }
 
     # --- Gesamt ---
