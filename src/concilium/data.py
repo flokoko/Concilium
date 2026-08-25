@@ -1250,6 +1250,44 @@ def collect_ticker_data(
     if analyst_target_mean is not None and current_price_info is not None and current_price_info > 0:
         analyst_upside_pct = (analyst_target_mean - current_price_info) / current_price_info * 100.0
 
+    # --- Erweiterte Fundamentalkennzahlen (Cashflow, Verschuldung, Margen) ---
+    free_cash_flow = _safe_float(info.get("freeCashflow"))
+    operating_cashflow = _safe_float(info.get("operatingCashflow"))
+    total_debt = _safe_float(info.get("totalDebt"))
+    total_cash = _safe_float(info.get("totalCash"))
+    ebitda = _safe_float(info.get("ebitda"))
+    current_ratio = _safe_float(info.get("currentRatio"))
+    return_on_equity = _safe_float(info.get("returnOnEquity"))
+    gross_margin = _safe_float(info.get("grossMargins"))
+    operating_margin = _safe_float(info.get("operatingMargins"))
+    price_to_book = _safe_float(info.get("priceToBook"))
+    book_value = _safe_float(info.get("bookValue"))
+    forward_eps = _safe_float(info.get("forwardEps"))
+
+    # --- Abgeleitete Kennzahlen (deterministisch, können None sein) ---
+    net_debt: float | None = None
+    if total_debt is not None and total_cash is not None:
+        net_debt = total_debt - total_cash
+
+    fcf_margin: float | None = None
+    if free_cash_flow is not None and revenue is not None and revenue > 0:
+        fcf_margin = free_cash_flow / revenue * 100.0
+
+    net_debt_to_ebitda: float | None = None
+    if net_debt is not None and ebitda is not None and ebitda > 0:
+        net_debt_to_ebitda = net_debt / ebitda
+
+    forward_pe: float | None = None
+    if current_price_info is not None and forward_eps is not None and forward_eps > 0:
+        forward_pe = current_price_info / forward_eps
+
+    # PEG-Konsistenz-Warnung
+    peg_konsistenz_warnung: str | None = None
+    if peg_ratio is not None and revenue_growth is not None and revenue_growth < 0:
+        peg_konsistenz_warnung = (
+            "PEG positiv trotz negativem Umsatzwachstum — plausibel prüfen"
+        )
+
     fundamentals = {
         "name": long_name,
         "sector": sector,
@@ -1274,6 +1312,26 @@ def collect_ticker_data(
         "analyst_count": int(analyst_count) if analyst_count is not None else None,
         "recommendation_mean": recommendation_mean,
         "analyst_upside_pct": analyst_upside_pct,
+        # Erweiterte Fundamentalkennzahlen
+        "free_cash_flow": free_cash_flow,
+        "operating_cashflow": operating_cashflow,
+        "total_debt": total_debt,
+        "total_cash": total_cash,
+        "ebitda": ebitda,
+        "current_ratio": current_ratio,
+        "return_on_equity": return_on_equity,
+        "gross_margin": gross_margin,
+        "operating_margin": operating_margin,
+        "price_to_book": price_to_book,
+        "book_value": book_value,
+        "forward_eps": forward_eps,
+        # Abgeleitete Kennzahlen
+        "net_debt": net_debt,
+        "fcf_margin": fcf_margin,
+        "net_debt_to_ebitda": net_debt_to_ebitda,
+        "forward_pe": forward_pe,
+        # Datenqualitäts-Warnung
+        "peg_konsistenz_warnung": peg_konsistenz_warnung,
     }
 
     # --- Technische Indikatoren aus Historie ---

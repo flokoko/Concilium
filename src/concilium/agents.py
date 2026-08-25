@@ -356,7 +356,28 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
             f"  Zielkurs hoch: {_fmt_num(f.get('analyst_target_high'))}",
             f"  Zielkurs tief: {_fmt_num(f.get('analyst_target_low'))}",
             f"  Upside (geschätzt): {_fmt_num(f.get('analyst_upside_pct'))} %",
+            # Erweiterte Fundamentalkennzahlen
+            f"  Free Cash Flow: {_fmt_num(f.get('free_cash_flow'), ' ')}",
+            f"  Operating Cash Flow: {_fmt_num(f.get('operating_cashflow'), ' ')}",
+            f"  Nettoverschuldung: {_fmt_num(f.get('net_debt'), ' ')}",
+            f"  FCF-Marge: {_fmt_num(f.get('fcf_margin'))} %",
+            f"  Net-Debt/EBITDA: {_fmt_num(f.get('net_debt_to_ebitda'))}",
+            f"  EBITDA: {_fmt_num(f.get('ebitda'), ' ')}",
+            f"  Gesamtverschuldung: {_fmt_num(f.get('total_debt'), ' ')}",
+            f"  Liquidität (Cash): {_fmt_num(f.get('total_cash'), ' ')}",
+            f"  Current Ratio: {_fmt_num(f.get('current_ratio'))}",
+            f"  ROE: {_fmt_num(f.get('return_on_equity'))}",
+            f"  Bruttomarge: {_fmt_num(f.get('gross_margin'))}",
+            f"  operatives Marge: {_fmt_num(f.get('operating_margin'))}",
+            f"  Price-to-Book: {_fmt_num(f.get('price_to_book'))}",
+            f"  Buchwert: {_fmt_num(f.get('book_value'))}",
+            f"  Forward EPS: {_fmt_num(f.get('forward_eps'))}",
+            f"  Forward KGV: {_fmt_num(f.get('forward_pe'))}",
         ])
+        # PEG-Konsistenz-Warnung nur anzeigen wenn gesetzt
+        peg_warnung = f.get("peg_konsistenz_warnung")
+        if peg_warnung:
+            lines.append(f"  ⚠ PEG-Konsistenz: {peg_warnung}")
         # Quantitativer Multi-Faktor-Score-Anker (deterministischer Referenzwert)
         mf = compute_multi_factor_score(f)
         if mf.get("overall_score") is not None:

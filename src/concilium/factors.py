@@ -171,6 +171,8 @@ def _quality_score(f: dict[str, Any]) -> float | None:
       - profit_margin: >=0.25→5, >=0.15→4, >=0.08→3, >=0→2, negativ→1
       - revenue_growth: >=0.15→5, >=0.05→4, >=0→3, >=-0.05→2, sonst→1
       - dividend_yield: >0.04→5, >0.02→4, >0→3, ==0→2, None→neutral 3
+      - fcf_margin: >=20→5, >=10→4, >0→3, ==0→2, negativ→1
+      - net_debt_to_ebitda: <0→5, <1→5, <2→4, <3→3, <5→2, >=5→1
     """
     components: list[float] = []
 
@@ -214,6 +216,37 @@ def _quality_score(f: dict[str, Any]) -> float | None:
         elif div == 0:
             components.append(2.0)
     # None → keine Komponente (neutral, nicht 3 — da Dividende 0 info)
+
+    # FCF-Marge (zusätzliches Qualitäts-Signal — positiv = besser)
+    fcf_margin = _safe_float(f.get("fcf_margin"))
+    if fcf_margin is not None:
+        if fcf_margin >= 20:
+            components.append(5.0)
+        elif fcf_margin >= 10:
+            components.append(4.0)
+        elif fcf_margin > 0:
+            components.append(3.0)
+        elif fcf_margin == 0:
+            components.append(2.0)
+        else:
+            components.append(1.0)
+
+    # Net-Debt/EBITDA (Verschuldungs-Qualität — niedriger = besser)
+    ndte = _safe_float(f.get("net_debt_to_ebitda"))
+    if ndte is not None:
+        if ndte < 0:
+            # Nettoliquidität (negative Nettoverschuldung) → sehr stark
+            components.append(5.0)
+        elif ndte < 1.0:
+            components.append(5.0)
+        elif ndte < 2.0:
+            components.append(4.0)
+        elif ndte < 3.0:
+            components.append(3.0)
+        elif ndte < 5.0:
+            components.append(2.0)
+        else:
+            components.append(1.0)
 
     if not components:
         return None
