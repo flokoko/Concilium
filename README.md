@@ -12,6 +12,9 @@ den Portfolio-Manager. Alle Marktdaten werden via yfinance (kostenlos, kein
 API-Key) bezogen. Die Agenten kommunizieren über eine OpenAI-kompatible
 `/chat/completions` Schnittstelle.
 
+**Dokumentation der Kennzahlen:** [`docs/kennzahlen.md`](docs/kennzahlen.md) —
+Definitionen aller Messwerte (Brier-Score, Hit-Rate, Kalibrierungs-Gap, …).
+
 ## Installation
 
 ```bash
