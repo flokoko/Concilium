@@ -13,6 +13,8 @@ import sys
 import threading
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from concilium.agents import (  # noqa: E402
@@ -22,6 +24,14 @@ from concilium.agents import (  # noqa: E402
     analyst_team,
     ensemble_trader,
 )
+
+
+# Autouse-Fixture: isoliert alle Tests von einer evtl. vorhandenen
+# state/calibration.json, damit die ungewichtete Mehrheitsabstimmung
+# deterministisch bleibt (Feature: kalibrierungs-gewichtete Abstimmung).
+@pytest.fixture(autouse=True)
+def _isolate_state_dir(monkeypatch):
+    monkeypatch.setenv("CONCILIUM_STATE_DIR", "/nonexistent/test_ensemble_no_cal")
 
 
 class _FakeLLM:

@@ -9,7 +9,9 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import os
 import re
+from datetime import datetime, timedelta
 from typing import Any
 
 from .factors import compute_multi_factor_score
@@ -994,6 +996,103 @@ def _fix_implausible_trade(trade: dict[str, Any], current_price: float | None) -
     return fixed
 
 
+# --------------------------------------------------------------------------- #
+# Kalibrierungs-gewichtete Ensemble-Abstimmung
+# --------------------------------------------------------------------------- #
+
+# Maximales Alter der Kalibrierungs-JSON in Tagen (danach keine Gewichtung).
+_ENSEMBLE_CALIBRATION_MAX_AGE_DAYS = 7
+
+# Aktionen, für die Hit-Raten erwartet werden.
+_ENSEMBLE_ACTIONS = ("KAUFEN", "HALTEN", "VERKAUFEN")
+
+
+def _ensemble_state_dir() -> str:
+    """Löst das State-Verzeichnis auf (gleicher Mechanismus wie feedback.py).
+
+    Priorität: CONCILIUM_STATE_DIR-Env > 'state'.
+    """
+    env = os.environ.get("CONCILIUM_STATE_DIR")
+    if env:
+        return env
+    return "state"
+
+
+def _load_ensemble_weights() -> dict[str, float] | None:
+    """Liest Hit-Raten pro Aktion aus state/calibration.json.
+
+    Liest die gleiche JSON, die ``--evaluate`` schreibt (über cli.py), aber
+    OHNE Import von feedback.py (um Zirkularität zu vermeiden).
+
+    Returns:
+        dict {aktion: hit_rate} für KAUFEN/HALTEN/VERKAUFEN, oder None bei:
+        - fehlender Datei
+        - ungültigem JSON
+        - Datei älter als _ENSEMBLE_CALIBRATION_MAX_AGE_DAYS
+        - fehlendem/ungültigem erstellt_am
+        Crasht nie.
+    """
+    try:
+        cal_path = os.path.join(_ensemble_state_dir(), "calibration.json")
+        if not os.path.isfile(cal_path):
+            return None
+        with open(cal_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return None
+
+        # Alters-Check: erstellt_am muss vorhanden und nicht zu alt sein
+        erstellt_am = data.get("erstellt_am")
+        if not isinstance(erstellt_am, str) or not erstellt_am.strip():
+            return None
+        try:
+            erstellt_dt = datetime.fromisoformat(erstellt_am)
+        except (ValueError, TypeError):
+            return None
+        age = datetime.now() - erstellt_dt
+        if age > timedelta(days=_ENSEMBLE_CALIBRATION_MAX_AGE_DAYS):
+            logger.debug(
+                "Kalibrierungs-JSON älter als %d Tage — keine Ensemble-Gewichtung",
+                _ENSEMBLE_CALIBRATION_MAX_AGE_DAYS,
+            )
+            return None
+
+        # Hit-Raten pro Aktion extrahieren
+        nach_aktion = data.get("nach_aktion")
+        if not isinstance(nach_aktion, dict):
+            return None
+
+        weights: dict[str, float] = {}
+        for action in _ENSEMBLE_ACTIONS:
+            adata = nach_aktion.get(action)
+            if not isinstance(adata, dict):
+                continue
+            hit_rate = adata.get("hit_rate")
+            if hit_rate is None or not isinstance(hit_rate, (int, float)):
+                continue
+            weights[action] = float(hit_rate)
+
+        # Mindestens eine Aktion muss eine Hit-Rate haben
+        if not weights:
+            return None
+
+        return weights
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.debug("Ensemble-Gewichte konnten nicht geladen werden: %s", exc)
+        return None
+
+
+def _smooth_weight(hit_rate: float) -> float:
+    """Glättet die Hit-Rate zu einem Gewicht im Bereich 0.5 bis 1.0.
+
+    Formel: 0.5 + 0.5 * hit_rate
+    - hit_rate 0.0 → 0.5 (Mindestgewicht, wird nie komplett ignoriert)
+    - hit_rate 0.5 → 0.75
+    - hit_rate 1.0 → 1.0
+    """
+    return 0.5 + 0.5 * max(0.0, min(1.0, hit_rate))
+
+
 def ensemble_trader(
     analysts: dict[str, Any],
     debate_result: dict[str, Any],
@@ -1100,12 +1199,32 @@ def ensemble_trader(
 
     # Mehrheitsabstimmung über aktion (3-stufig normalisiert)
     aktionen = [str(r.get("aktion", "HALTEN")).upper() for r in all_runs]
-    aktion_counts: dict[str, int] = {}
-    for a in aktionen:
-        aktion_counts[a] = aktion_counts.get(a, 0) + 1
 
-    mehrheits_aktion = max(aktion_counts, key=lambda k: aktion_counts[k])
-    confidence = aktion_counts[mehrheits_aktion] / len(all_runs)
+    # Kalibrierungs-Gewichte laden (netzfrei, deterministisch)
+    cal_weights = _load_ensemble_weights()
+    gewichtet = cal_weights is not None
+
+    # Verwendete Gewichte pro Aktion (für Metadaten)
+    aktion_gewichte: dict[str, float] = {}
+    if cal_weights:
+        for action in _ENSEMBLE_ACTIONS:
+            hr = cal_weights.get(action)
+            if hr is not None:
+                aktion_gewichte[action] = round(_smooth_weight(hr), 2)
+
+    # Gewichtete Abstimmung
+    aktion_gewicht_sum: dict[str, float] = {}
+    for a in aktionen:
+        if cal_weights:
+            hr = cal_weights.get(a)
+            gewicht = _smooth_weight(hr) if hr is not None else 1.0
+        else:
+            gewicht = 1.0
+        aktion_gewicht_sum[a] = aktion_gewicht_sum.get(a, 0.0) + gewicht
+
+    mehrheits_aktion = max(aktion_gewicht_sum, key=lambda k: aktion_gewicht_sum[k])
+    total_gewicht = sum(aktion_gewicht_sum.values())
+    confidence = aktion_gewicht_sum[mehrheits_aktion] / total_gewicht if total_gewicht > 0 else 0.0
 
     # 5-stufige Ratings sammeln (Fallback auf aktion wenn rating fehlt)
     alle_ratings = [
@@ -1156,6 +1275,8 @@ def ensemble_trader(
         "ensemble_confidence": round(confidence, 2),
         "alle_aktionen": aktionen,
         "alle_ratings": alle_ratings,
+        "gewichtet": gewichtet,
+        "aktion_gewichte": aktion_gewichte,
     }
 
     return result

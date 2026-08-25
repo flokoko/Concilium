@@ -741,6 +741,19 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             if alle_ratings:
                 ens_line += f", Rating-Verteilung: {', '.join(alle_ratings)}"
             lines.append(ens_line)
+
+            # Kalibrierungs-Gewichtungs-Hinweis (nur wenn aktiv)
+            if ensemble_info.get("gewichtet"):
+                gewichte = ensemble_info.get("aktion_gewichte") or {}
+                gewicht_teile = []
+                for action in ("KAUFEN", "HALTEN", "VERKAUFEN"):
+                    g = gewichte.get(action)
+                    if g is not None:
+                        gewicht_teile.append(f"{action} {g:.2f}")
+                if gewicht_teile:
+                    lines.append(
+                        f"_Ensemble kalibrierungs-gewichtet ({', '.join(gewicht_teile)})_"
+                    )
             lines.append("")
 
         # Risk
