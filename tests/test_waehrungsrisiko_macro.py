@@ -474,3 +474,87 @@ class TestReportMacroExtended:
         report = generate_report(result)
         assert "EUR/USD" not in report
         assert "Ölpreis (WTI)" not in report
+
+
+# --------------------------------------------------------------------------- #
+# Feature 1c: Währungsrisiko-Score im Portfolio-Fit-Report-Abschnitt
+# --------------------------------------------------------------------------- #
+
+
+class TestReportPortfolioFitWaehrungsrisikoScore:
+    """Report zeigt Währungsrisiko-Score im Portfolio-Fit-Abschnitt (1c)."""
+
+    def test_report_shows_waehrungsrisiko_score_usd(self):
+        """Report enthält 'Währungsrisiko-Score' bei USD-Ticker mit Portfolio-Fit."""
+        result = {
+            "ticker": "AAPL",
+            "data": {
+                "ticker": "AAPL",
+                "fundamentals": {
+                    "name": "Apple Inc.",
+                    "currency": "USD",
+                    "eur_risiko": True,
+                    "eur_risiko_hinweis": "Währungsrisiko: USD.",
+                    "eurusd": 1.08,
+                },
+                "technicals": {"current_price": 180.0},
+                "sentiment": {},
+                "news": [],
+                "macro": {},
+                "peers": [],
+            },
+            "analysts": {"fundamental": {}, "technical": {}, "sentiment": {}},
+            "debate": {},
+            "trade": {"aktion": "HALTEN"},
+            "risk": {},
+            "final": {"entscheidung": "GENEHMIGT"},
+            "portfolio_fit": {
+                "rolle": "Portfolio-Fit-Analyst",
+                "portfolio_fit_score": 3,
+                "ziel_gewichtung_pct": 2.5,
+                "konzentrationsrisiko_bewertung": "AAPL bereits gewichtet.",
+                "sektor_overlap_bewertung": "Tech-Overlap.",
+                "begründung": "Mäßiger Fit.",
+                "portfolio_daten_verfuegbar": True,
+                "waehrungsrisiko_score": 3,
+            },
+            "no_llm": False,
+        }
+        report = generate_report(result)
+        assert "Währungsrisiko-Score:" in report
+        assert "3/5" in report
+        assert "(USD)" in report
+
+    def test_report_no_waehrungsrisiko_score_for_eur(self):
+        """Report enthält keinen 'Währungsrisiko-Score' bei EUR-Ticker (None)."""
+        result = {
+            "ticker": "RWE.DE",
+            "data": {
+                "ticker": "RWE.DE",
+                "fundamentals": {
+                    "name": "RWE AG",
+                    "currency": "EUR",
+                    "eur_risiko": False,
+                    "eur_risiko_hinweis": "",
+                    "eurusd": None,
+                },
+                "technicals": {"current_price": 30.0},
+                "sentiment": {},
+                "news": [],
+                "macro": {},
+                "peers": [],
+            },
+            "portfolio_fit": {
+                "rolle": "Portfolio-Fit-Analyst",
+                "portfolio_fit_score": 4,
+                "ziel_gewichtung_pct": 5.0,
+                "konzentrationsrisiko_bewertung": "OK.",
+                "sektor_overlap_bewertung": "OK.",
+                "begründung": "Gut.",
+                "portfolio_daten_verfuegbar": True,
+                "waehrungsrisiko_score": None,
+            },
+            "no_llm": False,
+        }
+        report = generate_report(result)
+        assert "Währungsrisiko-Score:" not in report

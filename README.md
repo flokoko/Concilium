@@ -72,6 +72,25 @@ Der Report wird auf stdout ausgegeben und zusätzlich als Datei unter
 auf stderr). Jeder Report beginnt mit einer **Management-Summary** (Gesamturteil,
 Scores, Kernrisiken, Kurz-Begründung) gefolgt von den Detail-Abschnitten.
 
+## Makro-Daten
+
+Concilium bezieht kontextuelle Makro-Kennzahlen via yfinance (best effort, kein
+zusätzlicher API-Key): **10Y US-Treasury-Yield** (aktueller Zins + Wert vor einem
+Monat → Zinstrend), **EUR/USD**, **VIX**, **S&P-500-Trend** (1-Monats-Richtung)
+sowie **Ölpreis (WTI)**. Diese Werte fließen in den Risiko-Off-Regime-Hinweis, den
+Analysten-/Risk-Kontext und den Report ein und geben den Agenten einen
+Markt-Breit-Kontext.
+
+## Währungsrisiko (EUR-basiert)
+
+Concilium ist auf einen EUR-basierten Fondsmanager ausgerichtet. USD-Ticker
+(z. B. AAPL, MSFT) tragen ein Wechselkursrisiko: der Report zeigt einen
+Währungsrisiko-Hinweis und den aktuellen EURUSD-Kurs, und der Portfolio-Fit
+berücksichtigt das Währungsrisiko explizit in der empfohlenen
+Ziel-Gewichtung, wenn der Ticker nicht in EUR notiert. Ein deterministischer
+Währungsrisiko-Score (1–5, 5 = wenig Risiko) wird dem LLM als Anker
+mitgegeben.
+
 ## Agenten-Architektur
 
 Die Pipeline simuliert ein Team von Agenten, die nacheinander arbeiten — inspiriert
@@ -170,6 +189,12 @@ Concilium ist explizit lernend über mehrere Mechanismen:
   Hit-Rate) und **Reliability-Bänder** — und klassifiziert die Tendenz als über-/
   unterkonfident oder gut kalibriert. Diese Information fließt als Feedback in die
   Agenten zurück, damit sie gezielt gegen Fehlkalibrierung korrigieren.
+- **Ensemble-Kalibrierung**: Das Trader-Ensemble ist **kalibrierungs-gewichtet**
+  — Aktionen mit historisch schlechter Trefferquote (echte Hit-Rate) bekommen ein
+  niedrigeres Stimmgewicht. Aggressive Ratings (STARK KAUFEN/STARK VERKAUFEN)
+  werden automatisch zu KAUFEN/VERKAUFEN **gedämpft**, wenn die Historie
+  überkonfident ist. `--evaluate` schreibt die Diagnose in
+  `state/calibration.json`, die bei Folge-Läufen als Kontext dient.
 
 Die 5-stufige Skala macht zudem die `--evaluate`-Track-Record-Auswertung
 granularer: zusätzlich zur Hit-Rate wird die **durchschnittliche Rating-Distanz**

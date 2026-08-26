@@ -42,14 +42,14 @@ TICKER_FIX: dict[str, str] = {
 
 SYSTEM_PORTFOLIO_FIT = """\
 Du bist ein Portfolio-Fit-Analyst. Du bewertest, ob eine analysierte Aktie ein \
-sinnvoller Baustein im bestehenden Depot ist — aus ZWEI Risikoperspektiven.
+sinnvoller Baustein im bestehenden Depot ist — aus DREI Risikoperspektiven.
 
 Du erhältst:
 1. Die analysierte Aktie mit Fundamentals (Sektor/Industry, Beta, Marktkap, Volatilität).
 2. Das reale Depot mit Positionen und deren Anteil in % am Gesamtportfolio.
 3. Eine Typen-/Regionen-Allokations-Übersicht über ALLE Positionen.
 
-Bewerte explizit aus zwei Perspektiven:
+Bewerte explizit aus drei Perspektiven:
 
 (1) Konzentrationsrisiko:
     Liegt die neue Position in der Nähe schon stark gewichteter Top-Positionen?
@@ -63,10 +63,17 @@ Bewerte explizit aus zwei Perspektiven:
     Nutze dafür auch die Typen-/Regionen-Allokation: Eine hohe Konzentration auf \
 einen Typ (z.B. nur Aktien) oder eine Region (z.B. nur USA) erhöht das Risiko.
 
+(3) Währungsrisiko:
+    Notiert die analysierte Aktie in einer Fremdwährung (z.B. USD für einen EUR-Investor)?
+    Falls ja, reduziert ein höheres Währungsrisiko die attraktive Ziel-Gewichtung leicht.
+    Für EUR-basierte Anleger bedeutet eine USD-Position ein Wechselkursrisiko.
+    Ein Währungsrisiko-Score von 1-5 wird dir geliefert (5 = wenig Risiko).
+
 Gib zusätzlich:
 - portfolio_fit_score (1-5, 5 = sehr guter Portfolio-Baustein, 1 = ungeeignet/Redundanz)
 - ziel_gewichtung_pct (empfohlene Ziel-Gewichtung in % des Gesamtportfolios, \
-plausible Zahl, z. B. 0 bis ~10)
+plausible Zahl, z. B. 0 bis ~10). Bei hohem Währungsrisiko (Score ≤ 2) tendiere \
+zu einer niedrigeren Ziel-Gewichtung.
 - begründung (2-4 Sätze auf Deutsch)
 
 Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
@@ -357,6 +364,48 @@ def _build_portfolio_summary(positions: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _compute_waehrungs_score(fundamentals: dict[str, Any]) -> float | None:
+    """Berechnet einen deterministischen Währungsrisiko-Score (1-5) für EUR-Investoren.
+
+    5 = wenig Währungsrisiko, 1 = hohes Währungsrisiko.
+
+    - Wenn ``eur_risiko`` False (oder fehlt) → None (Score nicht anwendbar).
+    - Wenn ``eur_risiko`` True:
+      - Basis 5.
+      - ``eurusd`` < 1.10 → −2 (EUR schwach, hohes Aufwertungsrisiko für USD-Positionen).
+      - ``eurusd`` < 1.15 → −1.
+      - ``eurusd`` > 1.20 → ±0 (relativ neutral/leicht vorteilhaft).
+      - Bei fehlendem ``eurusd`` → 3 (neutral, unbekannt).
+      - Clampe auf [1, 5]. Return int.
+
+    Args:
+        fundamentals: fundamentals-dict aus collect_ticker_data.
+
+    Returns:
+        Score als int (1-5) oder None, wenn kein Währungsrisiko vorliegt.
+    """
+    if not fundamentals.get("eur_risiko", False):
+        return None
+
+    eurusd = fundamentals.get("eurusd")
+    if eurusd is None:
+        return 3
+
+    try:
+        eurusd = float(eurusd)
+    except (TypeError, ValueError):
+        return 3
+
+    score = 5
+    if eurusd < 1.10:
+        score -= 2
+    elif eurusd < 1.15:
+        score -= 1
+    # eurusd > 1.20 → keine Anpassung (−0)
+
+    return int(max(1, min(5, score)))
+
+
 def _build_portfolio_text(positions: list[dict[str, Any]]) -> str:
     """Baut einen kompakten deutschen Portfolio-Text für den LLM-Prompt.
 
@@ -421,12 +470,41 @@ def portfolio_fit_agent(
 
     portfolio_daten_verfuegbar = len(positions) > 0
 
-    user_text = (
-        f"Analysierte Aktie:\n{data_text}\n\n"
-        f"Portfolio-Daten verfügbar: {'ja' if portfolio_daten_verfuegbar else 'nein'}\n\n"
-        f"Real Depot:\n{portfolio_text}"
+    # --- Währungsrisiko (EUR-basiert) ---
+    fundamentals = data.get("fundamentals", {}) if isinstance(data, dict) else {}
+    eur_risiko = fundamentals.get("eur_risiko", False)
+    eurusd = fundamentals.get("eurusd")
+    currency = fundamentals.get("currency")
+    waehrungs_score = _compute_waehrungs_score(fundamentals)
+
+    user_text_parts: list[str] = []
+
+    if eur_risiko:
+        eurusd_str = f"{eurusd}" if eurusd is not None else "N/A"
+        waehrungs_block = (
+            "=== WÄHRUNGSRISIKO (EUR-basiert) ===\n"
+            f"Dieser Ticker notiert in {currency}. "
+            f"Währungsrisiko-Score: {waehrungs_score}/5 "
+            "(5 = wenig Währungsrisiko).\n"
+            f"EURUSD: {eurusd_str}.\n"
+            "Berücksichtige das Wechselkursrisiko in der empfohlenen "
+            "Ziel-Gewichtung (ziel_gewichtung_pct): bei höherem Währungsrisiko "
+            "tendenziell geringere Gewichtung."
+        )
+        user_text_parts.append(waehrungs_block)
+        user_text_parts.append("")
+
+    user_text_parts.append(f"Analysierte Aktie:\n{data_text}")
+    user_text_parts.append("")
+    user_text_parts.append(
+        f"Portfolio-Daten verfügbar: {'ja' if portfolio_daten_verfuegbar else 'nein'}"
     )
+    user_text_parts.append("")
+    user_text_parts.append(f"Real Depot:\n{portfolio_text}")
+
+    user_text = "\n".join(user_text_parts)
 
     result = _call_agent(llm, SYSTEM_PORTFOLIO_FIT, user_text)
     result["portfolio_daten_verfuegbar"] = portfolio_daten_verfuegbar
+    result["waehrungsrisiko_score"] = waehrungs_score
     return result

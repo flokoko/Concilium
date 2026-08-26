@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from concilium.portfolio_fit import (  # noqa: E402
+    _compute_waehrungs_score,
     _parse_positions,
     _safe_float,
     fetch_portfolio_positions,
@@ -323,3 +324,228 @@ class TestPortfolioFitAgent:
         llm = _FakeLLM(_PORTFOLIO_FIT_JSON)
         result = portfolio_fit_agent(_MOCK_DATA, llm, _MOCK_POSITIONS)
         assert "_raw" in result
+
+
+# --------------------------------------------------------------------------- #
+# _compute_waehrungs_score — deterministischer Währungsrisiko-Score (1c)
+# --------------------------------------------------------------------------- #
+
+
+class TestComputeWaehrungsScore:
+    """Testet _compute_waehrungs_score (deterministisch, 1-5 oder None)."""
+
+    def test_eur_ticker_returns_none(self):
+        """EUR-Ticker (eur_risiko False) → None (Score nicht anwendbar)."""
+        fundamentals = {"eur_risiko": False, "eurusd": 1.10, "currency": "EUR"}
+        assert _compute_waehrungs_score(fundamentals) is None
+
+    def test_no_eur_risiko_key_returns_none(self):
+        """Fehlendes eur_risiko-Feld → None."""
+        assert _compute_waehrungs_score({}) is None
+
+    def test_usd_low_eurusd_niedriger_score(self):
+        """USD-Ticker bei eurusd < 1.10 → Score 3 (5 - 2)."""
+        fundamentals = {"eur_risiko": True, "eurusd": 1.08, "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 3
+
+    def test_usd_just_below_1_10(self):
+        """eurusd = 1.09 → Score 3 (5 - 2)."""
+        fundamentals = {"eur_risiko": True, "eurusd": 1.09, "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 3
+
+    def test_usd_between_1_10_and_1_15(self):
+        """eurusd = 1.12 → Score 4 (5 - 1)."""
+        fundamentals = {"eur_risiko": True, "eurusd": 1.12, "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 4
+
+    def test_usd_above_1_20(self):
+        """eurusd > 1.20 → Score 5 (neutral/vorteilhaft, keine Anpassung)."""
+        fundamentals = {"eur_risiko": True, "eurusd": 1.25, "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 5
+
+    def test_usd_exactly_1_15(self):
+        """eurusd = 1.15 → nicht < 1.15 → Score 5."""
+        fundamentals = {"eur_risiko": True, "eurusd": 1.15, "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 5
+
+    def test_missing_eurusd_returns_neutral(self):
+        """Fehlendes eurusd bei eur_risiko True → 3 (neutral, unbekannt)."""
+        fundamentals = {"eur_risiko": True, "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 3
+
+    def test_eurusd_none_returns_neutral(self):
+        """eurusd = None → 3 (neutral)."""
+        fundamentals = {"eur_risiko": True, "eurusd": None, "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 3
+
+    def test_eurusd_string_returns_neutral(self):
+        """eurusd als nicht-float-String → 3 (robust)."""
+        fundamentals = {"eur_risiko": True, "eurusd": "abc", "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 3
+
+    def test_clamping_lower_bound(self):
+        """Sehr niedriger eurusd → Score wird auf 1 geclampt (nicht negativ)."""
+        fundamentals = {"eur_risiko": True, "eurusd": 0.5, "currency": "USD"}
+        # 5 - 2 = 3, aber der Wert ist extrem niedrig → immer noch 3 (nur −2)
+        assert _compute_waehrungs_score(fundamentals) == 3
+
+    def test_clamping_upper_bound(self):
+        """Sehr hoher eurusd → Score bleibt 5 (keine positive Anpassung)."""
+        fundamentals = {"eur_risiko": True, "eurusd": 2.0, "currency": "USD"}
+        assert _compute_waehrungs_score(fundamentals) == 5
+
+    def test_returns_int(self):
+        """Rückgabewert ist ein int (nicht float)."""
+        fundamentals = {"eur_risiko": True, "eurusd": 1.08, "currency": "USD"}
+        result = _compute_waehrungs_score(fundamentals)
+        assert isinstance(result, int)
+
+
+# --------------------------------------------------------------------------- #
+# portfolio_fit_agent — Währungsrisiko-Integration (1c)
+# --------------------------------------------------------------------------- #
+
+
+class TestPortfolioFitWaehrungsrisiko:
+    """Testet Währungsrisiko-Integration in portfolio_fit_agent."""
+
+    def test_waehrungsrisiko_score_in_result_eur_ticker(self):
+        """EUR-Ticker: waehrungsrisiko_score ist None im Result."""
+        llm = _FakeLLM(_PORTFOLIO_FIT_JSON)
+        data = {
+            "ticker": "RWE.DE",
+            "fundamentals": {
+                "name": "RWE AG",
+                "sector": "Utilities",
+                "currency": "EUR",
+                "eur_risiko": False,
+                "eurusd": None,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        result = portfolio_fit_agent(data, llm, _MOCK_POSITIONS)
+        assert "waehrungsrisiko_score" in result
+        assert result["waehrungsrisiko_score"] is None
+
+    def test_waehrungsrisiko_score_in_result_usd_ticker(self):
+        """USD-Ticker: waehrungsrisiko_score ist ein int (1-5)."""
+        llm = _FakeLLM(_PORTFOLIO_FIT_JSON)
+        data = {
+            "ticker": "AAPL",
+            "fundamentals": {
+                "name": "Apple Inc.",
+                "sector": "Technology",
+                "currency": "USD",
+                "eur_risiko": True,
+                "eurusd": 1.08,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        result = portfolio_fit_agent(data, llm, _MOCK_POSITIONS)
+        assert "waehrungsrisiko_score" in result
+        assert isinstance(result["waehrungsrisiko_score"], int)
+        assert 1 <= result["waehrungsrisiko_score"] <= 5
+
+    def test_waehrungs_block_in_prompt_when_eur_risiko_true(self):
+        """Bei eur_risiko True erscheint der WÄHRUNGSRISIKO-Block im user_text."""
+        llm = _FakeLLM(_PORTFOLIO_FIT_JSON)
+        data = {
+            "ticker": "AAPL",
+            "fundamentals": {
+                "name": "Apple Inc.",
+                "sector": "Technology",
+                "currency": "USD",
+                "eur_risiko": True,
+                "eurusd": 1.08,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        portfolio_fit_agent(data, llm, _MOCK_POSITIONS)
+        user_msg = llm.last_messages[1]["content"]
+        assert "=== WÄHRUNGSRISIKO (EUR-basiert) ===" in user_msg
+        assert "USD" in user_msg
+        assert "EURUSD" in user_msg
+        assert "ziel_gewichtung_pct" in user_msg
+
+    def test_waehrungs_block_absent_when_eur_risiko_false(self):
+        """Bei eur_risiko False erscheint kein WÄHRUNGSRISIKO-Block."""
+        llm = _FakeLLM(_PORTFOLIO_FIT_JSON)
+        data = {
+            "ticker": "RWE.DE",
+            "fundamentals": {
+                "name": "RWE AG",
+                "sector": "Utilities",
+                "currency": "EUR",
+                "eur_risiko": False,
+                "eurusd": None,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        portfolio_fit_agent(data, llm, _MOCK_POSITIONS)
+        user_msg = llm.last_messages[1]["content"]
+        assert "=== WÄHRUNGSRISIKO" not in user_msg
+
+    def test_waehrungs_block_shows_score(self):
+        """Der WÄHRUNGSRISIKO-Block enthält den Score-Wert."""
+        llm = _FakeLLM(_PORTFOLIO_FIT_JSON)
+        data = {
+            "ticker": "AAPL",
+            "fundamentals": {
+                "name": "Apple Inc.",
+                "currency": "USD",
+                "eur_risiko": True,
+                "eurusd": 1.08,  # → Score 3
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        portfolio_fit_agent(data, llm, _MOCK_POSITIONS)
+        user_msg = llm.last_messages[1]["content"]
+        assert "Währungsrisiko-Score: 3/5" in user_msg
+
+    def test_waehrungs_block_shows_eurusd_value(self):
+        """Der Block zeigt den konkreten EURUSD-Wert."""
+        llm = _FakeLLM(_PORTFOLIO_FIT_JSON)
+        data = {
+            "ticker": "AAPL",
+            "fundamentals": {
+                "name": "Apple Inc.",
+                "currency": "USD",
+                "eur_risiko": True,
+                "eurusd": 1.08,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        portfolio_fit_agent(data, llm, _MOCK_POSITIONS)
+        user_msg = llm.last_messages[1]["content"]
+        assert "EURUSD: 1.08" in user_msg
+
+    def test_waehrungs_block_eurusd_na_when_none(self):
+        """Bei eurusd=None zeigt der Block 'N/A'."""
+        llm = _FakeLLM(_PORTFOLIO_FIT_JSON)
+        data = {
+            "ticker": "AAPL",
+            "fundamentals": {
+                "name": "Apple Inc.",
+                "currency": "USD",
+                "eur_risiko": True,
+                "eurusd": None,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        portfolio_fit_agent(data, llm, _MOCK_POSITIONS)
+        user_msg = llm.last_messages[1]["content"]
+        assert "EURUSD: N/A" in user_msg

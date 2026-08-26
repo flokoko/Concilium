@@ -820,6 +820,14 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             lines.append(f"**Konzentrationsrisiko:** {portfolio_fit.get('konzentrationsrisiko_bewertung', 'N/A')}")
             lines.append(f"**Sektor-/Branchen-Overlap:** {portfolio_fit.get('sektor_overlap_bewertung', 'N/A')}")
             lines.append(f"**Begründung:** {portfolio_fit.get('begründung', 'N/A')}")
+            # Währungsrisiko-Score (nur wenn vorhanden, d.h. bei Fremdwährungs-Tickern)
+            waehrungs_score = portfolio_fit.get("waehrungsrisiko_score")
+            if waehrungs_score is not None:
+                currency = f.get("currency") or ""
+                curr_str = f" ({currency})" if currency else ""
+                lines.append(
+                    f"**Währungsrisiko-Score:** {waehrungs_score}/5{curr_str}"
+                )
             if portfolio_fit.get("portfolio_daten_verfuegbar") is False:
                 lines.append("")
                 lines.append("> ⚠️ Portfolio-Daten nicht verfügbar — nur Sektor-Bewertung.")
