@@ -47,3 +47,47 @@ def test_no_overall_score_no_anchor():
     }
     text = _build_data_text(data, role="fundamental")
     assert "Quant-Score" not in text
+
+
+def test_current_price_in_quant_score():
+    """Bug 3: current_price aus technicals wird an compute_multi_factor_score durchgereicht.
+
+    fundamentals enthält fifty_two_week_high aber kein current_price.
+    technicals enthält current_price. Der Quant-Score muss die 52W-Nähe
+    einbeziehen → momentum_score != nur recommendation_mean.
+    """
+    from concilium.factors import compute_multi_factor_score
+
+    data = {
+        "ticker": "TEST",
+        "fundamentals": {
+            "name": "Test AG",
+            "fifty_two_week_high": 100.0,
+            "fifty_two_week_low": 50.0,
+            "recommendation_mean": 3.0,  # neutral
+            # KEIN current_price in fundamentals!
+        },
+        "technicals": {
+            "current_price": 95.0,  # nahe Hoch → 5.0 für 52W-Nähe
+        },
+        "sentiment": {},
+        "news": [],
+        "macro": {},
+        "peers": [],
+    }
+    text = _build_data_text(data, role="fundamental")
+    # Quant-Score muss im Text auftauchen
+    assert "Quant-Score" in text
+    # Der Momentum-Score muss >= 4.0 sein (95/100=0.95→5.0, rec_mean=3.0→3.0, avg=4.0)
+    # Wenn current_price NICHT durchgereicht wird, wäre momentum_score=3.0 (nur rec_mean)
+    assert "Momentum" in text
+    # Vergleiche mit direktem compute_multi_factor_score ohne current_price
+    mf_without = compute_multi_factor_score(
+        {"fifty_two_week_high": 100.0, "fifty_two_week_low": 50.0, "recommendation_mean": 3.0}
+    )
+    mf_with = compute_multi_factor_score(
+        {"fifty_two_week_high": 100.0, "fifty_two_week_low": 50.0,
+         "current_price": 95.0, "recommendation_mean": 3.0}
+    )
+    # Mit current_price sollte momentum_score höher sein
+    assert mf_with["momentum_score"] > mf_without["momentum_score"]

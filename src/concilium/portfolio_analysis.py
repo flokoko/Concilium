@@ -260,12 +260,11 @@ def portfolio_overlap(
 
     overlapped_pcts: set[int] = set()  # Indices der überlappten Positionen
 
-    for pos in positions:
+    for idx, pos in enumerate(positions):
         pos_ticker = _normalize_ticker(pos.get("ticker", ""))
         pos_sheet = _normalize_ticker(pos.get("sheet_symbol", ""))
         pos_name = (pos.get("name", "") or "").lower()
         depot_pct = pos.get("depot_pct", 0.0)
-        idx = pos.get("_idx", 0)
 
         # Direkter Ticker-Match
         if pos_ticker in analysed_set or pos_sheet in analysed_set:
@@ -290,8 +289,7 @@ def portfolio_overlap(
 
     # Total overlap percentage
     total_overlap = 0.0
-    for pos in positions:
-        idx = pos.get("_idx", 0)
+    for idx, pos in enumerate(positions):
         if idx in overlapped_pcts:
             total_overlap += pos.get("depot_pct", 0.0)
     result["total_overlap_pct"] = round(total_overlap, 2)

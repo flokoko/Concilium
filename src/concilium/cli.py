@@ -499,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
                 ensemble=not args.no_ensemble,
                 ensemble_runs=args.ensemble_runs,
                 resume=args.resume,
+                peers=peers_list,
             )
 
             # Pro Ticker einen Report generieren (mit portfolio_analysis)

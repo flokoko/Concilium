@@ -139,6 +139,13 @@ class TestParsePositions:
             assert "depot_pct" in p
             assert "value_eur" in p
 
+    def test_idx_set_on_positions(self):
+        """Bug 1: _parse_positions setzt _idx für jede Position (eindeutig)."""
+        positions = _parse_positions(_DUMMY_CSV)
+        assert len(positions) == 5
+        for i, p in enumerate(positions):
+            assert p["_idx"] == i
+
 
 # ---------------------------------------------------------------------------
 # fetch_portfolio_positions (Netzwerk-Fehlerfall, offline)

@@ -197,6 +197,7 @@ def _parse_positions(csv_text: str) -> list[dict[str, Any]]:
             "region": region,
             "depot_pct": depot_pct,
             "value_eur": value_eur,
+            "_idx": len(positions),
         })
 
     return positions

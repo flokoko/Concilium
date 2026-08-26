@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
@@ -197,6 +198,47 @@ class TestTradeRevisionNormalization:
         assert result["stop_loss"] == 92
         assert result["positionsanteil"] == 3
         assert "Risk-Manager" in result["begründung"]
+
+
+class TestTradeRevisionDaempfung:
+    """Bug 2: trade_revision dämpft STARK KAUFEN → KAUFEN wenn überkonfident."""
+
+    def test_stark_kaufen_gedämpft_wenn_ueberkonfident(self, tmp_path):
+        """Bei überkonfidenter Kalibrierung wird STARK KAUFEN zu KAUFEN gedämpft."""
+        from datetime import datetime
+
+        # calibration.json schreiben (überkonfident)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        cal_path = state_dir / "calibration.json"
+        payload = {
+            "anzahl_entscheidungen": 10,
+            "hit_rate_gesamt": 0.4,
+            "nach_aktion": {
+                "KAUFEN": {"n": 5, "hit_rate": 0.4, "avg_confidence": 0.8},
+            },
+            "erstellt_am": datetime.now().isoformat(),
+        }
+        cal_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        llm = _CapturingLLM(_REVISION_JSON_5STUFIG)  # STARK KAUFEN
+        with patch.dict(os.environ, {"CONCILIUM_STATE_DIR": str(state_dir)}):
+            result = trade_revision(_ORIGINAL_TRADE, _RISK, _PORTFOLIO_FIT, llm)
+
+        assert result["rating"] == "KAUFEN"
+        assert result["aktion"] == "KAUFEN"
+        assert result["rating_gedämpft"] is True
+        assert result["rating_original"] == "STARK KAUFEN"
+
+    def test_stark_kaufen_nicht_gedämpft_ohne_datei(self, tmp_path):
+        """Ohne calibration.json bleibt STARK KAUFEN unverändert."""
+        llm = _CapturingLLM(_REVISION_JSON_5STUFIG)
+        with patch.dict(os.environ, {"CONCILIUM_STATE_DIR": str(tmp_path / "nonexistent")}):
+            result = trade_revision(_ORIGINAL_TRADE, _RISK, _PORTFOLIO_FIT, llm)
+
+        assert result["rating"] == "STARK KAUFEN"
+        assert result["aktion"] == "KAUFEN"
+        assert result["rating_gedämpft"] is False
 
 
 class TestTradeRevisionFeedbackReflection:

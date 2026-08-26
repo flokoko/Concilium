@@ -172,3 +172,83 @@ class TestPortfolioFitUsesDataText:
         with patch("concilium.portfolio_fit._build_data_text", return_value="computed") as mock_build:
             portfolio_fit_agent(_MOCK_DATA, llm, positions, data_text=None)
             mock_build.assert_called_once_with(_MOCK_DATA)
+
+
+# ===========================================================================
+# Bug 4: Margen/Renditen als Prozent (×100) im Daten-Text
+# ===========================================================================
+
+class TestFmtPct:
+    """Bug 4: _fmt_pct formatiert Anteile (0.35) als Prozent (35.0 %)."""
+
+    def test_profit_margin_shown_as_percent(self):
+        """profit_margin=0.35 → '35.0 %' im Daten-Text (nicht '0.35')."""
+        from concilium.agents import _build_data_text
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {
+                "name": "Test Inc.",
+                "sector": "Tech",
+                "profit_margin": 0.35,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        text = _build_data_text(data, role="fundamental")
+        assert "35.0 %" in text
+        # Der rohe Anteil 0.35 soll nicht als Wert ohne % erscheinen
+        assert "Gewinnmarge: 0.35" not in text
+
+    def test_dividend_yield_shown_as_percent(self):
+        """dividend_yield=0.025 → '2.5 %' im Daten-Text."""
+        from concilium.agents import _build_data_text
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {
+                "name": "Test Inc.",
+                "dividend_yield": 0.025,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        text = _build_data_text(data, role="fundamental")
+        assert "2.5 %" in text
+
+    def test_revenue_growth_shown_as_percent(self):
+        """revenue_growth=0.15 → '15.0 %' im Daten-Text."""
+        from concilium.agents import _build_data_text
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {
+                "name": "Test Inc.",
+                "revenue_growth": 0.15,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        text = _build_data_text(data, role="fundamental")
+        assert "15.0 %" in text
+
+    def test_fcf_margin_not_doubled(self):
+        """fcf_margin=20.5 (bereits in %) → '20.5 %' (nicht '2050.0 %')."""
+        from concilium.agents import _build_data_text
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {
+                "name": "Test Inc.",
+                "fcf_margin": 20.5,
+            },
+            "technicals": {},
+            "sentiment": {},
+            "news": [],
+        }
+        text = _build_data_text(data, role="fundamental")
+        assert "20.50 %" in text or "20.5 %" in text
+        assert "2050" not in text

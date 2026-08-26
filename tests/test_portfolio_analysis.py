@@ -366,6 +366,29 @@ class TestPortfolioOverlap:
         result = portfolio_overlap(["AAPL"], positions)
         assert any("Hoher Gesamt-Overlap" in w for w in result["warnings"])
 
+    def test_two_positions_only_one_overlaps(self):
+        """Bug 1: Zwei Depot-Positionen, nur eine überlappt →
+        total_overlap_pct nur die überlappte, nicht die Summe beider."""
+        positions = [
+            {"ticker": "AAPL", "sheet_symbol": "AAPL", "name": "Apple", "depot_pct": 5.0},
+            {"ticker": "MSFT", "sheet_symbol": "MSFT", "name": "Microsoft", "depot_pct": 30.0},
+        ]
+        # KEIN _idx in positions — das ist der Bug!
+        result = portfolio_overlap(["AAPL"], positions)
+        assert len(result["direct_overlaps"]) == 1
+        assert result["direct_overlaps"][0]["ticker"] == "AAPL"
+        # Nur AAPL (5%) überlappt, nicht AAPL+MSFT (35%)
+        assert result["total_overlap_pct"] == 5.0
+
+    def test_idx_based_dedup_with_explicit_idx(self):
+        """Auch mit _idx-Flags wird korrekt dedupliziert (eindeutige Indices)."""
+        positions = [
+            {"ticker": "AAPL", "sheet_symbol": "AAPL", "name": "Apple", "depot_pct": 5.0, "_idx": 0},
+            {"ticker": "MSFT", "sheet_symbol": "MSFT", "name": "Microsoft", "depot_pct": 30.0, "_idx": 1},
+        ]
+        result = portfolio_overlap(["AAPL"], positions)
+        assert result["total_overlap_pct"] == 5.0
+
 
 # ---------------------------------------------------------------------------
 # portfolio_concentration
@@ -550,6 +573,60 @@ class TestCLIPortfolioParsing:
                     result = main(["--portfolio", "AAPL", "--no-llm"])
         # Sollte nicht mit SystemExit(2) brechen
         assert result in (0, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Bug 6: --portfolio reicht --peers an run_pipeline durch
+# --------------------------------------------------------------------------- #
+
+
+class TestPortfolioPeersDurchreichung:
+    """Bug 6: run_portfolio reicht peers an run_pipeline weiter."""
+
+    def test_run_portfolio_passes_peers_to_run_pipeline(self):
+        """run_portfolio reicht peers-Parameter an run_pipeline durch."""
+        from unittest.mock import patch
+
+        from concilium.pipeline import run_portfolio
+
+        with patch("concilium.pipeline.run_pipeline") as mock_run, \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.portfolio_analysis.run_portfolio_analysis", return_value={}):
+
+            mock_run.return_value = {
+                "ticker": "AAPL",
+                "data": {"fundamentals": {}, "technicals": {}, "history": []},
+                "no_llm": True,
+            }
+
+            run_portfolio(["AAPL", "MSFT"], llm=None, peers=["GOOG", "AMZN"])
+
+            # run_pipeline wurde für jeden Ticker aufgerufen
+            assert mock_run.call_count == 2
+            # Prüfe dass peers durchgereicht wurde
+            for call in mock_run.call_args_list:
+                assert call.kwargs.get("peers") == ["GOOG", "AMZN"]
+
+    def test_run_portfolio_peers_default_none(self):
+        """Default für peers ist None (rückwärtskompatibel)."""
+        from unittest.mock import patch
+
+        from concilium.pipeline import run_portfolio
+
+        with patch("concilium.pipeline.run_pipeline") as mock_run, \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.portfolio_analysis.run_portfolio_analysis", return_value={}):
+
+            mock_run.return_value = {
+                "ticker": "AAPL",
+                "data": {"fundamentals": {}, "technicals": {}, "history": []},
+                "no_llm": True,
+            }
+
+            run_portfolio(["AAPL"], llm=None)
+
+            assert mock_run.call_count == 1
+            assert mock_run.call_args.kwargs.get("peers") is None
 
 
 # ---------------------------------------------------------------------------

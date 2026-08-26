@@ -327,6 +327,7 @@ def run_portfolio(
     ensemble: bool = True,
     ensemble_runs: int = 3,
     resume: bool = False,
+    peers: list[str] | None = None,
 ) -> dict[str, Any]:
     """Portfolio-Modus: analysiert mehrere Ticker als Depot-Ganzheit.
 
@@ -377,7 +378,7 @@ def run_portfolio(
                 ticker,
                 llm=llm,
                 backtest=backtest,
-                peers=None,
+                peers=peers,
                 ensemble=ensemble,
                 ensemble_runs=ensemble_runs,
                 resume=resume,

@@ -293,6 +293,22 @@ def _fmt_num(val: Any, suffix: str = "") -> str:
         return "N/A"
 
 
+def _fmt_pct(val: Any) -> str:
+    """Formatiert einen Anteil (0.35 = 35%) als Prozent-String.
+
+    Für None/NaN → 'N/A'. Multipliziert mit 100 und hängt ' %' an.
+    """
+    if val is None:
+        return "N/A"
+    try:
+        fval = float(val)
+    except (TypeError, ValueError):
+        return "N/A"
+    if fval != fval:  # NaN
+        return "N/A"
+    return f"{fval * 100:.1f} %"
+
+
 def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
     """Erstellt einen kompakten deutschen Daten-Text für LLM-Prompts.
 
@@ -343,10 +359,10 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
             f"  KGV (trailing): {_fmt_num(f.get('pe_ratio'))}",
             f"  EPS: {_fmt_num(f.get('eps'))}",
             f"  Umsatz: {_fmt_num(f.get('revenue'), ' ')}",
-            f"  Umsatzwachstum: {_fmt_num(f.get('revenue_growth'))} (als Anteil)",
-            f"  Gewinnmarge: {_fmt_num(f.get('profit_margin'))}",
+            f"  Umsatzwachstum: {_fmt_pct(f.get('revenue_growth'))} (pro Jahr)",
+            f"  Gewinnmarge: {_fmt_pct(f.get('profit_margin'))}",
             f"  PEG: {_fmt_num(f.get('peg_ratio'))}",
-            f"  Dividendenrendite: {_fmt_num(f.get('dividend_yield'))}",
+            f"  Dividendenrendite: {_fmt_pct(f.get('dividend_yield'))}",
             f"  Beta: {_fmt_num(f.get('beta'))}",
             f"  52W Hoch: {_fmt_num(f.get('fifty_two_week_high'))}",
             f"  52W Tief: {_fmt_num(f.get('fifty_two_week_low'))}",
@@ -381,7 +397,9 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
         if peg_warnung:
             lines.append(f"  ⚠ PEG-Konsistenz: {peg_warnung}")
         # Quantitativer Multi-Faktor-Score-Anker (deterministischer Referenzwert)
-        mf = compute_multi_factor_score(f)
+        # current_price aus technicals durchreichen, damit der Momentum-Score
+        # die 52W-Nähe-Komponente berechnen kann (factors.py liet f.get("current_price")).
+        mf = compute_multi_factor_score({**f, "current_price": t.get("current_price")})
         if mf.get("overall_score") is not None:
             lines.append(
                 "  Quant-Score (deterministisch, Referenz): "
@@ -1545,6 +1563,34 @@ def _compute_annualized_volatility(data: dict[str, Any]) -> float | None:
     return round(annualized, 6)
 
 
+def _normalize_pct_string(val: Any) -> float | None:
+    """Extrahiert einen float aus einem Wert, der number oder String sein kann.
+
+    Akzeptiert Zahlen direkt und Strings wie "5 %", "5%", "5,5", "5.5".
+    Leerzeichen und %-Zeichen werden entfernt, Komma→Punkt konvertiert.
+    Gibt None zurück bei None oder nicht parsebarem Wert.
+    """
+    if val is None:
+        return None
+    if isinstance(val, int | float):
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            return None
+        return fval if fval == fval else None  # NaN-Check
+    s = str(val).strip()
+    if not s:
+        return None
+    # %-Zeichen und Leerzeichen entfernen, Komma→Punkt
+    s = s.replace("%", "").strip()
+    s = s.replace(",", ".")
+    try:
+        fval = float(s)
+    except (TypeError, ValueError):
+        return None
+    return fval if fval == fval else None  # NaN-Check
+
+
 def risk_manager(
     trade: dict[str, Any],
     data: dict[str, Any],
@@ -1598,6 +1644,15 @@ def risk_manager(
     # Rechnerische Werte ins Rückgabedict übernehmen (einmal berechnet, nicht doppelt)
     risk["volatilität_annualisiert_pct"] = vol_pct
     risk["positionsgröße_rechnerisch_pct"] = pos_rechnerisch
+
+    # Defensive Normalisierung: max_drawdown_schaetzung und positionsgröße_empfohlen
+    # können vom LLM als String ("5 %", "5,5") geliefert werden → float machen.
+    risk["max_drawdown_schaetzung"] = _normalize_pct_string(
+        risk.get("max_drawdown_schaetzung")
+    )
+    risk["positionsgröße_empfohlen"] = _normalize_pct_string(
+        risk.get("positionsgröße_empfohlen")
+    )
 
     return risk
 
@@ -1718,5 +1773,10 @@ def trade_revision(
             _ensure_ziel_stop(result, result["aktion"], float(current_price))
         except (TypeError, ValueError):
             pass  # current_price nicht konvertierbar — kein Fallback, kein Crash
+
+    # Entscheidungs-Disziplin: STARK-Ratings dämpfen wenn Kalibrierung überkonfident.
+    # Der revidierte Trade ersetzt den Original-Trade (ins Journal + PM), daher muss
+    # die gleiche Dämpfung wie bei trader()/ensemble_trader() angewendet werden.
+    _dampen_stark_rating(result, result["rating"])
 
     return result

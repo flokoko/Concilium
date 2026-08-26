@@ -261,3 +261,51 @@ class TestKurzeinschaetzung:
         result = compute_multi_factor_score({"pe_ratio": 15.0})
         text = result["kurzeinschaetzung"]
         assert "Value" in text
+
+
+# ===========================================================================
+# Bug 3: 52W-Nähe-Komponente mit current_price
+# ===========================================================================
+
+class TestMomentumCurrentPrice:
+    """Bug 3: _momentum_score nutzt current_price für die 52W-Nähe-Komponente."""
+
+    def test_momentum_with_current_price_near_high(self):
+        """Mit current_price nahe 52W-Hoch → momentum_score höher."""
+        f = {
+            "fifty_two_week_high": 100.0,
+            "fifty_two_week_low": 50.0,
+            "current_price": 95.0,
+            "recommendation_mean": 3.0,  # neutral
+        }
+        result = compute_multi_factor_score(f)
+        # current_price/high = 0.95 → 5.0, recommendation_mean=3.0 → 3.0
+        # Durchschnitt = 4.0
+        assert result["momentum_score"] is not None
+        assert result["momentum_score"] >= 4.0
+
+    def test_momentum_without_current_price(self):
+        """Ohne current_price → nur recommendation_mean-Komponente."""
+        f = {
+            "fifty_two_week_high": 100.0,
+            "fifty_two_week_low": 50.0,
+            "recommendation_mean": 3.0,
+        }
+        result = compute_multi_factor_score(f)
+        assert result["momentum_score"] is not None
+        # Nur eine Komponente (recommendation_mean=3.0) → momentum_score = 3.0
+        assert result["momentum_score"] == 3.0
+
+    def test_momentum_current_price_far_from_high(self):
+        """Mit current_price weit vom Hoch → momentum_score niedriger."""
+        f = {
+            "fifty_two_week_high": 100.0,
+            "fifty_two_week_low": 50.0,
+            "current_price": 40.0,
+            "recommendation_mean": 3.0,  # neutral
+        }
+        result = compute_multi_factor_score(f)
+        # current_price/high = 0.40 → 1.0, recommendation_mean=3.0 → 3.0
+        # Durchschnitt = 2.0
+        assert result["momentum_score"] is not None
+        assert result["momentum_score"] <= 2.0

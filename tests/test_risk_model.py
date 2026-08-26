@@ -284,3 +284,117 @@ class TestRiskManagerRiskBlockInPrompt:
         assert result["positionsgröße_rechnerisch_pct"] is None
         # LLM-Feld bleibt erhalten
         assert result.get("risiko_score") == 2
+
+
+# ===========================================================================
+# Bug 5: _normalize_pct_string + risk_manager Normalisierung
+# ===========================================================================
+
+class TestNormalizePctString:
+    """Bug 5: _normalize_pct_string extrahiert float aus number/string."""
+
+    def test_number_passthrough(self):
+        from concilium.agents import _normalize_pct_string
+        assert _normalize_pct_string(5.0) == 5.0
+        assert _normalize_pct_string(3) == 3.0
+
+    def test_string_with_percent_and_space(self):
+        from concilium.agents import _normalize_pct_string
+        assert _normalize_pct_string("5 %") == 5.0
+
+    def test_string_with_percent_no_space(self):
+        from concilium.agents import _normalize_pct_string
+        assert _normalize_pct_string("5%") == 5.0
+
+    def test_string_with_comma_decimal(self):
+        from concilium.agents import _normalize_pct_string
+        assert _normalize_pct_string("5,5") == 5.5
+
+    def test_string_with_dot_decimal(self):
+        from concilium.agents import _normalize_pct_string
+        assert _normalize_pct_string("5.5") == 5.5
+
+    def test_none_returns_none(self):
+        from concilium.agents import _normalize_pct_string
+        assert _normalize_pct_string(None) is None
+
+    def test_empty_string_returns_none(self):
+        from concilium.agents import _normalize_pct_string
+        assert _normalize_pct_string("") is None
+
+    def test_invalid_string_returns_none(self):
+        from concilium.agents import _normalize_pct_string
+        assert _normalize_pct_string("abc") is None
+
+
+class TestRiskManagerNormalizesPctStrings:
+    """Bug 5: risk_manager normalisiert max_drawdown_schaetzung und positionsgröße_empfohlen."""
+
+    def test_string_values_normalized_to_float(self):
+        """LLM liefert Strings → risk_manager macht floats daraus."""
+        class _MockLLM:
+            def chat(self, messages, temperature=0.3, **kwargs):
+                return json.dumps({
+                    "rolle": "Risk-Manager",
+                    "risiko_score": 3,
+                    "empfehlung": "MODIFIZIERT",
+                    "max_drawdown_schaetzung": "5 %",
+                    "positionsgröße_empfohlen": "3,5",
+                })
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {},
+            "technicals": {},
+            "history": [],
+            "sentiment": {},
+        }
+        result = risk_manager({"aktion": "HALTEN"}, data, _MockLLM(), data_text="dummy")
+        assert result["max_drawdown_schaetzung"] == 5.0
+        assert result["positionsgröße_empfohlen"] == 3.5
+        assert isinstance(result["max_drawdown_schaetzung"], float)
+        assert isinstance(result["positionsgröße_empfohlen"], float)
+
+    def test_number_values_preserved(self):
+        """LLM liefert bereits Zahlen → bleiben Zahlen."""
+        class _MockLLM:
+            def chat(self, messages, temperature=0.3, **kwargs):
+                return json.dumps({
+                    "rolle": "Risk-Manager",
+                    "risiko_score": 3,
+                    "empfehlung": "GENEHMIGT",
+                    "max_drawdown_schaetzung": 7.5,
+                    "positionsgröße_empfohlen": 4.0,
+                })
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {},
+            "technicals": {},
+            "history": [],
+            "sentiment": {},
+        }
+        result = risk_manager({"aktion": "KAUFEN"}, data, _MockLLM(), data_text="dummy")
+        assert result["max_drawdown_schaetzung"] == 7.5
+        assert result["positionsgröße_empfohlen"] == 4.0
+
+    def test_none_values_stay_none(self):
+        """Fehlende Werte → None."""
+        class _MockLLM:
+            def chat(self, messages, temperature=0.3, **kwargs):
+                return json.dumps({
+                    "rolle": "Risk-Manager",
+                    "risiko_score": 3,
+                    "empfehlung": "GENEHMIGT",
+                })
+
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {},
+            "technicals": {},
+            "history": [],
+            "sentiment": {},
+        }
+        result = risk_manager({"aktion": "HALTEN"}, data, _MockLLM(), data_text="dummy")
+        assert result["max_drawdown_schaetzung"] is None
+        assert result["positionsgröße_empfohlen"] is None
