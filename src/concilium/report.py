@@ -404,6 +404,13 @@ def generate_report(
     lines.append(f"**Unternehmen:** {f.get('name', ticker)}")
     lines.append(f"**Sektor:** {f.get('sector', 'N/A')} / {f.get('industry', 'N/A')}")
     lines.append(f"**Währung:** {f.get('currency', 'USD')}")
+    # Währungsrisiko-Hinweis (nur bei nicht-EUR-Tickern)
+    if f.get("eur_risiko"):
+        eurusd_val = f.get("eurusd")
+        if eurusd_val is not None:
+            lines.append(f"**Währungsrisiko:** {f.get('eur_risiko_hinweis', '')} EURUSD: {_fmt(eurusd_val)}.")
+        else:
+            lines.append(f"**Währungsrisiko:** {f.get('eur_risiko_hinweis', '')}")
     # ISIN/WKN anzeigen, falls verfügbar (bei Auflösung über ISIN/WKN)
     isin = data.get("isin")
     wkn = data.get("wkn")
@@ -585,6 +592,15 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         source_label = f" ({sp500_source})" if sp500_source and sp500_source != "none" else ""
         lines.append(f"| S&P 500 KGV{source_label} | {_fmt(macro.get('sp500_pe'))} |")
         lines.append(f"| S&P 500 Marktkap | {_fmt(macro.get('sp500_market_cap'))} |")
+        # Erweiterte Makro-Kennzahlen
+        if macro.get("eurusd") is not None:
+            lines.append(f"| EUR/USD | {_fmt(macro.get('eurusd'))} |")
+        if macro.get("vix") is not None:
+            lines.append(f"| VIX | {_fmt(macro.get('vix'))} |")
+        if macro.get("sp500_trend") is not None:
+            lines.append(f"| S&P 500 Trend (1M) | {macro.get('sp500_trend')} |")
+        if macro.get("oel_preis") is not None:
+            lines.append(f"| Ölpreis (WTI) | {_fmt(macro.get('oel_preis'))} |")
         lines.append("")
         lines.append(
             "> Hinweis: Hohe/steigende Zinsen belasten kapitalintensive "

@@ -177,6 +177,8 @@ SYSTEM_RISK = """\
 Du bist ein Risk-Manager. Du bewertest das Risiko eines vorgeschlagenen Trades \
 basierend auf Volatilität (Beta), historischem Drawdown, Marktbedingungen und \
 Positionsgrösse. Du kannst den Trade ablehnen oder modifizieren.
+Berücksichtige bei nicht-EUR-Währung zusätzliches Währungsrisiko \
+(Wechselkursbewegung) im Risiko-Score.
 
 Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 {
@@ -393,6 +395,19 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
                 "hinterfrage ihn kritisch anhand der Kennzahlen."
             )
 
+    # Währungsrisiko-Block — für alle und risk (risk_manager bekommt "alle")
+    if f.get("eur_risiko") and role in ("alle", "risk", "fundamental"):
+        currency = f.get("currency", "USD")
+        eurusd_val = f.get("eurusd")
+        eurusd_str = _fmt_num(eurusd_val) if eurusd_val is not None else "N/A"
+        lines.append("")
+        lines.append("=== WÄHRUNGSRISIKO ===")
+        lines.append(
+            f"  Dieser Ticker notiert in {currency} (nicht EUR). "
+            "Für einen EUR-basierten Anleger besteht Wechselkursrisiko."
+        )
+        lines.append(f"  EURUSD: {eurusd_str}. Berücksichtige das Währungsrisiko in deiner Risikobewertung.")
+
     # TECHNIK — für technik und alle
     if role in ("alle", "technik"):
         lines.extend([
@@ -422,6 +437,22 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
             source_label = f" ({source})" if source and source != "none" else ""
             lines.append(f"  S&P 500 KGV{source_label}: {_fmt_num(macro.get('sp500_pe'))}")
             lines.append(f"  S&P 500 Marktkap: {_fmt_num(macro.get('sp500_market_cap'), ' ')}")
+            # Erweiterte Makro-Kennzahlen
+            macro_extra: list[str] = []
+            if macro.get("eurusd") is not None:
+                macro_extra.append(f"EURUSD: {_fmt_num(macro.get('eurusd'))}")
+            if macro.get("vix") is not None:
+                macro_extra.append(f"VIX: {_fmt_num(macro.get('vix'))}")
+            if macro.get("oel_preis") is not None:
+                macro_extra.append(f"Öl (WTI): {_fmt_num(macro.get('oel_preis'))}")
+            if macro.get("sp500_trend") is not None:
+                macro_extra.append(f"S&P500-Trend: {macro.get('sp500_trend')}")
+            if macro_extra:
+                lines.append(f"  {' | '.join(macro_extra)}")
+                lines.append(
+                    "  Hinweis: Erhöhter VIX (>20) = Risiko-Off-Regime, "
+                    "Ölpreis relevant für Energie/Kapitalkosten."
+                )
             lines.append(
                 "  Hinweis: Hohe/steigende Zinsen belasten kapitalintensive "
                 "und erneuerbare Sektoren."

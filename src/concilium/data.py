@@ -1051,6 +1051,12 @@ def _fetch_macro_data() -> dict[str, Any]:
         "us_10y_trend": None,
         "sp500_pe": None,
         "sp500_market_cap": None,
+        # Erweiterte Makro-Daten
+        "eurusd": None,
+        "vix": None,
+        "sp500_trend": None,
+        "oel_preis": None,
+        "oel_name": "WTI",
     }
 
     # --- 10y US Treasury Yield (^TNX) ---
@@ -1079,6 +1085,64 @@ def _fetch_macro_data() -> dict[str, Any]:
     result["sp500_pe"] = sp500["sp500_pe"]
     result["sp500_market_cap"] = sp500["sp500_market_cap"]
     result["sp500_source"] = sp500["sp500_source"]
+
+    # --- EURUSD (EUR/USD Wechselkurs) ---
+    try:
+        eurusd_ticker = yf.Ticker("EURUSD=X")
+        eurusd_info = eurusd_ticker.info or {}
+        eurusd_val = _safe_float(eurusd_info.get("currentPrice"))
+        if eurusd_val is None:
+            eurusd_hist = eurusd_ticker.history(period="5d")
+            if eurusd_hist is not None and not eurusd_hist.empty:
+                eurusd_val = _safe_float(eurusd_hist["Close"].iloc[-1])
+        result["eurusd"] = eurusd_val
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.warning("Makrodaten EURUSD konnten nicht abgerufen werden: %s", exc)
+
+    # --- VIX (Volatilitätsindex) ---
+    try:
+        vix_ticker = yf.Ticker("^VIX")
+        vix_info = vix_ticker.info or {}
+        vix_val = _safe_float(vix_info.get("currentPrice"))
+        if vix_val is None:
+            vix_hist = vix_ticker.history(period="5d")
+            if vix_hist is not None and not vix_hist.empty:
+                vix_val = _safe_float(vix_hist["Close"].iloc[-1])
+        result["vix"] = vix_val
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.warning("Makrodaten ^VIX konnten nicht abgerufen werden: %s", exc)
+
+    # --- S&P 500 Trend (1 Monat) ---
+    try:
+        gspc = yf.Ticker("^GSPC")
+        gspc_hist = gspc.history(period="1mo")
+        if gspc_hist is not None and not gspc_hist.empty:
+            close_col = gspc_hist["Close"]
+            last_close = _safe_float(close_col.iloc[-1])
+            first_close = _safe_float(close_col.iloc[0])
+            if last_close is not None and first_close is not None and first_close > 0:
+                pct_change = (last_close - first_close) / first_close
+                if pct_change > 0.005:
+                    result["sp500_trend"] = "steigend"
+                elif pct_change < -0.005:
+                    result["sp500_trend"] = "fallend"
+                else:
+                    result["sp500_trend"] = "flach"
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.warning("Makrodaten S&P500-Trend konnten nicht abgerufen werden: %s", exc)
+
+    # --- Ölpreis (WTI Crude, CL=F) ---
+    try:
+        cl_ticker = yf.Ticker("CL=F")
+        cl_info = cl_ticker.info or {}
+        cl_val = _safe_float(cl_info.get("currentPrice"))
+        if cl_val is None:
+            cl_hist = cl_ticker.history(period="5d")
+            if cl_hist is not None and not cl_hist.empty:
+                cl_val = _safe_float(cl_hist["Close"].iloc[-1])
+        result["oel_preis"] = cl_val
+    except Exception as exc:  # noqa: BLE001 — best effort
+        logger.warning("Makrodaten Ölpreis (CL=F) konnten nicht abgerufen werden: %s", exc)
 
     return result
 
@@ -1288,6 +1352,21 @@ def collect_ticker_data(
             "PEG positiv trotz negativem Umsatzwachstum — plausibel prüfen"
         )
 
+    # --- Währungsrisiko (EUR-basierter Investor) ---
+    eur_risiko = currency not in ("EUR", "EUR.DE") if currency else False
+    if eur_risiko:
+        eur_risiko_hinweis = (
+            f"Währungsrisiko: Der Ticker notiert in {currency}. "
+            f"Für einen EUR-basierten Investor wirken Kursschwankungen {currency}/EUR "
+            "auf die Rendite."
+        )
+    else:
+        eur_risiko_hinweis = ""
+
+    # EURUSD-Kurs: wird in _fetch_macro_data() bereits geholt (best effort).
+    # Wir nutzen hier den Wert aus dem macro-dict, um keinen doppelten
+    # yfinance-Aufruf zu machen. eurusd wird nach macro-Zuweisung gesetzt.
+
     fundamentals = {
         "name": long_name,
         "sector": sector,
@@ -1304,6 +1383,11 @@ def collect_ticker_data(
         "beta": beta,
         "fifty_two_week_high": fifty_two_week_high,
         "fifty_two_week_low": fifty_two_week_low,
+        # Währungsrisiko (EUR-basierter Investor) — eurusd wird unten nach
+        # macro-Zuweisung ergänzt
+        "eur_risiko": eur_risiko,
+        "eur_risiko_hinweis": eur_risiko_hinweis,
+        "eurusd": None,
         # Feature 1: Analysten-Erwartungen
         "analyst_target_mean": analyst_target_mean,
         "analyst_target_high": analyst_target_high,
@@ -1361,6 +1445,10 @@ def collect_ticker_data(
 
     # --- Feature 2: Makro/Zins-Daten ---
     macro = _fetch_macro_data()
+
+    # EURUSD aus macro übernehmen (wird in _fetch_macro_data geholt)
+    if macro.get("eurusd") is not None:
+        fundamentals["eurusd"] = macro["eurusd"]
 
     # --- Feature 3: Peer-Vergleich ---
     peers_data: list[dict[str, Any]] = []
