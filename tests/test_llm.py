@@ -165,3 +165,121 @@ class TestParseJson:
         result = parse_json("Das ist kein JSON.")
         assert "_raw" in result
         assert result["_raw"] == "Das ist kein JSON."
+
+
+# ===========================================================================
+# OPT C: max_tokens in _call_agent und llm.chat
+# ===========================================================================
+
+
+class TestMaxTokensCallAgent:
+    """_call_agent gibt max_tokens an llm.chat weiter."""
+
+    def test_call_agent_passes_max_tokens_structured(self):
+        """_call_agent (structured=True) gibt max_tokens an llm.chat weiter."""
+        from concilium.agents import _call_agent
+        from concilium.llm import StructuredChatResult
+
+        class _CapturingLLM:
+            def __init__(self):
+                self.captured_kwargs: dict = {}
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.captured_kwargs = kwargs
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    return StructuredChatResult(
+                        text='{"rolle": "Test", "score": 3}',
+                        response_format_used=True,
+                    )
+                return '{"rolle": "Test", "score": 3}'
+
+        llm = _CapturingLLM()
+        _call_agent(
+            llm,
+            "system prompt",
+            "user text",
+            response_format={"type": "json_object"},
+            structured=True,
+        )
+
+        assert llm.captured_kwargs.get("max_tokens") == 1000
+
+    def test_call_agent_passes_max_tokens_unstructured(self):
+        """_call_agent (structured=False) gibt max_tokens an llm.chat weiter."""
+        from concilium.agents import _call_agent
+
+        class _CapturingLLM:
+            def __init__(self):
+                self.captured_kwargs: dict = {}
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.captured_kwargs = kwargs
+                return '{"rolle": "Test", "score": 3}'
+
+        llm = _CapturingLLM()
+        _call_agent(llm, "system prompt", "user text")
+
+        assert llm.captured_kwargs.get("max_tokens") == 1000
+
+    def test_call_agent_custom_max_tokens(self):
+        """_call_agent gibt custom max_tokens weiter."""
+        from concilium.agents import _call_agent
+        from concilium.llm import StructuredChatResult
+
+        class _CapturingLLM:
+            def __init__(self):
+                self.captured_kwargs: dict = {}
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.captured_kwargs = kwargs
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    return StructuredChatResult(
+                        text='{"rolle": "Test", "score": 3}',
+                        response_format_used=True,
+                    )
+                return '{"rolle": "Test", "score": 3}'
+
+        llm = _CapturingLLM()
+        _call_agent(
+            llm,
+            "system prompt",
+            "user text",
+            response_format={"type": "json_object"},
+            structured=True,
+            max_tokens=500,
+        )
+
+        assert llm.captured_kwargs.get("max_tokens") == 500
+
+
+class TestMaxTokensInPayload:
+    """llm.chat schreibt max_tokens in den Payload."""
+
+    def test_max_tokens_in_payload(self):
+        """max_tokens wird in den Request-Payload geschrieben."""
+        client = LLMClient(base_url="http://fake:8080/v1", api_key="test-key", model="test-model")
+
+        mock_resp = _MockResponse(200, "Hallo")
+        with patch("concilium.llm.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                [{"role": "user", "content": "Hallo"}],
+                max_tokens=800,
+            )
+
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs[1].get("json", {})
+
+        assert payload["max_tokens"] == 800
+
+    def test_no_max_tokens_in_payload_when_none(self):
+        """Ohne max_tokens wird es nicht in den Payload geschrieben."""
+        client = LLMClient(base_url="http://fake:8080/v1", api_key="test-key", model="test-model")
+
+        mock_resp = _MockResponse(200, "Hallo")
+        with patch("concilium.llm.requests.post", return_value=mock_resp) as mock_post:
+            client.chat([{"role": "user", "content": "Hallo"}])
+
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs[1].get("json", {})
+
+        assert "max_tokens" not in payload

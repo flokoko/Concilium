@@ -576,6 +576,7 @@ def _call_agent(
     temperature: float = 0.3,
     response_format: dict[str, Any] | None = None,
     structured: bool = False,
+    max_tokens: int = 1000,
 ) -> dict[str, Any]:
     """Führt einen einzelnen Agenten-Call aus und parst das Ergebnis.
 
@@ -591,6 +592,11 @@ def _call_agent(
     In beiden Fällen wird ``_raw`` auf den rohen Text gesetzt, damit
     Downstream-Consumer (z.B. _clean_debate_text, _parse_debate_confidence)
     darauf zugreifen können.
+
+    ``max_tokens`` (Default 1000) caps die Output-Länge pro LLM-Call, um
+    Token-Verschwendung durch ausufernde Antworten zu verhindern. 1000 ist
+    großzügig für alle Agenten-Rollen (Debatte ~300-400, Analysten ~150,
+    Trader/Risk/PM ~200).
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -603,6 +609,7 @@ def _call_agent(
             temperature=temperature,
             response_format=response_format,
             as_structured=True,
+            max_tokens=max_tokens,
         )
         if isinstance(result_obj, StructuredChatResult):
             raw = result_obj.text
@@ -620,7 +627,7 @@ def _call_agent(
             raw = str(result_obj)
             parsed = parse_json(raw)
     else:
-        raw = llm.chat(messages, temperature=temperature)
+        raw = llm.chat(messages, temperature=temperature, max_tokens=max_tokens)
         parsed = parse_json(raw)
 
     if not isinstance(parsed, dict):
@@ -802,33 +809,69 @@ def _analyst_summary_text(analysts: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def debate(analysts: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
-    """Führt Bull/Bear-Debatte durch (2 LLM-Calls).
+def debate(analysts: dict[str, Any], llm: LLMClient, rounds: int = 1) -> dict[str, Any]:
+    """Führt Bull/Bear-Debatte durch (2 LLM-Calls pro Runde).
 
-    Returns dict mit 'bull', 'bear', 'bull_confidence' und 'bear_confidence'
-    Schlüsseln. Die Konfidenzen werden via _parse_debate_confidence aus den
-    jeweiligen Agent-Ergebnissen extrahiert (None bei Fehlschlag).
+    Args:
+        analysts: Analysten-Ergebnisse.
+        llm: LLMClient.
+        rounds: Anzahl der Bull/Bear-Runden (Default 1 = bisheriges
+            Verhalten, rückwärtskompatibel). Bei rounds > 1 bekommt jede
+            Seite ab Runde 2 die Argumentation der Gegenseite aus der
+            vorherigen Runde als Kontext, mit der Anweisung, konkret darauf
+            einzugehen.
+
+    Returns dict mit 'bull', 'bear', 'bull_confidence', 'bear_confidence'
+    und 'rounds' Schlüsseln. Die finalen bull/bear-Dicts stammen aus der
+    letzten Runde. Die Konfidenzen werden via _parse_debate_confidence aus
+    den jeweiligen Agent-Ergebnissen extrahiert (None bei Fehlschlag).
 
     Verwendet DEBATE_SCHEMA für strukturierte LLM-Outputs. Bei Fallback
     (Provider unterstützt response_format nicht) wird die Konfidenz aus dem
     Fließtext via _parse_debate_confidence extrahiert.
     """
     summary = _analyst_summary_text(analysts)
+    bull_text = ""
+    bear_text = ""
+    bull: dict[str, Any] = {}
+    bear: dict[str, Any] = {}
 
-    bull = _call_agent(
-        llm, SYSTEM_BULL,
-        f"Analysten-Einschätzungen:\n{summary}",
-        temperature=0.5,
-        response_format=DEBATE_SCHEMA,
-        structured=True,
-    )
-    bear = _call_agent(
-        llm, SYSTEM_BEAR,
-        f"Analysten-Einschätzungen:\n{summary}",
-        temperature=0.5,
-        response_format=DEBATE_SCHEMA,
-        structured=True,
-    )
+    for r in range(rounds):
+        bull_user = f"Analysten-Einschätzungen:\n{summary}"
+        if r > 0 and bear_text:
+            bull_user += (
+                "\n\n=== Argumentation der Gegenseite (letzte Runde) ===\n"
+                f"{bear_text}\n\n"
+                "Gehe konkret auf diese Argumente ein: stimme zu, widersprich "
+                "mit Daten, oder ergänze. Wiederhole nicht deine vorherigen "
+                "Punkte, sondern vertiefe/verteidige sie."
+            )
+        bull = _call_agent(
+            llm, SYSTEM_BULL,
+            bull_user,
+            temperature=0.5,
+            response_format=DEBATE_SCHEMA,
+            structured=True,
+        )
+        bull_text = _get_debate_argument(bull)
+
+        bear_user = f"Analysten-Einschätzungen:\n{summary}"
+        if r > 0 and bull_text:
+            bear_user += (
+                "\n\n=== Argumentation der Gegenseite (letzte Runde) ===\n"
+                f"{bull_text}\n\n"
+                "Gehe konkret auf diese Argumente ein: stimme zu, widersprich "
+                "mit Daten, oder ergänze. Wiederhole nicht deine vorherigen "
+                "Punkte, sondern vertiefe/verteidige sie."
+            )
+        bear = _call_agent(
+            llm, SYSTEM_BEAR,
+            bear_user,
+            temperature=0.5,
+            response_format=DEBATE_SCHEMA,
+            structured=True,
+        )
+        bear_text = _get_debate_argument(bear)
 
     bull_conf = _parse_debate_confidence(bull)
     bear_conf = _parse_debate_confidence(bear)
@@ -838,6 +881,7 @@ def debate(analysts: dict[str, Any], llm: LLMClient) -> dict[str, Any]:
         "bear": bear,
         "bull_confidence": bull_conf,
         "bear_confidence": bear_conf,
+        "rounds": rounds,
     }
 
 

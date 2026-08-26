@@ -548,10 +548,10 @@ class TestFeedbackRating:
 
         result = build_feedback_context(path)
 
-        assert "Rating-Verteilung" in result
-        assert "STARK KAUFEN: 1" in result
-        assert "KAUFEN: 1" in result
-        assert "STARK VERKAUFEN: 1" in result
+        # Rating-Verteilung wurde beim Kontext-Trim entfernt.
+        # Stattdessen wird die Aktionen-Verteilung geprüft (KAUFEN: 5).
+        assert "KAUFEN: 5" in result
+        assert "Rating-Verteilung" not in result
 
     def test_rating_verteilung_empty_ratings(self, tmp_path):
         """Bei leeren ratings → Rating-Verteilung mit 0-Werten."""
@@ -577,8 +577,8 @@ class TestFeedbackRating:
 
         result = build_feedback_context(path)
 
-        assert "Rating-Verteilung" in result
-        assert "STARK KAUFEN: 0" in result
+        # Rating-Verteilung wurde beim Kontext-Trim entfernt.
+        assert "Rating-Verteilung" not in result
 
 
 # --------------------------------------------------------------------------- #

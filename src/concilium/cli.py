@@ -265,6 +265,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Anzahl der Ensemble-Runs für den Trader (Default: 3). "
         "Wird ignoriert, wenn --no-ensemble gesetzt ist.",
     )
+    parser.add_argument(
+        "--debate-rounds",
+        type=int,
+        default=1,
+        help="Anzahl der Bull/Bear-Debatten-Runden (Default: 1). "
+        "Höhere Werte = tiefere Debatte, mehr LLM-Calls.",
+    )
     resume_group = parser.add_mutually_exclusive_group()
     resume_group.add_argument(
         "--resume",
@@ -414,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
                     ensemble=not args.no_ensemble,
                     ensemble_runs=args.ensemble_runs,
                     resume=args.resume,
+                    debate_rounds=args.debate_rounds,
                 )
                 report = generate_report(result, reports_dir=reports_dir)
                 print(report)
@@ -500,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
                 ensemble_runs=args.ensemble_runs,
                 resume=args.resume,
                 peers=peers_list,
+                debate_rounds=args.debate_rounds,
             )
 
             # Pro Ticker einen Report generieren (mit portfolio_analysis)
@@ -582,6 +591,7 @@ def main(argv: list[str] | None = None) -> int:
                     ensemble=not args.no_ensemble,
                     ensemble_runs=args.ensemble_runs,
                     resume=args.resume,
+                    debate_rounds=args.debate_rounds,
                 )
                 report = generate_report(result, reports_dir=reports_dir)
                 print(report)
@@ -631,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
             ensemble=not args.no_ensemble,
             ensemble_runs=args.ensemble_runs,
             resume=args.resume,
+            debate_rounds=args.debate_rounds,
         )
 
         # Report generieren

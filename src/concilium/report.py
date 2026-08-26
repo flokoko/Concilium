@@ -692,6 +692,11 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         debate = result.get("debate", {})
         lines.append(f"## {section_num}. Bull/Bear-Debatte")
         lines.append("")
+        # Rundenanzahl anzeigen, wenn mehr als 1 Runde
+        debate_rounds = debate.get("rounds")
+        if debate_rounds and debate_rounds > 1:
+            lines.append(f"_Debatte über {debate_rounds} Runden_")
+            lines.append("")
         bull = debate.get("bull", {})
         bear = debate.get("bear", {})
         lines.append("### Bull-Argumentation")

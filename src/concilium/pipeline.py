@@ -70,6 +70,7 @@ def run_pipeline(
     resume: bool = False,
     portfolio_context: dict[str, Any] | None = None,
     skip_final: bool = False,
+    debate_rounds: int = 1,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -176,7 +177,7 @@ def run_pipeline(
     # --- 2. Analysten-Team ---
     if not _is_completed(result, "analysts"):
         logger.info("Schritt 2: Analysten-Team wird aufgerufen")
-        analysts = analyst_team(data, llm, data_text=data_text)
+        analysts = analyst_team(data, llm)  # data_text=None → rollenspezifische Filter greifen
         result["analysts"] = analysts
         _save_step(result, ticker, "analysts")
     else:
@@ -185,7 +186,7 @@ def run_pipeline(
     # --- 3. Debatte ---
     if not _is_completed(result, "debate"):
         logger.info("Schritt 3: Bull/Bear-Debatte")
-        debate_result = debate(analysts, llm)
+        debate_result = debate(analysts, llm, rounds=debate_rounds)
         result["debate"] = debate_result
         _save_step(result, ticker, "debate")
     else:
@@ -328,6 +329,7 @@ def run_portfolio(
     ensemble_runs: int = 3,
     resume: bool = False,
     peers: list[str] | None = None,
+    debate_rounds: int = 1,
 ) -> dict[str, Any]:
     """Portfolio-Modus: analysiert mehrere Ticker als Depot-Ganzheit.
 
@@ -384,6 +386,7 @@ def run_portfolio(
                 resume=resume,
                 portfolio_context=None,
                 skip_final=llm is not None,
+                debate_rounds=debate_rounds,
             )
             results[ticker] = result
         except Exception as exc:  # noqa: BLE001 — nie crashen

@@ -489,8 +489,6 @@ def build_feedback_context(
         a = stats["actions"]
         avg_conf = _format_score(stats["avg_confidence"])
         avg_ens = _format_score(stats["avg_ensemble_confidence"])
-        avg_pf = _format_score(stats["avg_portfolio_fit"])
-        avg_zg = _format_pct(stats["avg_ziel_gewichtung"])
         kauf_pct = _format_pct(stats["kauf_genehmigt_pct"])
 
         # Kalibrierungs-Zeile (echte Hit-Rate aus JSON oder Proxy-Fallback)
@@ -528,10 +526,7 @@ def build_feedback_context(
         lines = [
             f"=== DEIN TRACK-RECORD (letzte {n} Entscheidungen) ===",
             f"Gesamt: {n} Entscheidungen (KAUFEN: {a['KAUFEN']}, HALTEN: {a['HALTEN']}, VERKAUFEN: {a['VERKAUFEN']})",
-            f"Rating-Verteilung: STARK KAUFEN: {stats['ratings']['STARK KAUFEN']}, KAUFEN: {stats['ratings']['KAUFEN']}, HALTEN: {stats['ratings']['HALTEN']}, VERKAUFEN: {stats['ratings']['VERKAUFEN']}, STARK VERKAUFEN: {stats['ratings']['STARK VERKAUFEN']}",
-            f"Finale Entscheidungen: GENEHMIGT: {stats['genehmigt']}, ABGELEHNT: {stats['abgelehnt']}",
             f"Ø Confidence: {avg_conf} / 5 | Ø Ensemble-Confidence: {avg_ens}",
-            f"Ø Portfolio-Fit-Score: {avg_pf} / 5 | Ø Ziel-Gewichtung: {avg_zg} %",
             f"KAUFEN-Empfehlungen final genehmigt: {kauf_pct} %",
             kalibrierung_line,
         ]

@@ -143,19 +143,21 @@ class TestFeedbackContent:
         assert "VERKAUFEN: 1" in result
 
     def test_contains_final_decisions(self, tmp_path):
-        """Kontext enthält GENEHMIGT/ABGELEHNT-Verteilung."""
+        """Kontext enthält KAUFEN-Empfehlungen final genehmigt (kompakte Alternative zur GENEHMIGT/ABGELEHNT-Zeile)."""
         rows = [
-            _make_row(ticker="A", final_decision="GENEHMIGT"),
-            _make_row(ticker="B", final_decision="GENEHMIGT"),
-            _make_row(ticker="C", final_decision="ABGELEHNT"),
-            _make_row(ticker="D", final_decision="GENEHMIGT"),
-            _make_row(ticker="E", final_decision="ABGELEHNT"),
+            _make_row(ticker="A", action="KAUFEN", final_decision="GENEHMIGT"),
+            _make_row(ticker="B", action="KAUFEN", final_decision="GENEHMIGT"),
+            _make_row(ticker="C", action="KAUFEN", final_decision="ABGELEHNT"),
+            _make_row(ticker="D", action="HALTEN", final_decision="GENEHMIGT"),
+            _make_row(ticker="E", action="KAUFEN", final_decision="ABGELEHNT"),
         ]
         path = _write_journal(tmp_path, rows)
         result = build_feedback_context(path)
 
-        assert "GENEHMIGT: 3" in result
-        assert "ABGELEHNT: 2" in result
+        # Die "Finale Entscheidungen: GENEHMIGT/ABGELEHNT"-Zeile wurde beim
+        # Kontext-Trim entfernt, aber die kompakte "KAUFEN-Empfehlungen final
+        # genehmigt"-Zeile bleibt als Alternative erhalten.
+        assert "KAUFEN-Empfehlungen final genehmigt" in result
 
     def test_contains_confidence(self, tmp_path):
         """Kontext enthält durchschnittliche Confidence."""
@@ -188,7 +190,7 @@ class TestFeedbackContent:
         assert "Ø Ensemble-Confidence: 0.71" in result
 
     def test_contains_portfolio_fit(self, tmp_path):
-        """Kontext enthält durchschnittlichen Portfolio-Fit-Score."""
+        """Kontext enthält Ø Confidence (Portfolio-Fit-Zeile beim Kontext-Trim entfernt)."""
         rows = [
             _make_row(ticker="A", portfolio_fit_score="4"),
             _make_row(ticker="B", portfolio_fit_score="5"),
@@ -199,11 +201,13 @@ class TestFeedbackContent:
         path = _write_journal(tmp_path, rows)
         result = build_feedback_context(path)
 
-        # Ø = (4+5+3+4+4)/5 = 4.00
-        assert "Ø Portfolio-Fit-Score: 4.00 / 5" in result
+        # Die "Ø Portfolio-Fit-Score / Ø Ziel-Gewichtung"-Zeile wurde beim
+        # Kontext-Trim entfernt — aber Ø Confidence ist noch da.
+        assert "Ø Confidence" in result
+        assert "Ø Portfolio-Fit-Score" not in result
 
     def test_contains_ziel_gewichtung(self, tmp_path):
-        """Kontext enthält durchschnittliche Ziel-Gewichtung."""
+        """Kontext enthält Ø Confidence (Ziel-Gewichtung-Zeile beim Kontext-Trim entfernt)."""
         rows = [
             _make_row(ticker="A", ziel_gewichtung_pct="5"),
             _make_row(ticker="B", ziel_gewichtung_pct="10"),
@@ -214,8 +218,9 @@ class TestFeedbackContent:
         path = _write_journal(tmp_path, rows)
         result = build_feedback_context(path)
 
-        # Ø = (5+10+3+7+5)/5 = 6.0
-        assert "Ø Ziel-Gewichtung: 6.0 %" in result
+        # Die "Ø Ziel-Gewichtung"-Zeile wurde beim Kontext-Trim entfernt.
+        assert "Ø Confidence" in result
+        assert "Ø Ziel-Gewichtung" not in result
 
     def test_contains_kaufen_genehmigt_pct(self, tmp_path):
         """Kontext enthält Anteil KAUFEN-Empfehlungen die final genehmigt wurden."""
@@ -252,6 +257,111 @@ class TestFeedbackContent:
 
         # portfolio_fit_score und ziel_gewichtung_pct sind leer → N/A
         assert "N/A" in result
+
+
+# --------------------------------------------------------------------------- #
+# OPT E: Feedback-Kontext trimmen — kürzer aber Kalibrierung erhalten
+# --------------------------------------------------------------------------- #
+
+
+class TestFeedbackContextTrim:
+    """Testet dass der Kontext-Block gekürzt wurde, aber Kalibrierung erhalten bleibt."""
+
+    def test_kalibrierung_line_still_present(self, tmp_path):
+        """Die Kalibrierungs-Zeile ('Konfidenz-Kalibrierung') ist noch vorhanden."""
+        rows = [
+            _make_row(ticker="A", action="KAUFEN", confidence="4"),
+            _make_row(ticker="B", action="KAUFEN", confidence="3"),
+            _make_row(ticker="C", action="HALTEN", confidence="3"),
+            _make_row(ticker="D", action="VERKAUFEN", confidence="2"),
+            _make_row(ticker="E", action="KAUFEN", confidence="4"),
+        ]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        assert "Konfidenz-Kalibrierung" in result
+
+    def test_pro_aktion_gaps_still_present(self, tmp_path):
+        """Kalibrierung pro Aktion ist noch vorhanden (wenn genug Daten)."""
+        # 3+ pro Aktion um pro-Aktion-Kalibrierung zu triggern
+        rows = [
+            _make_row(ticker="A", action="KAUFEN", confidence="4", final_decision="GENEHMIGT"),
+            _make_row(ticker="B", action="KAUFEN", confidence="3", final_decision="GENEHMIGT"),
+            _make_row(ticker="C", action="KAUFEN", confidence="4", final_decision="ABGELEHNT"),
+            _make_row(ticker="D", action="HALTEN", confidence="3", final_decision="GENEHMIGT"),
+            _make_row(ticker="E", action="HALTEN", confidence="2", final_decision="ABGELEHNT"),
+            _make_row(ticker="F", action="HALTEN", confidence="3", final_decision="GENEHMIGT"),
+        ]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        # "Kalibrierung pro Aktion" Block sollte vorhanden sein
+        assert "Kalibrierung pro Aktion" in result
+
+    def test_rating_verteilung_removed(self, tmp_path):
+        """Die Rating-Verteilung (5-stufig) wurde entfernt."""
+        rows = [_make_row(ticker=f"T{i}") for i in range(5)]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        # Rating-Verteilung sollte NICHT mehr im Kontext sein
+        assert "Rating-Verteilung" not in result
+
+    def test_finale_entscheidungen_removed(self, tmp_path):
+        """Die 'Finale Entscheidungen: GENEHMIGT/ABGELEHNT'-Zeile wurde entfernt."""
+        rows = [_make_row(ticker=f"T{i}") for i in range(5)]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        # "Finale Entscheidungen" Zeile sollte entfernt sein
+        assert "Finale Entscheidungen:" not in result
+
+    def test_portfolio_fit_zeile_removed(self, tmp_path):
+        """Die 'Ø Portfolio-Fit-Score / Ø Ziel-Gewichtung'-Zeile wurde entfernt."""
+        rows = [_make_row(ticker=f"T{i}") for i in range(5)]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        assert "Ø Portfolio-Fit-Score" not in result
+        assert "Ø Ziel-Gewichtung" not in result
+
+    def test_kaufen_genehmigt_still_present(self, tmp_path):
+        """Die 'KAUFEN-Empfehlungen final genehmigt'-Zeile ist noch vorhanden."""
+        rows = [
+            _make_row(ticker="A", action="KAUFEN", final_decision="GENEHMIGT"),
+            _make_row(ticker="B", action="KAUFEN", final_decision="GENEHMIGT"),
+            _make_row(ticker="C", action="KAUFEN", final_decision="ABGELEHNT"),
+            _make_row(ticker="D", action="HALTEN", final_decision="GENEHMIGT"),
+            _make_row(ticker="E", action="KAUFEN", final_decision="GENEHMIGT"),
+        ]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        assert "KAUFEN-Empfehlungen final genehmigt" in result
+
+    def test_context_is_shorter(self, tmp_path):
+        """Der Kontext-Block hat weniger Zeilen als vorher (vor dem Trim)."""
+        rows = [_make_row(ticker=f"T{i}", action="KAUFEN", confidence="4") for i in range(6)]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        # Vor dem Trim hatte der Block 8 Zeilen (Header + 7 Statistik-Zeilen)
+        # + Kalibrierung pro Aktion + 3 Anweisungs-Zeilen
+        # Nach dem Trim: 5 Zeilen (Header + 4 Statistik-Zeilen) + pro Aktion + 3 Anweisungs-Zeilen
+        # D.h. mindestens 2 Zeilen weniger
+        lines = [ln for ln in result.split("\n") if ln.strip()]
+        # Vorher waren es mind. 8 Zeilen (ohne pro-Aktion), jetzt mind. 5 Zeilen
+        # Wir prüfen dass der Block merklich kürzer ist
+        assert len(lines) < 12, f"Context should be trimmed, got {len(lines)} lines"
+
+    def test_anweisungszeilen_still_present(self, tmp_path):
+        """Die abschließenden Anweisungszeilen sind noch vorhanden."""
+        rows = [_make_row(ticker=f"T{i}") for i in range(5)]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        assert "Berücksichtige diese Historie" in result
+        assert "Passe deine Konfidenz" in result
 
 
 # --------------------------------------------------------------------------- #

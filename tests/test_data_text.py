@@ -102,6 +102,110 @@ class TestAnalystTeamUsesDataText:
             assert roles == {"fundamental", "technik", "sentiment"}
 
 
+class TestAnalystTeamRoleSpecificFilter:
+    """Test: analyst_team mit data_text=None baut pro Analyst rollenspezifischen Text."""
+
+    def test_fundamental_gets_fundamentals_section(self):
+        """Fundamental-Analyst bekommt FUNDAMENTALS-Sektion im user_text."""
+        data = {
+            "ticker": "TEST",
+            "fundamentals": {"name": "Test Inc.", "sector": "Tech", "pe_ratio": 25.0},
+            "technicals": {"current_price": 100.0, "rsi14": 70.0},
+            "sentiment": {"positiv": 3, "negativ": 1, "neutral": 2},
+            "news": ["Good news"],
+        }
+
+        # LLM, der alle Antworten gibt und messages aufzeichnet
+        class _MultiCaptureLLM:
+            def __init__(self):
+                self.all_messages: list[list[dict]] = []
+
+            def chat(self, messages, temperature=0.3, **kwargs):
+                self.all_messages.append(messages)
+                if kwargs.get("as_structured") and kwargs.get("response_format"):
+                    from concilium.llm import StructuredChatResult
+                    return StructuredChatResult(
+                        text=json.dumps({"rolle": "Test", "stimmung": "neutral", "score": 3}),
+                        response_format_used=True,
+                    )
+                return json.dumps({"rolle": "Test", "stimmung": "neutral", "score": 3})
+
+        llm = _MultiCaptureLLM()
+
+        # analyst_team mit data_text=None → rollenspezifische Filter greifen
+        analyst_team(data, llm, data_text=None)
+
+        # Es sollten 3 Calls gemacht worden sein
+        assert len(llm.all_messages) == 3
+
+        # Sammle alle user-texte
+        user_texts = [msgs[1]["content"] for msgs in llm.all_messages]
+
+        # Fundamental-Analyst sollte FUNDAMENTALS im Text haben
+        fund_text = next(
+            (t for t in user_texts if "Fundamental" in t or "Marktkap" in t or "KGV" in t),
+            None,
+        )
+        assert fund_text is not None, "Fundamental-Analyst text not found"
+
+        # Sentiment-Analyst sollte SENTIMENT/Headlines im Text haben
+        sent_text = next(
+            (t for t in user_texts if "Sentiment" in t or "Headlines" in t or "Stimmung" in t),
+            None,
+        )
+        assert sent_text is not None, "Sentiment-Analyst text not found"
+
+        # Technical-Analyst sollte Technik-Indikatoren im Text haben
+        tech_text = next(
+            (t for t in user_texts if "SMA" in t or "RSI" in t or "Technisch" in t),
+            None,
+        )
+        assert tech_text is not None, "Technical-Analyst text not found"
+
+    def test_pipeline_passes_data_text_none_to_analyst_team(self):
+        """Pipeline ruft analyst_team ohne data_text auf (rollenspezifische Filter greifen)."""
+        from concilium.pipeline import run_pipeline
+
+        mock_analysts = {
+            "fundamental": {"stimmung": "bullish", "score": 4, "zusammenfassung": "Gut", "_raw": ""},
+            "technical": {"stimmung": "bullish", "score": 4, "zusammenfassung": "Gut", "_raw": ""},
+            "sentiment": {"stimmung": "neutral", "score": 3, "zusammenfassung": "Ok", "_raw": ""},
+        }
+
+        mock_data = {
+            "ticker": "TEST",
+            "fundamentals": {"name": "Test", "sector": "X"},
+            "technicals": {"current_price": 100.0},
+            "sentiment": {},
+            "news": [],
+            "macro": {},
+            "peers": [],
+            "history": [{"close": 100.0}],
+            "data_warnings": [],
+        }
+
+        with patch("concilium.pipeline.collect_ticker_data", return_value=mock_data), \
+             patch("concilium.pipeline.analyst_team", return_value=mock_analysts) as mock_at, \
+             patch("concilium.pipeline.debate", return_value={"bull": {}, "bear": {}}), \
+             patch("concilium.pipeline.trader", return_value={"aktion": "HALTEN"}), \
+             patch("concilium.pipeline.risk_manager", return_value={"risiko_score": 3, "empfehlung": "GENEHMIGT"}), \
+             patch("concilium.pipeline.fetch_portfolio_positions", return_value=[]), \
+             patch("concilium.pipeline.portfolio_fit_agent", return_value=None), \
+             patch("concilium.pipeline.trade_revision", return_value={"aktion": "HALTEN"}), \
+             patch("concilium.pipeline.portfolio_manager", return_value={"entscheidung": "GENEHMIGT", "confidence": 4}), \
+             patch("concilium.pipeline.build_feedback_context", return_value=""), \
+             patch("concilium.pipeline.build_reflection_context", return_value=""), \
+             patch("concilium.journal.append_decision"):
+            from unittest.mock import MagicMock
+            run_pipeline("TEST", llm=MagicMock(), ensemble=False)
+
+        # analyst_team sollte OHNE data_text aufgerufen werden (Default None)
+        assert mock_at.called
+        # data_text kwarg sollte None sein (Default, nicht der volle data_text)
+        data_text_kwarg = mock_at.call_args.kwargs.get("data_text")
+        assert data_text_kwarg is None
+
+
 class TestRiskManagerUsesDataText:
     """Test: risk_manager nutzt übergebenes data_text."""
 
