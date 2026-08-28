@@ -58,6 +58,12 @@ python main.py --evaluate
 # Watchlist analysieren (pflegt state/calibration.json automatisch vor)
 python main.py --watchlist
 
+# Tiefere Bull/Bear-Debatte über mehrere Runden (Ping-Pong, je 2 LLM-Calls pro Runde)
+python main.py --ticker AAPL --debate-rounds 2
+
+# Token-Usage-Report: aggregiert den LLM-Token-Verbrauch aus usage/usage.csv
+python main.py --usage
+
 # Ensemble-Trader deaktivieren / Anzahl Runs steuern
 python main.py --ticker AAPL --no-ensemble
 python main.py --ticker AAPL --ensemble-runs 5
@@ -112,7 +118,11 @@ von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
    - **Bear**: fokussiert auf Risiken (Bewertung, Konzentration, Zinslast, Makro, technische Gegenanzeichen)
 
    Beide liefern eine **Konfidenz (1-5)**, die an den Trader durchgereicht wird
-   (Nettoneigung Bull vs. Bear).
+   (Nettoneigung Bull vs. Bear). Über `--debate-rounds N` (Default 1) läuft die
+   Debatte als **Multi-Runden-Ping-Pong**: Ab Runde 2 bekommt jede Seite die
+   Argumentation der Gegenseite aus der Vorrunde mit der Anweisung, konkret
+   darauf einzugehen (zustimmen/widersprechen/ergänzen) statt zu wiederholen.
+   Das vertieft die Analyse, kostet aber 2 zusätzliche LLM-Calls pro Runde.
 
 3. **Trader** — schlägt eine konkrete Order vor, mit **5-stufiger Rating-Skala**:
    `STARK KAUFEN` / `KAUFEN` / `HALTEN` / `VERKAUFEN` / `STARK VERKAUFEN`
@@ -222,6 +232,42 @@ export LLM_API_KEY="sk-..."
 export LLM_MODEL="gpt-4o"
 python main.py --ticker AAPL
 ```
+
+## Token-Usage-Logging
+
+Concilium erfasst den **LLM-Token-Verbrauch** pro Analyse und protokolliert ihn in
+`usage/usage.csv` (`.gitignore`). Der `LLMClient` akkumuliert das `usage`-Feld aus
+jeder API-Antwort über alle Agenten-Calls einer Analyse; am Ende schreibt
+`run_pipeline` den kumulierten Verbrauch (Prompt-/Completion-/Total-Tokens) pro
+Ticker in die CSV.
+
+Den aggregierten Verbrauch rufst du mit `--usage` ab:
+
+```bash
+python main.py --usage
+```
+
+Ausgabe z. B.:
+
+```
+=== Token-Usage-Report ===
+Anzahl LLM-Calls:  12
+Summe Prompt-Tokens:      21.400
+Summe Completion-Tokens:  2.300
+Summe Total-Tokens:      23.700
+Eindeutige Ticker:        4
+
+Token-Verbrauch pro Ticker:
+  Ticker       Total-Tokens
+  ------------ -------------
+  AAPL                 6.100
+  NVDA                 5.900
+  ...
+```
+
+Das Logging ist **best effort** (crasht nie) und beeinflusst die Pipeline nicht.
+Die CSV füllt sich ab dem ersten echten LLM-Lauf; `--usage` zeigt vorher
+„Noch keine Usage-Daten erfasst."
 
 ## Hinweis zu externen Sentiment-Quellen
 
