@@ -13,6 +13,7 @@ from .evaluate import evaluate_journal
 from .llm import LLMClient
 from .pipeline import run_pipeline, run_portfolio
 from .report import generate_report, generate_track_record_report
+from .usage import summarize_usage
 
 # Platform-Guard: fcntl ist Linux/Unix-only; auf anderen Plattformen None.
 try:
@@ -227,6 +228,13 @@ def main(argv: list[str] | None = None) -> int:
         "--lookback kombiniert werden. Schließt sich mit --ticker/--tickers/--portfolio aus.",
     )
     parser.add_argument(
+        "--usage",
+        action="store_true",
+        help="Token-Usage-Report: aggregiert den LLM-Token-Verbrauch aus usage/usage.csv "
+        "und gibt eine Zusammenfassung aus. Führt NICHT die Pipeline aus. "
+        "Schließt sich mit --ticker/--tickers/--portfolio aus.",
+    )
+    parser.add_argument(
         "--lookback",
         type=int,
         default=90,
@@ -304,6 +312,40 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    if args.usage and (args.ticker or args.tickers or args.portfolio):
+        print(
+            "FEHLER: --usage kann nicht mit --ticker, --tickers oder --portfolio "
+            "kombiniert werden.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --usage ist eigenständig: Pipeline wird nicht ausgeführt
+    if args.usage:
+        usage_data = summarize_usage()
+        if usage_data.get("anzahl_calls", 0) == 0:
+            print("Noch keine Usage-Daten erfasst.")
+            return 0
+
+        print("=== Token-Usage-Report ===")
+        print()
+        print(f"Anzahl LLM-Calls:  {usage_data['anzahl_calls']}")
+        print(f"Summe Prompt-Tokens:      {usage_data['summe_prompt_tokens']:,}")
+        print(f"Summe Completion-Tokens:  {usage_data['summe_completion_tokens']:,}")
+        print(f"Summe Total-Tokens:       {usage_data['summe_total_tokens']:,}")
+        print(f"Eindeutige Ticker:        {usage_data['anzahl_ticker']}")
+        print()
+
+        ticker_tokens = usage_data.get("ticker_tokens", {})
+        if ticker_tokens:
+            print("Token-Verbrauch pro Ticker:")
+            print(f"  {'Ticker':<12} {'Total-Tokens':>14}")
+            print(f"  {'-' * 12} {'-' * 14}")
+            for ticker in sorted(ticker_tokens):
+                print(f"  {ticker:<12} {ticker_tokens[ticker]:>14,}")
+
+        return 0
 
     # --evaluate ist eigenständig: Pipeline wird nicht ausgeführt
     # (außer bei --watchlist, dort läuft evaluate vorn mit — siehe unten)
@@ -473,7 +515,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.ticker and not args.tickers and not args.portfolio:
         parser.error(
-            "--ticker, --tickers, --portfolio oder --watchlist ist erforderlich, "
+            "--ticker, --tickers, --portfolio, --usage oder --watchlist ist erforderlich, "
             "wenn --evaluate nicht gesetzt ist."
         )
 

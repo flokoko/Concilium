@@ -307,6 +307,18 @@ def run_pipeline(
             logger.warning("Entscheidung konnte nicht ins Journal geschrieben werden: %s", exc)
             result["_journal_written"] = False
 
+    # --- Feature 4: Token-Usage-Logging ---
+    # Nur im LLM-Modus: kumulativen Token-Verbrauch der gesamten Analyse
+    # in usage/usage.csv protokollieren. Crasht nie und beeinflusst die
+    # Pipeline nicht.
+    if llm is not None:
+        try:
+            from .usage import record_usage
+
+            record_usage(ticker, llm.total_usage)
+        except Exception as exc:  # noqa: BLE001 — nie crashen
+            logger.warning("Usage-Recording fehlgeschlagen: %s", exc)
+
     # --- Erfolgreicher Lauf: Checkpoint aufräumen ---
     # Im skip_final-Modus wird der Checkpoint NICHT aufgeräumt, da der
     # PM-Schritt noch aussteht (run_portfolio übernimmt die Endabwicklung).

@@ -83,6 +83,12 @@ class LLMClient:
             if fallback_model is not None
             else os.environ.get("LLM_FALLBACK_MODEL", "")
         ) or None
+        self.last_usage: dict | None = None
+        self.total_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
 
     def chat(
         self,
@@ -123,8 +129,10 @@ class LLMClient:
         if response_format is not None:
             payload["response_format"] = response_format
 
+        self.last_usage = None
+
         try:
-            text, response_format_used = self._send_with_retries(
+            text, response_format_used, usage = self._send_with_retries(
                 url, headers, payload, response_format=response_format,
             )
         except _RetryableHTTPError as exc:
@@ -140,7 +148,7 @@ class LLMClient:
                 fallback_payload = dict(payload)
                 fallback_payload["model"] = self.fallback_model
                 try:
-                    text, response_format_used = self._send_with_retries(
+                    text, response_format_used, usage = self._send_with_retries(
                         url, headers, fallback_payload,
                         is_fallback=True,
                         response_format=response_format,
@@ -156,6 +164,13 @@ class LLMClient:
                     f"LLM-Anfrage fehlgeschlagen nach {MAX_RETRIES + 1} Versuchen: {exc}"
                 ) from None
 
+        # usage erfassen (last_usage + kumulativ)
+        self.last_usage = usage
+        if usage is not None:
+            self.total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0) or 0
+            self.total_usage["completion_tokens"] += usage.get("completion_tokens", 0) or 0
+            self.total_usage["total_tokens"] += usage.get("total_tokens", 0) or 0
+
         if as_structured and response_format is not None:
             return StructuredChatResult(text=text, response_format_used=response_format_used)
         return text
@@ -168,7 +183,7 @@ class LLMClient:
         *,
         is_fallback: bool = False,
         response_format: dict[str, Any] | None = None,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, dict | None]:
         """Sendet den Request mit Retries bei 429/5xx.
 
         Löst _RetryableHTTPError aus, wenn alle Retries mit 429/5xx fehlschlagen
@@ -181,8 +196,9 @@ class LLMClient:
         die Methode wie bisher (retry + ggf. Fallback-Modell).
 
         Returns:
-            Tuple (text, response_format_used). response_format_used ist True,
-            wenn response_format erfolgreich gesendet wurde (oder None war).
+            Tuple (text, response_format_used, usage). response_format_used ist
+            True, wenn response_format erfolgreich gesendet wurde (oder None war).
+            usage ist das usage-dict aus der API-Antwort oder None.
         """
         model_label = payload.get("model", "?")
         last_error: str | None = None
@@ -220,12 +236,14 @@ class LLMClient:
                     resp2.raise_for_status()
                     data2 = resp2.json()
                     content2 = data2["choices"][0]["message"]["content"]
-                    return (content2 if content2 is not None else "", False)
+                    usage2 = data2.get("usage")
+                    return (content2 if content2 is not None else "", False, usage2)
 
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
-                return (content if content is not None else "", True)
+                usage = data.get("usage")
+                return (content if content is not None else "", True, usage)
 
             except requests.Timeout:
                 last_error = f"Timeout nach {TIMEOUT_SECONDS}s"
