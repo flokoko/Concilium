@@ -134,6 +134,14 @@ def run_pipeline(
         result["data"] = data
         result["ticker"] = data["ticker"]
 
+        # --- 1a. Token-Usage-Zähler pro Analyse zurücksetzen ---
+        # total_usage akkumuliert über alle LLM-Calls EINER Analyse. Bei Batch-
+        # Läufen (--tickers/--watchlist) wird run_pipeline pro Ticker aufgerufen;
+        # ohne Reset würde der Zähler über den ganzen Batch kumulieren statt pro
+        # Ticker. Nur im LLM-Modus relevant.
+        if llm is not None:
+            llm.total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
         # --- 1b. data_text einmal berechnen (für alle Agenten-Prompts) ---
         data_text = _build_data_text(data) if llm is not None else None
         result["_data_text"] = data_text
