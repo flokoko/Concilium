@@ -16,3 +16,4 @@ state/
 .pytest_cache/
 .ruff_cache/
 *.md.bak
+watchlist.txt
