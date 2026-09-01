@@ -32,7 +32,7 @@ class StructuredChatResult(NamedTuple):
 # ---------------------------------------------------------------------------
 
 DEFAULT_BASE_URL = "https://ollama.com/v1"
-DEFAULT_MODEL = "glm-5.2:cloud"
+DEFAULT_MODEL = "glm-5.3-flash"
 TIMEOUT_SECONDS = 120
 MAX_RETRIES = 2
 RETRY_BACKOFF = 2  # Sekunden
@@ -59,7 +59,7 @@ class LLMClient:
     Konfiguration via Umgebungsvariablen:
         LLM_BASE_URL  (default: https://ollama.com/v1)
         LLM_API_KEY   (default: aus OLLAMA_API_KEY)
-        LLM_MODEL     (default: glm-5.2:cloud)
+        LLM_MODEL     (default: glm-5.3-flash)
         LLM_FALLBACK_MODEL  (default: leer = kein Fallback)
 
     Fallback-Modell: Wenn der primäre Request nach allen Retries mit 429 oder

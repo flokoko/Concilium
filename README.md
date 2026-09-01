@@ -228,7 +228,7 @@ Die Agenten verwenden eine OpenAI-kompatible Schnittstelle, konfiguriert über U
 |---|---|---|
 | `LLM_BASE_URL` | `https://ollama.com/v1` | Base URL der OpenAI-kompatiblen API |
 | `LLM_API_KEY` | aus `OLLAMA_API_KEY` | API-Key für Authentifizierung |
-| `LLM_MODEL` | `glm-5.2` | Modellname (ohne `:cloud`-Suffix — das Suffix verursacht HTTP 400) |
+| `LLM_MODEL` | `glm-5.3-flash` | Modellname (ohne `:cloud`-Suffix — das Suffix verursacht HTTP 400) |
 | `LLM_FALLBACK_MODEL` | – | Fallback-Modell nach erschöpften Retries bei 429/5xx |
 | `CONCILIUM_CACHE_DIR` | `<repo>/cache` | Tages-Cache für Marktdaten; leer = deaktiviert |
 | `CONCILIUM_STATE_DIR` | `<repo>/state` | Checkpoint-Verzeichnis für `--resume`; leer = deaktiviert |
