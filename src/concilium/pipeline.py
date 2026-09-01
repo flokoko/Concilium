@@ -83,7 +83,7 @@ def run_pipeline(
 
     Schritte:
       1. Datensammlung (yfinance)
-      2. Analysten-Team (3 LLM-Calls) — nur wenn llm gegeben
+      2. Analysten-Team (4 LLM-Calls: Fundamental, Technik, Sentiment, Makro/News) — nur wenn llm gegeben
       3. Bull/Bear-Debatte (2 LLM-Calls) — nur wenn llm gegeben
       4. Trade-Vorschlag (1 LLM-Call oder Ensemble) — nur wenn llm gegeben
       5. Risk-Manager (1 LLM-Call) — nur wenn llm gegeben

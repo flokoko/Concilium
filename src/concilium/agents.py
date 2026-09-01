@@ -18,6 +18,7 @@ from .factors import compute_multi_factor_score
 from .llm import LLMClient, StructuredChatResult
 from .schemas import (
     ANALYST_FUNDAMENTAL_SCHEMA,
+    ANALYST_MACRO_NEWS_SCHEMA,
     ANALYST_SENTIMENT_SCHEMA,
     ANALYST_TECHNICAL_SCHEMA,
     DEBATE_SCHEMA,
@@ -30,7 +31,7 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 # Maximale Anzahl paralleler Threads für unabhängige LLM-Calls
-_MAX_PARALLEL = 3
+_MAX_PARALLEL = 4
 
 # ---------------------------------------------------------------------------
 # Prompt-Templates (alle auf Deutsch)
@@ -81,6 +82,34 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
   "score": 1-5,
   "zusammenfassung": "2-4 Sätze Zusammenfassung auf Deutsch",
   "dominant": "positiv" | "negativ" | "neutral"
+}
+"""
+
+SYSTEM_MACRO_NEWS = """\
+Du bist ein Makro/News-Analyst. Du bewertest das MAKRO-UMFELD und die \
+NEWS-HEADLINES für eine Aktie.
+
+Makro-Kennzahlen: 10y US Treasury Yield (und Zinstrend), VIX, Ölpreis (WTI), \
+EURUSD, S&P 500 Trend und S&P 500 KGV. News: Headlines des Tickers samt \
+positiv/negativ/neutral-Zählung und dominanter Stimmung.
+
+Dein Fokus:
+- Wie wirkt das Makro-Umfeld (Zinsniveau und Zinstrend, Risiko-Regime laut VIX, \
+Ölpreis, EURUSD, Gesamtmarkt-Trend, Bewertung des Gesamtmarkts) auf DIESEN \
+Ticker und seinen Sektor? Berücksichtige den Sektor der Aktie bei der \
+Einordnung (z.B. Zinssensitivität, Rohstoff- und Währungsexposure).
+- Welche Headlines sind MATERIAL (kursrelevant für den Ticker) und welche \
+sind Rauschen? Gewichte sie entsprechend.
+- Setze Makro- und News-Eindrücke zu einer Gesamt-Einschätzung zusammen.
+
+Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
+{
+  "rolle": "Makro/News-Analyst",
+  "stimmung": "bullish" | "neutral" | "bearish",
+  "score": 1-5,
+  "zusammenfassung": "2-4 Sätze Zusammenfassung auf Deutsch",
+  "makro_einschaetzung": "Kurze Bewertung des Makro-Umfelds für diesen Ticker",
+  "relevante_headlines": "Die materialsten Headlines mit kurzer Bewertung"
 }
 """
 
@@ -323,6 +352,9 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
               Makro-Zinstrend (kurz). Keine FUNDAMENTALS- oder SENTIMENT-Sektion.
             - ``"sentiment"``: Aktien-Identität, SENTIMENT-Sektion, Headlines.
               Keine FUNDAMENTALS- oder TECHNIK-Sektion.
+            - ``"macro_news"``: Aktien-Identität, MAKRO-Sektion (vollständig),
+              SENTIMENT-Sektion und Headlines. Keine FUNDAMENTALS- oder
+              TECHNIK-Sektion, kein Währungsrisiko-Block.
     """
     f = data.get("fundamentals", {})
     t = data.get("technicals", {})
@@ -443,9 +475,9 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
         ])
 
     # Makro/Zins-Daten — für alle (vollständig), fundamental (vollständig),
-    # technik (nur Zinstrend-Kurzform), sentiment (keine)
+    # macro_news (vollständig), technik (nur Zinstrend-Kurzform), sentiment (keine)
     if macro:
-        if role in ("alle", "fundamental"):
+        if role in ("alle", "fundamental", "macro_news"):
             lines.append("")
             lines.append("=== MAKRO / ZINSEN ===")
             lines.append(f"  10y US Treasury Yield: {_fmt_num(macro.get('us_10y_yield'))} %")
@@ -495,8 +527,8 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
             if macro:
                 lines.append(f"  S&P 500 KGV (Benchmark): {_fmt_num(macro.get('sp500_pe'))}")
 
-    # SENTIMENT — für sentiment und alle
-    if role in ("alle", "sentiment"):
+    # SENTIMENT — für sentiment, macro_news und alle
+    if role in ("alle", "sentiment", "macro_news"):
         lines.append("")
         lines.append("=== SENTIMENT ===")
         lines.append(f"  Positive Headlines: {s.get('positiv', 0)}")
@@ -653,10 +685,11 @@ def analyst_team(
     llm: LLMClient,
     data_text: str | None = None,
 ) -> dict[str, Any]:
-    """Ruft 3 Analysten-Rollen auf (Fundamental, Technical, Sentiment).
+    """Ruft 4 Analysten-Rollen auf (Fundamental, Technical, Sentiment, Macro/News).
 
-    Returns dict mit 'fundamental', 'technical', 'sentiment' und 'technicals' Schlüsseln.
-    Die 3 Analysten-Calls werden PARALLEL über ThreadPoolExecutor ausgeführt.
+    Returns dict mit 'fundamental', 'technical', 'sentiment', 'macro_news' und
+    'technicals' Schlüsseln.
+    Die 4 Analysten-Calls werden PARALLEL über ThreadPoolExecutor ausgeführt.
     Bei einem Teilfehler wird eine Warnung geloggt und für den betroffenen key
     ein Fehlereintrag geliefert — die Pipeline crasht nicht.
 
@@ -679,6 +712,7 @@ def analyst_team(
         "fundamental": "fundamental",
         "technical": "technik",
         "sentiment": "sentiment",
+        "macro_news": "macro_news",
     }
 
     # (key, system_prompt, response_format) — strukturierte Schemas pro Rolle
@@ -686,6 +720,7 @@ def analyst_team(
         ("fundamental", SYSTEM_FUNDAMENTAL, ANALYST_FUNDAMENTAL_SCHEMA),
         ("technical", SYSTEM_TECHNICAL, ANALYST_TECHNICAL_SCHEMA),
         ("sentiment", SYSTEM_SENTIMENT, ANALYST_SENTIMENT_SCHEMA),
+        ("macro_news", SYSTEM_MACRO_NEWS, ANALYST_MACRO_NEWS_SCHEMA),
     ]
 
     results: dict[str, Any] = {}
@@ -709,7 +744,7 @@ def analyst_team(
                 logger.warning("Analyst '%s' fehlgeschlagen: %s", key, exc)
                 results[key] = {"_raw": "", "fehler": str(exc)}
 
-    # Sicherstellen, dass alle 3 Keys vorhanden sind (defensiv)
+    # Sicherstellen, dass alle 4 Keys vorhanden sind (defensiv)
     for key, _, _ in analyst_specs:
         results.setdefault(key, {"_raw": "", "fehler": "nicht ausgeführt"})
 
@@ -801,7 +836,12 @@ def _debate_skew_text(bull_conf: int | None, bear_conf: int | None) -> str:
 def _analyst_summary_text(analysts: dict[str, Any]) -> str:
     """Kompakte Zusammenfassung aller Analysten für Debatte/Trader."""
     parts = []
-    for role_key, label in [("fundamental", "Fundamental"), ("technical", "Technik"), ("sentiment", "Sentiment")]:
+    for role_key, label in [
+        ("fundamental", "Fundamental"),
+        ("technical", "Technik"),
+        ("sentiment", "Sentiment"),
+        ("macro_news", "Makro/News"),
+    ]:
         a = analysts.get(role_key, {})
         parts.append(
             f"{label}-Analyst: Stimmung={a.get('stimmung', 'N/A')}, "

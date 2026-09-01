@@ -448,6 +448,8 @@ class TestAnalystTeamStructured:
                          "trend": "seitwärts", "signale": "RSI normal"}),
             json.dumps({"rolle": "Sentiment-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Positiv",
                          "dominant": "positiv"}),
+            json.dumps({"rolle": "Makro/News-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Makro ruhig",
+                         "makro_einschaetzung": "Zinsen stabil", "relevante_headlines": "keine material"}),
         ]
         llm = _AnalystStructuredLLM(responses)
         data = {
@@ -461,9 +463,12 @@ class TestAnalystTeamStructured:
         _assert_has_keys(result["fundamental"], ["stimmung", "score", "zusammenfassung"])
         _assert_has_keys(result["technical"], ["stimmung", "score", "zusammenfassung"])
         _assert_has_keys(result["sentiment"], ["stimmung", "score", "zusammenfassung"])
+        _assert_has_keys(result["macro_news"], ["stimmung", "score", "zusammenfassung",
+                                                 "makro_einschaetzung", "relevante_headlines"])
         assert result["fundamental"]["stimmung"] == "bullish"
         assert result["technical"]["stimmung"] == "neutral"
         assert result["sentiment"]["stimmung"] == "bullish"
+        assert result["macro_news"]["stimmung"] == "neutral"
 
     def test_structured_consistency_warning_appended(self):
         """Bei inkonsistenter Stimmung/Score wird konsistenz_warnung angehängt."""
@@ -473,6 +478,7 @@ class TestAnalystTeamStructured:
             json.dumps({"rolle": "Fundamental-Analyst", "stimmung": "bullish", "score": 1, "zusammenfassung": "Inkonsistent"}),
             json.dumps({"rolle": "Technik-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"}),
             json.dumps({"rolle": "Sentiment-Analyst", "stimmung": "bearish", "score": 5, "zusammenfassung": "Inkonsistent"}),
+            json.dumps({"rolle": "Makro/News-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"}),
         ]
         llm = _AnalystStructuredLLM(responses)
         data = {
@@ -498,7 +504,7 @@ class _AnalystStructuredLLM:
     """Mock-LLM für analyst_team: dispatcht basierend auf System-Prompt."""
 
     def __init__(self, responses: list[str]):
-        # responses: [fundamental, technical, sentiment]
+        # responses: [fundamental, technical, sentiment, macro_news]
         self._responses = responses
 
     def chat(self, messages, temperature=0.3, **kwargs):
@@ -507,6 +513,8 @@ class _AnalystStructuredLLM:
             text = self._responses[0]
         elif "technisch" in system:
             text = self._responses[1]
+        elif "Makro" in system:
+            text = self._responses[3]
         elif "Sentiment" in system:
             text = self._responses[2]
         else:

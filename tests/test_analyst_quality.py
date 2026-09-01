@@ -373,10 +373,11 @@ class TestAnalystTeamConsistencyWarning:
         assert "konsistenz_warnung" in result["sentiment"]
         assert result["sentiment"]["konsistenz_warnung"] != ""
 
-    def test_all_three_analysts_present(self):
-        """Alle 3 Analysten-Keys sind vorhanden."""
+    def test_all_four_analysts_present(self):
+        """Alle 4 Analysten-Keys sind vorhanden."""
         result = analyst_team(_MINIMAL_DATA, _FakeLLM())
         assert "fundamental" in result
         assert "technical" in result
         assert "sentiment" in result
+        assert "macro_news" in result
         assert "technicals" in result

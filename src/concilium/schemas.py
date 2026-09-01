@@ -194,6 +194,21 @@ ANALYST_SENTIMENT_SCHEMA: dict[str, Any] = {
     },
 }
 
+ANALYST_MACRO_NEWS_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "analyst_macro_news",
+        "schema": {
+            **_ANALYST_BASE,
+            "properties": {
+                **_ANALYST_BASE["properties"],
+                "makro_einschaetzung": {"type": "string"},
+                "relevante_headlines": {"type": "string"},
+            },
+        },
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Selbst-enthaltene Schema-Validierung (kein externes Paket)

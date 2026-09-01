@@ -191,7 +191,7 @@ def _management_summary(
     # Analysten-Konsistenz-Warnungen
     analysts = result.get("analysts") or {}
     if isinstance(analysts, dict):
-        for key in ("fundamental", "technical", "sentiment"):
+        for key in ("fundamental", "technical", "sentiment", "macro_news"):
             a = analysts.get(key)
             if isinstance(a, dict):
                 warn = a.get("konsistenz_warnung")
@@ -701,13 +701,34 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append("| Rolle | Stimmung | Score | Zusammenfassung |")
         lines.append("|---|---|---|---|")
         analysts = result["analysts"]
-        for key, label in [("fundamental", "Fundamental"), ("technical", "Technik"), ("sentiment", "Sentiment")]:
+        for key, label in [
+            ("fundamental", "Fundamental"),
+            ("technical", "Technik"),
+            ("sentiment", "Sentiment"),
+            ("macro_news", "Makro/News"),
+        ]:
             a = analysts.get(key, {})
             lines.append(
                 f"| {label} | {a.get('stimmung', 'N/A')} | {a.get('score', 'N/A')} | "
                 f"{str(a.get('zusammenfassung', a.get('_raw', 'N/A')))[:200]} |"
             )
         lines.append("")
+
+        # Makro/News-Einschätzung (nur wenn der 4. Analyst Daten geliefert hat)
+        macro_news = analysts.get("macro_news")
+        if isinstance(macro_news, dict) and (
+            macro_news.get("makro_einschaetzung")
+            or macro_news.get("relevante_headlines")
+        ):
+            lines.append("### Makro/News-Einschätzung")
+            lines.append("")
+            makro = macro_news.get("makro_einschaetzung")
+            if makro and str(makro).strip():
+                lines.append(f"**Makro-Umfeld:** {makro}")
+            headlines = macro_news.get("relevante_headlines")
+            if headlines and str(headlines).strip():
+                lines.append(f"**Relevante Headlines:** {headlines}")
+            lines.append("")
 
         # Debatte
         section_num += 1
