@@ -732,6 +732,10 @@ class TestCLIEvaluate:
 
     def test_evaluate_writes_report(self, tmp_path, monkeypatch, capsys):
         """--evaluate mit temporärer Journal-Datei → Report auf stdout + Datei geschrieben."""
+        # Isolation: _write_calibration_json darf NICHT die echte
+        # state/calibration.json überschreiben (die gehört dem echten
+        # --evaluate-Lauf, nicht den Tests).
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
         rows = [
             _make_journal_row(ticker="AAPL", action="KAUFEN", confidence="4"),
         ]
@@ -753,8 +757,10 @@ class TestCLIEvaluate:
         # stderr enthält den Speicherpfad
         assert "Track-Record-Report gespeichert" in captured.err
 
-    def test_evaluate_no_llm_flag(self, tmp_path):
+    def test_evaluate_no_llm_flag(self, tmp_path, monkeypatch):
         """--evaluate mit --no-llm → keine LLM-Zusammenfassung."""
+        # Isolation: calibration.json nur in tmp_path schreiben
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
         rows = [
             _make_journal_row(ticker="AAPL", action="KAUFEN", confidence="4"),
         ]
@@ -777,6 +783,8 @@ class TestCLIEvaluate:
         """--evaluate ohne Pfad → Default journal/decisions.csv wird verwendet."""
         # Arbeitsverzeichnis auf tmp_path setzen
         monkeypatch.chdir(tmp_path)
+        # Isolation: calibration.json nur im tmp-state schreiben
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
         os.makedirs("journal", exist_ok=True)
         from concilium.journal import JOURNAL_HEADER
 

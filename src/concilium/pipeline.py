@@ -20,7 +20,14 @@ from .checkpoint import clear_checkpoint, load_checkpoint, save_checkpoint
 from .data import collect_ticker_data
 from .feedback import build_feedback_context, build_reflection_context
 from .llm import LLMClient
-from .portfolio_fit import fetch_portfolio_positions, portfolio_fit_agent
+
+# Import-Hinweis: _dampen_ziel_gewichtung wird bewusst direkt importiert —
+# die Dämpfung ist ein expliziter, getesteter Pipeline-Schritt (siehe unten).
+from .portfolio_fit import (  # noqa: F401 — _dampen_ziel_gewichtung: siehe Schritt 5b
+    _dampen_ziel_gewichtung,
+    fetch_portfolio_positions,
+    portfolio_fit_agent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +259,38 @@ def run_pipeline(
             logger.warning("Portfolio-Fit fehlgeschlagen: %s", exc)
             result["portfolio_fit"] = None
         _save_step(result, ticker, "portfolio_fit")
+
+    # --- 5b'. Kalibrierungs-gestützte Dämpfung der Ziel-Gewichtung ---
+    # Der Track-Record zeigt, dass das System überkonfident ist (Konfidenz 4-5,
+    # aber ~29-34% Hit-Rate). Die LLM-empfohlene Ziel-Gewichtung wird daher
+    # deterministisch mit der historischen Trefferquote der Aktion skaliert.
+    # Original wird in ziel_gewichtung_original erhalten; die Dämpfung darf
+    # NIEMALS crashen (bei Exception läuft die Pipeline unverändert weiter).
+    pf_for_dampen = result.get("portfolio_fit")
+    if isinstance(pf_for_dampen, dict):
+        try:
+            aktion = (trade or {}).get("aktion")
+            if aktion:
+                pf_for_dampen["ziel_gewichtung_original"] = pf_for_dampen.get(
+                    "ziel_gewichtung_pct"
+                )
+                ziel = pf_for_dampen.get("ziel_gewichtung_pct")
+                if isinstance(ziel, int | float) and not isinstance(ziel, bool):
+                    gedämpft = _dampen_ziel_gewichtung(float(ziel), str(aktion))
+                    if gedämpft is not None:
+                        pf_for_dampen["ziel_gewichtung_pct"] = gedämpft
+                        pf_for_dampen["ziel_gewichtung_gedämpft"] = True
+                        logger.info(
+                            "Ziel-Gewichtung kalibrierungs-gedämpft (%s): "
+                            "%.1f → %.1f",
+                            aktion,
+                            float(ziel),
+                            gedämpft,
+                        )
+        except Exception as exc:  # noqa: BLE001 — nie crashen
+            logger.warning(
+                "Dämpfung der Ziel-Gewichtung fehlgeschlagen: %s", exc
+            )
 
     # --- 5c. Trade-Revision (2nd Pass) --- #
     if not _is_completed(result, "trade_revision"):

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import urllib.request
+from datetime import datetime, timedelta
 from typing import Any
 
 from .agents import _build_data_text, _call_agent
@@ -20,6 +21,15 @@ from .data import _get_cache_dir, _get_today_key
 from .llm import LLMClient
 
 logger = logging.getLogger(__name__)
+
+# Maximales Alter der Kalibrierungs-JSON in Tagen (danach keine Dämpfung).
+# Gleicher Wert wie agents.py::_ENSEMBLE_CALIBRATION_MAX_AGE_DAYS — hier
+# dupliziert, um KEINEN Import aus agents.py zu benötigen (Zirkularität).
+_CALIBRATION_MAX_AGE_DAYS = 7
+
+# Untergrenze des Dämpfungsfaktors: Eine Aktion mit 0% Hit-Rate wird stark
+# reduziert, geht aber nicht komplett auf 0.
+_DAMPEN_FAKTOR_MIN = 0.3
 
 # ---------------------------------------------------------------------------
 # Konstanten
@@ -509,3 +519,112 @@ def portfolio_fit_agent(
     result["portfolio_daten_verfuegbar"] = portfolio_daten_verfuegbar
     result["waehrungsrisiko_score"] = waehrungs_score
     return result
+
+
+# ---------------------------------------------------------------------------
+# Kalibrierungs-gestützte Dämpfung der Ziel-Gewichtung
+# ---------------------------------------------------------------------------
+
+
+def _load_action_hit_rate(action: str) -> float | None:
+    """Liest die Hit-Rate einer Aktion aus state/calibration.json (netzfrei).
+
+    Liest die gleiche JSON, die ``--evaluate`` schreibt, aber OHNE Import
+    aus agents.py oder feedback.py (Zirkularität vermeiden) — die Logik ist
+    analog zu agents.py::_load_ensemble_weights implementiert.
+
+    Args:
+        action: Aktion, deren Hit-Rate geholt wird ("KAUFEN", "HALTEN",
+            "VERKAUFEN").
+
+    Returns:
+        Hit-Rate als float, oder None bei:
+        - fehlender Datei
+        - ungültigem JSON
+        - fehlendem/ungültigem erstellt_am
+        - Stand älter als _CALIBRATION_MAX_AGE_DAYS (7 Tage)
+        - fehlender Aktion in nach_aktion
+        - fehlender/nicht-numerischer hit_rate
+        Crasht NIE.
+    """
+    try:
+        # State-Dir auflösen (gleicher Mechanismus wie agents.py
+        # _ensemble_state_dir): CONCILIUM_STATE_DIR-Env > 'state'.
+        env = os.environ.get("CONCILIUM_STATE_DIR")
+        state_dir = env if env else "state"
+        cal_path = os.path.join(state_dir, "calibration.json")
+        if not os.path.isfile(cal_path):
+            return None
+
+        with open(cal_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return None
+
+        # Alters-Check: erstellt_am muss vorhanden und nicht zu alt sein
+        erstellt_am = data.get("erstellt_am")
+        if not isinstance(erstellt_am, str) or not erstellt_am.strip():
+            return None
+        try:
+            erstellt_dt = datetime.fromisoformat(erstellt_am)
+        except (ValueError, TypeError):
+            return None
+        age = datetime.now() - erstellt_dt
+        if age > timedelta(days=_CALIBRATION_MAX_AGE_DAYS):
+            logger.debug(
+                "Kalibrierungs-JSON älter als %d Tage — keine Dämpfung der "
+                "Ziel-Gewichtung",
+                _CALIBRATION_MAX_AGE_DAYS,
+            )
+            return None
+
+        # Hit-Rate der Aktion extrahieren
+        nach_aktion = data.get("nach_aktion")
+        if not isinstance(nach_aktion, dict):
+            return None
+        adata = nach_aktion.get(action)
+        if not isinstance(adata, dict):
+            return None
+        hit_rate = adata.get("hit_rate")
+        if hit_rate is None or not isinstance(hit_rate, int | float) or isinstance(
+            hit_rate, bool
+        ):
+            return None
+        return float(hit_rate)
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.debug("Hit-Rate für '%s' konnte nicht geladen werden: %s", action, exc)
+        return None
+
+
+def _dampen_ziel_gewichtung(ziel_gewichtung: float, action: str) -> float | None:
+    """Dämpft eine Ziel-Gewichtung anhand der Kalibrierungs-Hit-Rate.
+
+    Das System ist historisch überkonfident (z. B. KAUFEN mit 52% Hit-Rate
+    trotz ~79% Ø-Confidence). Die LLM-empfohlene Ziel-Gewichtung wird daher
+    deterministisch mit der historischen Trefferquote der Aktion skaliert:
+
+        faktor = clamp(hit_rate, 0.3, 1.0)
+        gedämpft = round(ziel_gewichtung * faktor, 1)
+
+    - KAUFEN  (hit_rate 0.52) → Faktor 0.52
+    - HALTEN  (hit_rate 0.143) → Faktor 0.3 (Untergrenze)
+    - VERKAUFEN (hit_rate 0.0) → Faktor 0.3 (Untergrenze)
+
+    Args:
+        ziel_gewichtung: Empfohlene Ziel-Gewichtung in % des Portfolios.
+        action: Die Aktion aus dem Trade ("KAUFEN", "HALTEN", "VERKAUFEN").
+
+    Returns:
+        Gedämpfte Ziel-Gewichtung (float, 1 Dezimalstelle) oder None, wenn
+        keine Kalibrierungsdaten verfügbar sind (Signal: nichts gedämpft).
+        Crasht NIE.
+    """
+    try:
+        hit_rate = _load_action_hit_rate(action)
+        if hit_rate is None:
+            return None
+        faktor = min(max(float(hit_rate), _DAMPEN_FAKTOR_MIN), 1.0)
+        return round(float(ziel_gewichtung) * faktor, 1)
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.debug("Ziel-Gewichtung konnte nicht gedämpft werden: %s", exc)
+        return None

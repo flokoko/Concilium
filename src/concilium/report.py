@@ -821,7 +821,11 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             lines.append("")
             pf_score = portfolio_fit.get("portfolio_fit_score", "N/A")
             lines.append(f"**Portfolio-Fit-Score:** {pf_score} / 5")
-            lines.append(f"**Ziel-Gewichtung:** {portfolio_fit.get('ziel_gewichtung_pct', 'N/A')} % des Portfolios")
+            ziel_zeile = f"**Ziel-Gewichtung:** {portfolio_fit.get('ziel_gewichtung_pct', 'N/A')} % des Portfolios"
+            if portfolio_fit.get("ziel_gewichtung_gedämpft"):
+                original = portfolio_fit.get("ziel_gewichtung_original", "N/A")
+                ziel_zeile += f" (nach Kalibrierung gedämpft, original {original})"
+            lines.append(ziel_zeile)
             lines.append(f"**Konzentrationsrisiko:** {portfolio_fit.get('konzentrationsrisiko_bewertung', 'N/A')}")
             lines.append(f"**Sektor-/Branchen-Overlap:** {portfolio_fit.get('sektor_overlap_bewertung', 'N/A')}")
             lines.append(f"**Begründung:** {portfolio_fit.get('begründung', 'N/A')}")

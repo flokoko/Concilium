@@ -38,6 +38,7 @@ JOURNAL_HEADER = [
     "ensemble_confidence",
     "portfolio_fit_score",
     "ziel_gewichtung_pct",
+    "ziel_gewichtung_original",
 ]
 
 
@@ -176,6 +177,7 @@ def append_decision(
         portfolio_fit = result.get("portfolio_fit") or {}
         portfolio_fit_score = portfolio_fit.get("portfolio_fit_score", "")
         ziel_gewichtung_pct = portfolio_fit.get("ziel_gewichtung_pct", "")
+        ziel_gewichtung_original = portfolio_fit.get("ziel_gewichtung_original", "")
 
         row = {
             "timestamp": timestamp,
@@ -192,6 +194,7 @@ def append_decision(
             "ensemble_confidence": ensemble_confidence,
             "portfolio_fit_score": portfolio_fit_score,
             "ziel_gewichtung_pct": ziel_gewichtung_pct,
+            "ziel_gewichtung_original": ziel_gewichtung_original,
         }
 
         # Datei existiert? → Header nur schreiben wenn neu
