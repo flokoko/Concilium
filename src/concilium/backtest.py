@@ -1,6 +1,12 @@
 """Backtest-Modul — einfacher Signalproxy (SMA50 vs SMA200 Trend + RSI).
 
 Berechnet kumulierte Rendite der Signal-Strategie vs Buy&Hold über die Historie.
+
+Look-ahead-Konvention (Phase 5): Signale werden aus dem Close des Signal-Tags
+berechnet und sind daher erst NACH Handelsschluss bekannt. Der realisierbare
+Einstieg ist folgerichtig der Close des NÄCHSTEN Handelstags — sowohl in der
+Win-Rate-Berechnung als auch im ``entry_close``-Feld der Signal-Übergänge.
+Die Strategie-Rendite nutzt bereits ``signal.shift(1)`` und war damit korrekt.
 """
 
 from __future__ import annotations
@@ -11,6 +17,46 @@ from typing import Any
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def _check_lookahead_bias(
+    df: pd.DataFrame,
+    signal_positions: list[int],
+    entry_positions: list[int],
+) -> bool:
+    """Prüft deterministisch, dass kein Trade den Signal-Tag als Entry nutzt.
+
+    Look-ahead-Bias-Check: Das Signal wird aus dem Close des Signal-Tags
+    berechnet und ist erst nach Handelsschluss bekannt — der Einstiegskurs
+    muss daher von einem Tag NACH dem Signal-Tag stammen.
+
+    Args:
+        df: Kurs-DataFrame (nur zur Längen-Validierung genutzt).
+        signal_positions: Integer-Positionen der Signal-Tags (Long-Einstiege).
+        entry_positions: Integer-Positionen der zugehörigen Entry-Tags.
+
+    Returns:
+        True, wenn für jeden Trade gilt: Entry-Position strikt nach Signal-
+        Position (und beide im gültigen Bereich). False bei Verstoß,
+        Längen-Mismatch oder ungültigen Positionen. Leere Trade-Listen
+        gelten als bestanden (nichts zu prüfen).
+    """
+    try:
+        if len(signal_positions) != len(entry_positions):
+            return False
+        n_rows = len(df)
+        for sig_pos, entry_pos in zip(signal_positions, entry_positions, strict=True):
+            if sig_pos is None or entry_pos is None:
+                return False
+            sig_i, entry_i = int(sig_pos), int(entry_pos)
+            if not (0 <= sig_i < n_rows) or not (0 <= entry_i < n_rows):
+                return False
+            if entry_i <= sig_i:
+                return False
+        return True
+    except (TypeError, ValueError) as exc:
+        logger.warning("Look-ahead-Bias-Check konnte nicht ausgeführt werden: %s", exc)
+        return False
 
 
 def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
@@ -36,6 +82,11 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
             "max_drawdown_pct": None,
             "win_rate_pct": None,
             "anzahl_trades": 0,
+            "lookahead_bias_geprueft": False,
+            "lookahead_bias_hinweis": (
+                f"Zu wenig Historie ({len(history)} Tage, min. 200 nötig) — "
+                "Look-ahead-Check nicht durchgeführt."
+            ),
             "hinweis": f"Zu wenig Historie ({len(history)} Tage, min. 200 nötig).",
         }
 
@@ -81,6 +132,10 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
             "max_drawdown_pct": None,
             "win_rate_pct": None,
             "anzahl_trades": 0,
+            "lookahead_bias_geprueft": False,
+            "lookahead_bias_hinweis": (
+                "SMA200 konnte nicht berechnet werden — Look-ahead-Check nicht durchgeführt."
+            ),
             "hinweis": "SMA200 konnte nicht berechnet werden.",
         }
 
@@ -88,14 +143,25 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
     bh_final = df["cum_buyhold"].iloc[-1] / df["cum_buyhold"].iloc[valid_start] - 1
 
     # Signal-Übergänge
+    # Das Signal-Datum bleibt der Signal-Tag; ``close`` zeigt weiterhin den
+    # Close des Signal-Tags (rückwärtskompatibel). Neu ist ``entry_close``:
+    # der realisierbare Einstiegskurs — der Close des NÄCHSTEN Handelstags,
+    # da das Signal (aus dem Close des Signal-Tags berechnet) erst nach
+    # Handelsschluss bekannt ist. Bei FLAT-Übergängen ist entry_close None.
     df["signal_change"] = df["signal"].diff()
     signal_dates = []
     for idx, row in df.iterrows():
         if pd.notna(row.get("signal_change")) and row["signal_change"] != 0:
+            entry_close_val: float | None = None
+            if row["signal"] == 1 and idx + 1 < len(df):
+                next_close = df["close"].iloc[idx + 1]
+                if pd.notna(next_close):
+                    entry_close_val = float(next_close)
             signal_dates.append({
                 "date": row["date"],
                 "aktion": "LONG" if row["signal"] == 1 else "FLAT",
                 "close": round(float(row["close"]), 2) if pd.notna(row["close"]) else None,
+                "entry_close": round(entry_close_val, 2) if entry_close_val is not None else None,
             })
 
     # --- Neue Kennzahlen: Sharpe, Max-Drawdown, Win-Rate ---
@@ -120,37 +186,64 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
             max_drawdown_pct = round(float(max_dd) * 100, 2)
 
     # Win-Rate: Long-Signal-Abschnitte bis zum nächsten Signalwechsel
+    # Look-ahead-frei: Das Signal beruht auf dem Close des Signal-Tags und ist
+    # erst NACH Handelsschluss bekannt. Der Einstiegskurs ist daher der Close
+    # des NÄCHSTEN Handelstags (nicht der unrealisierbare Close des Signal-Tags).
+    # Der Ausstieg bleibt der Close des Signalwechsel-Tags bzw. der letzte Close.
     signal_series = df["signal"].iloc[valid_start:]
     trades: list[bool] = []  # True = positiver Trade
+    signal_positions: list[int] = []  # Integer-Position der Signal-Tags
+    entry_positions: list[int] = []  # Integer-Position der Entry-Tags (Folgetag)
     in_long = False
-    entry_idx = None
+    entry_pos: int | None = None
 
-    for idx in range(len(signal_series)):
-        sig = signal_series.iloc[idx]
+    for rel_pos in range(len(signal_series)):
+        sig = signal_series.iloc[rel_pos]
+        # WICHTIG: signal_series ist ein Slice ab valid_start — die Loop-
+        # Position ist relativ, die absolute df-Position kommt aus dem
+        # (Range-)Index des Slices (so auch im Original via .index[idx]).
+        pos = int(signal_series.index[rel_pos])
         if sig == 1 and not in_long:
             in_long = True
-            entry_idx = signal_series.index[idx]
+            signal_positions.append(pos)
+            if pos + 1 < len(df):
+                entry_pos = pos + 1
+                entry_positions.append(entry_pos)
+            else:
+                # Signal am letzten Tag: kein realisierbarer Folgetags-Close,
+                # die Position ist noch nicht eingestiegen → kein Trade.
+                entry_pos = None
         elif sig == 0 and in_long:
-            # Long-Sektion endet — prüfe ob netto positiv
-            if entry_idx is not None:
-                entry_close = df.loc[entry_idx, "close"]
-                exit_close = df.loc[signal_series.index[idx], "close"]
+            # Long-Sektion endet — prüfe ob netto positiv (Entry = Folgetags-Close)
+            if entry_pos is not None:
+                entry_close = df["close"].iloc[entry_pos]
+                exit_close = df["close"].iloc[pos]
                 if pd.notna(entry_close) and pd.notna(exit_close) and entry_close > 0:
-                    trades.append(exit_close > entry_close)
+                    trades.append(float(exit_close) > float(entry_close))
                 anzahl_trades += 1
             in_long = False
-            entry_idx = None
+            entry_pos = None
 
-    # Offene Position am Ende abschließen (falls noch in Long)
-    if in_long and entry_idx is not None:
-        entry_close = df.loc[entry_idx, "close"]
+    # Offene Position am Ende abschließen (falls noch in Long und eingestiegen)
+    if in_long and entry_pos is not None:
+        entry_close = df["close"].iloc[entry_pos]
         exit_close = df["close"].iloc[-1]
         if pd.notna(entry_close) and pd.notna(exit_close) and entry_close > 0:
-            trades.append(exit_close > entry_close)
+            trades.append(float(exit_close) > float(entry_close))
         anzahl_trades += 1
 
     if len(trades) >= 1:
         win_rate_pct = round(sum(trades) / len(trades) * 100, 2)
+
+    # --- Deterministischer Look-ahead-Bias-Check (Phase 5) ---
+    # Verifiziert, dass jeder Einstiegskurs von einem Tag NACH dem Signal-Tag
+    # stammt (niemals der Close des Signal-Tags selbst).
+    lookahead_bias_geprueft = _check_lookahead_bias(df, signal_positions, entry_positions)
+    if not lookahead_bias_geprueft:
+        logger.warning(
+            "Look-ahead-Bias-Check fehlgeschlagen: Einstiegskurs stammt nicht "
+            "von einem Tag nach dem Signal-Tag."
+        )
 
     return {
         "strategie_rendite": round(float(strat_final) * 100, 2) if pd.notna(strat_final) else None,
@@ -165,4 +258,13 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
         "max_drawdown_pct": max_drawdown_pct,
         "win_rate_pct": win_rate_pct,
         "anzahl_trades": anzahl_trades,
+        # --- Look-ahead-Bias-Check (Phase 5) ---
+        "lookahead_bias_geprueft": lookahead_bias_geprueft,
+        "lookahead_bias_hinweis": (
+            "Look-ahead-Check bestanden: Einstiegskurse stammen vom Handelstag "
+            "NACH dem Signal-Tag (das Signal ist erst nach Handelsschluss bekannt)."
+            if lookahead_bias_geprueft
+            else "Look-ahead-Check fehlgeschlagen: Einstiegskurs stammt nicht "
+            "vom Folgetag des Signal-Tags."
+        ),
     }

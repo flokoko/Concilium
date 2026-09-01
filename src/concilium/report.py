@@ -681,6 +681,14 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             lines.append(f"| Anzahl Trades | {bt.get('anzahl_trades', 0)} |")
             lines.append(f"| Zeitraum | {bt.get('startdatum', '?')} – {bt.get('enddatum', '?')} |")
             lines.append("")
+            # Look-ahead-Freiheit (Phase 5): nur anzeigen, wenn der Check
+            # durchgelaufen ist (alte Results ohne den Key → keine Zeile).
+            if bt.get("lookahead_bias_geprueft"):
+                lines.append(
+                    "_Backtest look-ahead-frei geprüft: ja (Einstiegskurs = Close "
+                    "des Handelstags NACH dem Signal)._"
+                )
+                lines.append("")
             if bt.get("signale"):
                 lines.append("### Letzte Signalwechsel")
                 lines.append("")
