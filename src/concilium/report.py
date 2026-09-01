@@ -73,11 +73,16 @@ def _clean_debate_text(agent: dict[str, Any]) -> str:
     return text
 
 
-def _management_summary(result: dict[str, Any], no_llm: bool) -> list[str]:
+def _management_summary(
+    result: dict[str, Any], no_llm: bool, review_mode: bool = False
+) -> list[str]:
     """Erstellt eine kompakte Management-Summary aus dem result-dict.
 
     Deterministisch, kein LLM-Call. Robust gegen fehlende Werte (N/A).
     Liefert die Zeilen für die ``## Management-Summary``-Sektion.
+
+    review_mode=True (Exit-Review) ergänzt eine Zeile, die das Ergebnis aus
+    der Verkaufsperspektive einordnet (Bestandsposition statt Neukauf).
     """
     lines: list[str] = []
     lines.append("## Management-Summary")
@@ -111,6 +116,13 @@ def _management_summary(result: dict[str, Any], no_llm: bool) -> list[str]:
             trade_parts.append(f"Stop {_fmt(stop_loss)}")
 
         lines.append(f"**Urteil:** {emoji} {entscheidung} — {', '.join(trade_parts)}")
+
+        # --- Exit-Review: Verkaufsperspektive für Bestandspositionen ---
+        if review_mode:
+            lines.append(
+                "_Verkaufsperspektive: Diese Position ist Bestand des Depots — "
+                "bewertet auf Verkaufskandidaten, nicht als Neukauf._"
+            )
 
         # Entscheidungs-Disziplin: Hinweis bei gedämpftem Rating
         if trade.get("rating_gedämpft"):
@@ -375,6 +387,7 @@ def _source_label(source: str) -> str:
 def generate_report(
     result: dict[str, Any],
     reports_dir: str | None = None,
+    review_mode: bool = False,
 ) -> str:
     """Generiert einen deutschen Markdown-Report aus den Pipeline-Ergebnissen.
 
@@ -386,6 +399,10 @@ def generate_report(
             Falls gegeben und matplotlib verfügbar, wird ein Chart erzeugt
             und als relatives Bild eingebettet. Falls None, wird kein Chart
             erzeugt.
+        review_mode: Exit-Review-Modus (--review): Die analysierte Position
+            ist Bestand des Depots und wird auf Verkaufskandidaten geprüft.
+            Ergänzt eine deutliche Hinweiszeile am Report-Anfang. Default
+            False — bestehende Aufrufe verhalten sich unverändert.
     """
     data = result.get("data", {})
     f = data.get("fundamentals", {})
@@ -400,6 +417,11 @@ def generate_report(
     lines: list[str] = []
     lines.append(f"# Concilium Analyse: {ticker}")
     lines.append("")
+    # --- Exit-Review-Hinweis (Pflichtzeile im Review-Modus) ---
+    if review_mode:
+        lines.append("> ⚠️ **REVIEW-MODUS:** Diese Position wird auf "
+                     "Verkaufskandidaten geprüft.")
+        lines.append("")
     lines.append(f"**Erstellt am:** {now}")
     lines.append(f"**Unternehmen:** {f.get('name', ticker)}")
     lines.append(f"**Sektor:** {f.get('sector', 'N/A')} / {f.get('industry', 'N/A')}")
@@ -424,7 +446,7 @@ def generate_report(
     lines.append("")
 
     # --- Management-Summary ---
-    lines.extend(_management_summary(result, no_llm))
+    lines.extend(_management_summary(result, no_llm, review_mode=review_mode))
 
     # --- Disclaimer ---
     lines.append("> ⚠️ **Disclaimer:** Dies ist keine Anlageberatung. Die Analysen basieren auf \

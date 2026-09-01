@@ -13,6 +13,7 @@ from .evaluate import evaluate_journal
 from .llm import LLMClient
 from .pipeline import run_pipeline, run_portfolio
 from .report import generate_report, generate_track_record_report
+from .review import run_review
 from .usage import summarize_usage
 
 # Platform-Guard: fcntl ist Linux/Unix-only; auf anderen Plattformen None.
@@ -234,6 +235,23 @@ def main(argv: list[str] | None = None) -> int:
         "--lookback kombiniert werden. Schließt sich mit --ticker/--tickers/--portfolio aus.",
     )
     parser.add_argument(
+        "--review",
+        action="store_true",
+        help="Exit-Review: scannt das reale Depot (Google-Sheet) auf Verkaufskandidaten. "
+        "Führt ZUERST --evaluate + calibration.json aus, dann eine verkürzte, "
+        "verkaufsfokussierte Analyse jeder Aktien-Position (keine ETFs/Commodities). "
+        "Kann mit --evaluate, --no-llm, --no-ensemble, --ensemble-runs, --peers, "
+        "--lookback, --max-positions kombiniert werden. "
+        "Schließt sich mit --ticker/--tickers/--portfolio/--watchlist aus.",
+    )
+    parser.add_argument(
+        "--max-positions",
+        type=int,
+        default=None,
+        help="[nur --review] Begrenzt die Anzahl der analysierten Depot-Positionen "
+        "(größte zuerst, nach depot_pct). Default: alle Aktien-Positionen.",
+    )
+    parser.add_argument(
         "--usage",
         action="store_true",
         help="Token-Usage-Report: aggregiert den LLM-Token-Verbrauch aus usage/usage.csv "
@@ -319,6 +337,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if args.review and (args.ticker or args.tickers or args.portfolio or args.watchlist):
+        print(
+            "FEHLER: --review kann nicht mit --ticker, --tickers, --portfolio "
+            "oder --watchlist kombiniert werden.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.usage and (args.ticker or args.tickers or args.portfolio):
         print(
             "FEHLER: --usage kann nicht mit --ticker, --tickers oder --portfolio "
@@ -355,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --evaluate ist eigenständig: Pipeline wird nicht ausgeführt
     # (außer bei --watchlist, dort läuft evaluate vorn mit — siehe unten)
-    if args.evaluate is not None and not args.watchlist:
+    if args.evaluate is not None and not args.watchlist and not args.review:
         level = logging.DEBUG if args.verbose else logging.INFO
         logging.basicConfig(
             level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -510,6 +536,167 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         return 0 if successes > 0 else 1
+
+    # --- Exit-Review-Modus (--review) ---
+    # Führt ZUERST evaluate_journal + _write_calibration_json aus (damit
+    # calibration.json aktuell ist — wichtig für Feedback/Dämpfung), dann
+    # run_review über alle Aktien-Positionen des realen Depots.
+    if args.review:
+        level = logging.DEBUG if args.verbose else logging.INFO
+        logging.basicConfig(
+            level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        )
+        llm = None if args.no_llm else LLMClient()
+
+        # Peers-Liste parsen (kommagetrennt)
+        peers_list: list[str] | None = None
+        if args.peers:
+            peers_list = [p.strip() for p in args.peers.split(",") if p.strip()]
+
+        reports_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "reports"
+        )
+        os.makedirs(reports_dir, exist_ok=True)
+
+        # Schritt 1: evaluate_journal + calibration.json (Feedback/Dämpfung aktuell)
+        eval_journal_path = (
+            args.evaluate if args.evaluate is not None else "journal/decisions.csv"
+        )
+        try:
+            print("--- Review: Track-Record-Evaluierung ---", file=sys.stderr)
+            eval_result = evaluate_journal(
+                eval_journal_path,
+                lookback_days=args.lookback,
+                llm=llm,
+            )
+            _write_calibration_json(eval_result)
+            track_report = generate_track_record_report(eval_result)
+            print(track_report)
+
+            # Track-Record-Report speichern
+            date_str = datetime.now().strftime("%Y%m%d")
+            track_filepath = os.path.join(reports_dir, f"track_record_{date_str}.md")
+            with open(track_filepath, "w", encoding="utf-8") as fh:
+                fh.write(track_report)
+            print(
+                f"\n---\nTrack-Record-Report gespeichert: {track_filepath}",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"FEHLER bei Track-Record-Evaluierung (Review): {exc}",
+                file=sys.stderr,
+            )
+            logging.exception("Track-Record-Fehler (Review)")
+            return 1
+
+        # Schritt 2: Depot-Review (Verkaufskandidaten)
+        print(
+            "\n--- Review: Depot-Scan auf Verkaufskandidaten ---",
+            file=sys.stderr,
+        )
+        try:
+            review_result = run_review(
+                llm,
+                backtest=args.backtest,
+                ensemble=not args.no_ensemble,
+                ensemble_runs=args.ensemble_runs,
+                resume=args.resume,
+                debate_rounds=args.debate_rounds,
+                peers=peers_list,
+                max_positions=args.max_positions,
+            )
+        except KeyboardInterrupt:
+            print(
+                "\nABGEBROCHEN (Review) — Checkpoints bleiben unter state/ erhalten.",
+                file=sys.stderr,
+            )
+            return 130
+        except Exception as exc:  # noqa: BLE001 — Review crasht die CLI nicht hart
+            print(f"UNERWARTETER FEHLER im Review-Modus: {exc}", file=sys.stderr)
+            logging.exception("Unerwarteter Fehler im Review-Modus")
+            return 1
+
+        ergebnisse = review_result.get("ergebnisse", {})
+        skipped = review_result.get("positions_uebersprungen", 0)
+        failures = review_result.get("fehler", 0)
+
+        # Reports pro analysierter Position ausgeben + speichern
+        successes = 0
+        for i, (ticker, entry) in enumerate(ergebnisse.items()):
+            if i > 0:
+                print("\n" + "=" * 70 + "\n", file=sys.stderr)
+
+            try:
+                result = entry.get("result") or {}
+                report_text = entry.get("report") or generate_report(
+                    result, review_mode=True
+                )
+                print(report_text)
+
+                # Report-Datei speichern: review_{TICKER}_{timestamp}.md
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+                resolved_ticker = result.get("ticker", ticker.upper())
+                filename = f"review_{resolved_ticker}_{timestamp}.md"
+                filepath = os.path.join(reports_dir, filename)
+                with open(filepath, "w", encoding="utf-8") as fh:
+                    fh.write(report_text)
+                print(f"\n---\nReport gespeichert: {filepath}", file=sys.stderr)
+                successes += 1
+            except Exception as exc:  # noqa: BLE001 — Report-Fehler zählen, nicht crashen
+                print(f"FEHLER bei Report für '{ticker}': {exc}", file=sys.stderr)
+                logging.warning("Report für '%s' fehlgeschlagen: %s", ticker, exc)
+                failures += 1
+
+        # --- Review-Zusammenfassung (sortiert nach depot_pct) ---
+        print("\n" + "=" * 70 + "\n", file=sys.stderr)
+        print("## Review-Zusammenfassung", file=sys.stderr)
+        print(file=sys.stderr)
+
+        if not ergebnisse:
+            print(
+                "Keine Aktien-Positionen analysiert "
+                f"({skipped} Position(en) übersprungen).",
+                file=sys.stderr,
+            )
+        else:
+            sorted_entries = sorted(
+                ergebnisse.items(),
+                key=lambda kv: kv[1].get("depot_pct") or 0.0,
+                reverse=True,
+            )
+            for ticker, entry in sorted_entries:
+                pct = entry.get("depot_pct") or 0.0
+                if entry.get("verkauf_empfehlung"):
+                    marker = "🔴 VERKAUFEN"
+                else:
+                    marker = "✅ behalten"
+                name = entry.get("name") or ticker
+                print(
+                    f"  {marker}  {ticker} ({name}): {pct:.1f}% Depot",
+                    file=sys.stderr,
+                )
+
+            empfohlen = sum(
+                1 for e in ergebnisse.values() if e.get("verkauf_empfehlung")
+            )
+            print(file=sys.stderr)
+            print(
+                f"{len(ergebnisse)} Positionen analysiert, "
+                f"{empfohlen} Verkaufsempfehlung(en), "
+                f"{skipped} Position(en) übersprungen"
+                + (f", {failures} Fehler" if failures > 0 else "")
+                + ".",
+                file=sys.stderr,
+            )
+
+        if failures > 0:
+            print(
+                f"\nWARNUNG: {failures} Ticker-Position(en) fehlgeschlagen.",
+                file=sys.stderr,
+            )
+
+        return 0 if (successes > 0 or (not ergebnisse and failures == 0)) else 1
 
     # --- Pipeline-Modus: --ticker, --tickers oder --portfolio required ---
     # Mutual exclusion: --ticker, --tickers, --portfolio
