@@ -78,6 +78,7 @@ def run_pipeline(
     portfolio_context: dict[str, Any] | None = None,
     skip_final: bool = False,
     debate_rounds: int = 1,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -112,6 +113,10 @@ def run_pipeline(
             Dies wird vom Portfolio-Modus (``run_portfolio``) verwendet, um den
             PM erst nach Berechnung des Portfolio-Kontexts einmalig aufzurufen.
             Default False — unverändertes Verhalten.
+        as_of: Optionales gepinntes Analysedatum (YYYY-MM-DD) — wird an
+            collect_ticker_data durchgereicht (Kurs-Historie bis zu diesem
+            Datum; Fundamentals/Makro/News bleiben aktuell). Default None =
+            bisheriges Verhalten.
 
     Returns:
         dict mit allen Zwischenergebnissen.
@@ -119,8 +124,22 @@ def run_pipeline(
     result: dict[str, Any] = {}
 
     # --- Resume: Checkpoint laden, falls vorhanden und gewünscht ---
+    # Bei gepinntem Analysedatum (as_of) darf ein Checkpoint nur wiederverwendet
+    # werden, wenn er mit demselben as_of erzeugt wurde — sonst sind Historie,
+    # Indikatoren und Kurs inkonsistent zum gepinnten Datum.
     if resume:
         cp = load_checkpoint(ticker)
+        if (
+            cp is not None
+            and (cp.get("data") or {}).get("as_of") != as_of
+        ):
+            logger.info(
+                "Resume-Checkpoint ignoriert (anderes Analysedatum: "
+                "Checkpoint as_of=%s, angefordert as_of=%s) — starte von vorn.",
+                (cp.get("data") or {}).get("as_of"),
+                as_of,
+            )
+            cp = None
         if cp is not None:
             result = cp
             completed = result.get("_completed_steps", [])
@@ -137,7 +156,7 @@ def run_pipeline(
     # --- 1. Daten sammeln ---
     if not _is_completed(result, "data"):
         logger.info("Schritt 1: Sammle Marktdaten für %s", ticker)
-        data = collect_ticker_data(ticker, peers=peers)
+        data = collect_ticker_data(ticker, peers=peers, as_of=as_of)
         result["data"] = data
         result["ticker"] = data["ticker"]
 
@@ -389,6 +408,7 @@ def run_portfolio(
     resume: bool = False,
     peers: list[str] | None = None,
     debate_rounds: int = 1,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """Portfolio-Modus: analysiert mehrere Ticker als Depot-Ganzheit.
 
@@ -418,6 +438,8 @@ def run_portfolio(
         ensemble: Ob der Trader als Ensemble ausgeführt wird.
         ensemble_runs: Anzahl der Ensemble-Runs.
         resume: Resume-Modus für Einzel-Pipelines.
+        as_of: Optionales gepinntes Analysedatum (YYYY-MM-DD) — wird an jede
+            Einzel-Pipeline (run_pipeline) durchgereicht.
 
     Returns:
         dict mit:
@@ -446,6 +468,7 @@ def run_portfolio(
                 portfolio_context=None,
                 skip_final=llm is not None,
                 debate_rounds=debate_rounds,
+                as_of=as_of,
             )
             results[ticker] = result
         except Exception as exc:  # noqa: BLE001 — nie crashen

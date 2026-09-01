@@ -9,6 +9,7 @@ import os
 import sys
 from datetime import datetime
 
+from .data import _parse_as_of
 from .evaluate import evaluate_journal
 from .llm import LLMClient
 from .pipeline import run_pipeline, run_portfolio
@@ -232,7 +233,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Watchlist-Analyse: liest watchlist.txt (Env CONCILIUM_WATCHLIST = Pfad), "
         "führt ZUERST --evaluate + calibration.json aus, dann Batch-Analyse aller Ticker. "
         "Kann mit --evaluate, --no-llm, --no-ensemble, --ensemble-runs, --peers, "
-        "--lookback kombiniert werden. Schließt sich mit --ticker/--tickers/--portfolio aus.",
+        "--lookback, --date kombiniert werden. Schließt sich mit "
+        "--ticker/--tickers/--portfolio aus.",
     )
     parser.add_argument(
         "--review",
@@ -241,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         "Führt ZUERST --evaluate + calibration.json aus, dann eine verkürzte, "
         "verkaufsfokussierte Analyse jeder Aktien-Position (keine ETFs/Commodities). "
         "Kann mit --evaluate, --no-llm, --no-ensemble, --ensemble-runs, --peers, "
-        "--lookback, --max-positions kombiniert werden. "
+        "--lookback, --max-positions, --date kombiniert werden. "
         "Schließt sich mit --ticker/--tickers/--portfolio/--watchlist aus.",
     )
     parser.add_argument(
@@ -304,6 +306,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Anzahl der Bull/Bear-Debatten-Runden (Default: 1). "
         "Höhere Werte = tiefere Debatte, mehr LLM-Calls.",
     )
+    parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Analysedatum pinnen (nur Kurs-Historie bis zu diesem Datum). "
+        "Fundamentals/Makro/News bleiben aktuell.",
+    )
     resume_group = parser.add_mutually_exclusive_group()
     resume_group.add_argument(
         "--resume",
@@ -328,6 +338,26 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # --date ist mit allen Analyse-Modi kombinierbar, aber NICHT mit --evaluate
+    # (evaluate hat seinen eigenen Lookback über die Journal-Historie).
+    if args.date and args.evaluate is not None:
+        print(
+            "FEHLER: --date kann nicht mit --evaluate kombiniert werden "
+            "(--evaluate hat seinen eigenen Lookback).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --date früh validieren (Format YYYY-MM-DD, kein Zukunftsdatum) —
+    # Fail-fast vor jeglicher Ausführung. Die Details (vor dem ersten Kurs,
+    # zu wenig Historie) prüft collect_ticker_data mit echten Kursdaten.
+    if args.date:
+        try:
+            _parse_as_of(args.date)
+        except ValueError as exc:
+            print(f"FEHLER: {exc}", file=sys.stderr)
+            return 1
 
     if args.watchlist and (args.ticker or args.tickers or args.portfolio):
         print(
@@ -496,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
                     ensemble_runs=args.ensemble_runs,
                     resume=args.resume,
                     debate_rounds=args.debate_rounds,
+                    as_of=args.date,
                 )
                 report = generate_report(result, reports_dir=reports_dir)
                 print(report)
@@ -605,6 +636,7 @@ def main(argv: list[str] | None = None) -> int:
                 debate_rounds=args.debate_rounds,
                 peers=peers_list,
                 max_positions=args.max_positions,
+                as_of=args.date,
             )
         except KeyboardInterrupt:
             print(
@@ -744,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
                 resume=args.resume,
                 peers=peers_list,
                 debate_rounds=args.debate_rounds,
+                as_of=args.date,
             )
 
             # Pro Ticker einen Report generieren (mit portfolio_analysis)
@@ -827,6 +860,7 @@ def main(argv: list[str] | None = None) -> int:
                     ensemble_runs=args.ensemble_runs,
                     resume=args.resume,
                     debate_rounds=args.debate_rounds,
+                    as_of=args.date,
                 )
                 report = generate_report(result, reports_dir=reports_dir)
                 print(report)
@@ -877,6 +911,7 @@ def main(argv: list[str] | None = None) -> int:
             ensemble_runs=args.ensemble_runs,
             resume=args.resume,
             debate_rounds=args.debate_rounds,
+            as_of=args.date,
         )
 
         # Report generieren

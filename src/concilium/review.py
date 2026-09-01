@@ -94,6 +94,7 @@ def run_review(
     debate_rounds: int = 1,
     peers: list[str] | None = None,
     max_positions: int | None = None,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """Exit-Review: analysiert alle Aktien des realen Depots auf Verkaufskandidaten.
 
@@ -113,6 +114,8 @@ def run_review(
         max_positions: Wenn gesetzt, werden nur die N größten Positionen
             (nach depot_pct absteigend) analysiert; der Rest zählt als
             übersprungen. None = alle Aktien analysieren.
+        as_of: Optionales gepinntes Analysedatum (YYYY-MM-DD) — wird an
+            run_pipeline durchgereicht (Kurs-Historie bis zu diesem Datum).
 
     Returns:
         dict mit:
@@ -191,6 +194,7 @@ def run_review(
                 resume=resume,
                 debate_rounds=debate_rounds,
                 peers=peers,
+                as_of=as_of,
             )
             if not isinstance(result, dict):
                 raise ValueError(f"Unerwartetes Pipeline-Ergebnis für '{ticker}'")

@@ -443,6 +443,14 @@ def generate_report(
         if wkn:
             parts.append(f"WKN: {wkn}")
         lines.append(f"**Kennung:** {' · '.join(parts)}")
+    # Gepinntes Analysedatum (Phase 4): nur anzeigen, wenn gesetzt —
+    # alte Results ohne as_of-Key verhalten sich unverändert.
+    as_of = data.get("as_of")
+    if as_of:
+        lines.append(
+            f"**Analysedatum (gepinnt): {as_of}** — Kurs-Historie bis zu diesem "
+            "Datum, Fundamentals/Makro/News aktuell."
+        )
     lines.append("")
 
     # --- Management-Summary ---

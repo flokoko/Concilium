@@ -1,6 +1,12 @@
 """Datenmodul — Sammelt Fundamentals, technische Indikatoren, Historie und Sentiment-Heuristik via yfinance.
 
 Fallback-News-Quelle: Google News RSS (kein API-Key nötig, nur requests + xml.etree).
+
+Analysedatum pinnen (Phase 4): collect_ticker_data akzeptiert optional
+``as_of`` (YYYY-MM-DD). Die Kurs-Historie wird dann auf Zeilen <= as_of
+beschränkt — aktueller Kurs, SMA/RSI/MACD/Bollinger und Backtest entsprechen
+dem Stand zu as_of. Fundamentals, Makro- und News-Daten bleiben aktuell
+(dokumentierte Einschränkung: yfinance liefert nur aktuelle Fundamentals).
 """
 
 from __future__ import annotations
@@ -63,19 +69,75 @@ def _get_today_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _cache_file_path(cache_dir: str, today_key: str, ticker: str) -> str:
-    """Bestimmt den Dateipfad für einen Cache-Eintrag."""
+_ASOF_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_as_of(as_of: str | None) -> str | None:
+    """Validiert und normalisiert das gepinnte Analysedatum.
+
+    Args:
+        as_of: Datum YYYY-MM-DD oder None (→ None = bisheriges Verhalten).
+
+    Returns:
+        Normalisiertes Datum YYYY-MM-DD oder None.
+
+    Raises:
+        ValueError: bei nicht parsebarem Datum, unrealistischem Datum
+            (z. B. 2025-13-45) oder Zukunft (später als heute, UTC).
+    """
+    if as_of is None:
+        return None
+    as_of = str(as_of).strip()
+    if not _ASOF_DATE_RE.match(as_of):
+        raise ValueError(
+            f"Ungültiges Analysedatum '{as_of}': Erwartetes Format ist "
+            "YYYY-MM-DD (z. B. 2025-12-15)."
+        )
+    try:
+        parsed = datetime.strptime(as_of, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError(
+            f"Ungültiges Analysedatum '{as_of}': Erwartetes Format ist "
+            f"YYYY-MM-DD (kein reales Datum?). Fehler: {exc}"
+        ) from exc
+    if parsed > datetime.now(timezone.utc):
+        raise ValueError(
+            f"Ungültiges Analysedatum '{as_of}': Datum liegt in der Zukunft. "
+            "Bitte ein historisches Datum angeben."
+        )
+    return parsed.strftime("%Y-%m-%d")
+
+
+def _cache_file_path(
+    cache_dir: str, today_key: str, ticker: str, as_of: str | None = None
+) -> str:
+    """Bestimmt den Dateipfad für einen Cache-Eintrag.
+
+    Bei gepinntem Analysedatum (as_of) geht das Datum in den Dateinamen ein —
+    gepinnte Läufe werden nie mit 'heute'-Läufen (oder anderem as_of) geteilt.
+    """
     # Ticker kann / enthalten (z.B. nicht bereinigt) → sicher machen
     safe_ticker = re.sub(r"[^A-Za-z0-9._-]", "_", ticker)
+    if as_of is not None:
+        safe_as_of = re.sub(r"[^A-Za-z0-9._-]", "_", as_of)
+        return os.path.join(
+            cache_dir, f"market_{today_key}_asof_{safe_as_of}_{safe_ticker}.json"
+        )
     return os.path.join(cache_dir, f"market_{today_key}_{safe_ticker}.json")
 
 
-def _load_cache(ticker: str, today_key: str | None = None) -> dict[str, Any] | None:
+def _load_cache(
+    ticker: str, today_key: str | None = None, as_of: str | None = None
+) -> dict[str, Any] | None:
     """Lädt gecachte Marktdaten für einen Ticker, wenn der Cache heute ist.
 
     Args:
         ticker: Aufgelöster Yahoo-Ticker (z.B. AAPL, RWE.DE).
         today_key: Optionales Datum YYYY-MM-DD (für Tests). Default: heute (UTC).
+        as_of: Optionales gepinntes Analysedatum YYYY-MM-DD. Cache-Einträge
+            sind NUR gültig, wenn das as_of exakt übereinstimmt — ein Eintrag
+            ohne as_of wird niemals für einen as_of-Lauf geliefert (und
+            umgekehrt).
 
     Returns:
         Das data-dict (ohne isin/wkn) oder None bei Cache-Miss/Fehler/Deaktiviert.
@@ -86,7 +148,7 @@ def _load_cache(ticker: str, today_key: str | None = None) -> dict[str, Any] | N
     if today_key is None:
         today_key = _get_today_key()
 
-    file_path = _cache_file_path(cache_dir, today_key, ticker)
+    file_path = _cache_file_path(cache_dir, today_key, ticker, as_of)
     try:
         if not os.path.isfile(file_path):
             return None
@@ -94,6 +156,9 @@ def _load_cache(ticker: str, today_key: str | None = None) -> dict[str, Any] | N
             cached = json.load(fh, object_hook=_cache_json_object_hook)
         # Gültigkeit: cache_date muss mit today_key übereinstimmen
         if cached.get("cache_date") != today_key:
+            return None
+        # Gültigkeit: as_of muss exakt übereinstimmen (None != gepinnt)
+        if cached.get("as_of") != as_of:
             return None
         # data-dict extrahieren
         data = cached.get("data")
@@ -106,7 +171,12 @@ def _load_cache(ticker: str, today_key: str | None = None) -> dict[str, Any] | N
         return None
 
 
-def _save_cache(ticker: str, data: dict[str, Any], today_key: str | None = None) -> None:
+def _save_cache(
+    ticker: str,
+    data: dict[str, Any],
+    today_key: str | None = None,
+    as_of: str | None = None,
+) -> None:
     """Speichert Marktdaten für einen Ticker im Tages-Cache.
 
     Crasht nie (best effort). Speichert nur die yfinance-abhängigen Daten,
@@ -117,6 +187,8 @@ def _save_cache(ticker: str, data: dict[str, Any], today_key: str | None = None)
         data: Das komplette data-dict (inkl. isin/wkn — diese werden beim
               Speichern entfernt).
         today_key: Optionales Datum YYYY-MM-DD (für Tests).
+        as_of: Optionales gepinntes Analysedatum YYYY-MM-DD — geht in den
+            Cache-Key ein und wird im Eintrag gespeichert.
     """
     cache_dir = _get_cache_dir()
     if cache_dir is None:
@@ -129,9 +201,10 @@ def _save_cache(ticker: str, data: dict[str, Any], today_key: str | None = None)
     cache_entry = {
         "cache_date": today_key,
         "ticker": ticker,
+        "as_of": as_of,
         "data": cache_data,
     }
-    file_path = _cache_file_path(cache_dir, today_key, ticker)
+    file_path = _cache_file_path(cache_dir, today_key, ticker, as_of)
     try:
         os.makedirs(cache_dir, exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as fh:
@@ -1234,23 +1307,35 @@ def _fetch_peer_data(peers: list[str]) -> list[dict[str, Any]]:
 def collect_ticker_data(
     ticker: str,
     peers: list[str] | None = None,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """Sammelt alle Marktdaten für einen Ticker via yfinance.
 
     Args:
         ticker: Ticker-Symbol (z. B. AAPL, RWE.DE).
         peers: Optionale Liste von Peer-Ticker-Symbolen für den Vergleich.
+        as_of: Optionales gepinntes Analysedatum (YYYY-MM-DD). Wenn gesetzt,
+            wird die Kurs-Historie auf Zeilen mit Datum <= as_of beschränkt —
+            aktueller Kurs und technische Indikatoren entsprechen dann dem
+            Stand zu as_of (Backtest-/Evaluierungs-reproduzierbar).
+            Fundamentals/Makro/News bleiben aktuell (dokumentierte
+            Einschränkung — yfinance liefert nur aktuelle Fundamentals).
 
     Returns:
-        dict mit Schlüsseln: ticker, fundamentals, technicals, history, sentiment,
-        news, macro, peers
+        dict mit Schlüsseln: ticker, fundamentals, technicals, history,
+        sentiment, news, macro, peers, as_of
 
     Raises:
-        ValueError: bei ungültigem Ticker (keine Daten von yfinance).
+        ValueError: bei ungültigem Ticker (keine Daten von yfinance) oder
+            ungültigem as_of (nicht parsebar, Zukunft, vor dem ersten
+            verfügbaren Kurs, zu wenig verbleibende Historie).
     """
     ticker = ticker.strip()
     if not ticker:
         raise ValueError("Ticker darf nicht leer sein.")
+
+    # --- Analysedatum validieren/normalisieren (früh, vor Netzwerk) ---
+    as_of = _parse_as_of(as_of)
 
     # Identifier auflösen (ISIN/WKN → Yahoo-Ticker); bei reinem Ticker
     # bleibt alles unverändert — kein Netzwerkaufruf nötig.
@@ -1259,14 +1344,21 @@ def collect_ticker_data(
     ticker = resolved_ticker
 
     # --- Tages-Cache prüfen (yfinance-abhängige Daten) ---
-    cached = _load_cache(ticker)
+    # as_of ist Teil des Cache-Keys: gepinnte Läufe werden niemals mit
+    # 'heute'-Läufen (oder anderem as_of) geteilt.
+    cached = _load_cache(ticker, as_of=as_of)
     if cached is not None:
         # Identifier-Metadaten wieder hinzufügen (nicht im Cache gespeichert)
         cached["isin"] = id_meta.get("isin")
         cached["wkn"] = id_meta.get("wkn")
         return cached
 
-    logger.info("Sammle Daten für %s …", ticker)
+    if as_of is not None:
+        logger.info(
+            "Sammle Daten für %s (gepinntes Analysedatum: %s) …", ticker, as_of
+        )
+    else:
+        logger.info("Sammle Daten für %s …", ticker)
     t = yf.Ticker(ticker)
 
     # --- Historie (~250 Tage OHLCV) ---
@@ -1276,6 +1368,25 @@ def collect_ticker_data(
             f"Ungültiger Ticker '{ticker}': Keine Kursdaten von yfinance erhalten. "
             "Bitte Ticker-Symbol prüfen (z. B. AAPL, MSFT, NVDA)."
         )
+
+    # --- Gepinntes Analysedatum: Historie auf as_of beschränken ---
+    # Nur Zeilen mit Datum <= as_of behalten; aktueller Kurs und alle
+    # technischen Indikatoren werden daraus berechnet (Stand zu as_of).
+    if as_of is not None:
+        try:
+            first_available = hist.index.min().strftime("%Y-%m-%d")
+        except (AttributeError, TypeError, ValueError):
+            first_available = "unbekannt"
+        try:
+            hist = hist.loc[hist.index <= pd.Timestamp(as_of, tz="UTC")]
+        except TypeError:
+            # Naiver Index (ohne Zeitzone) — Vergleich mit naivem Timestamp
+            hist = hist.loc[hist.index <= pd.Timestamp(as_of)]
+        if hist.empty:
+            raise ValueError(
+                f"Analysedatum {as_of} liegt vor dem ersten verfügbaren Kurs "
+                f"für '{ticker}' (erste verfügbare Historie: {first_available})."
+            )
 
     # --- Info / Fundamentals ---
     info: dict[str, Any] = {}
@@ -1593,6 +1704,8 @@ def collect_ticker_data(
         "peers": peers_data,
         # Datenqualitäts-Warnungen (immer eine Liste, auch leer)
         "data_warnings": data_warnings,
+        # Gepinntes Analysedatum (None = bisheriges Verhalten, 'heute')
+        "as_of": as_of,
         # Identifier-Metadaten (ISIN/WKN falls als Eingabe verwendet)
         "isin": id_meta.get("isin"),
         "wkn": id_meta.get("wkn"),
@@ -1602,6 +1715,7 @@ def collect_ticker_data(
     # Wichtig: Nur speichern, wenn KEIN Fehler auftrat (kein alter Cache-Stand
     # als Fallback bei yfinance-Fehlern). Da wir bis hier nur kommen, wenn
     # alle Daten erfolgreich geladen wurden, ist das hier sicher.
-    _save_cache(ticker, result)
+    # as_of geht in den Cache-Key ein (gepinnte Läufe werden nicht geteilt).
+    _save_cache(ticker, result, as_of=as_of)
 
     return result
