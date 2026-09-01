@@ -127,6 +127,10 @@ def _compute_kalibrierung_proxy(rows: list[dict[str, str]]) -> dict[str, Any]:
 
     Gap = Ø_Konfidenz - Genehmigungs-Rate (positiv = überkonfident).
 
+    Phase 1: Nur echte Trades (KAUFEN/VERKAUFEN) werden gewertet —
+    HALTEN ist kein Trade und bleibt außen vor (konsistent mit der
+    echten Hit-Rate aus evaluate.py).
+
     Returns:
         dict mit avg_confidence, genehmigungs_rate, gap, tendenz.
         Alle None bei zu wenigen / fehlenden Daten. Crasht nie.
@@ -139,9 +143,12 @@ def _compute_kalibrierung_proxy(rows: list[dict[str, str]]) -> dict[str, Any]:
         "n": 0,
     }
 
-    # Nur Zeilen mit confidence und final_decision verwenden
+    # Nur Zeilen mit confidence, final_decision und echter Trade-Aktion
     valid: list[dict[str, str]] = []
     for row in rows:
+        action = (row.get("action") or "").strip().upper()
+        if action not in ("KAUFEN", "VERKAUFEN"):
+            continue  # HALTEN (und alles andere) ist kein Trade
         conf = _safe_float(row.get("confidence"))
         final = (row.get("final_decision") or "").strip().upper()
         if conf is None or not math.isfinite(conf) or conf <= 0:
@@ -186,19 +193,19 @@ def _compute_kalibrierung_proxy(rows: list[dict[str, str]]) -> dict[str, Any]:
 def _compute_kalibrierung_proxy_per_action(
     rows: list[dict[str, str]],
 ) -> dict[str, dict[str, Any]]:
-    """Berechnet eine netzfreie Kalibrierungs-Näherung pro Aktion (3-stufig).
+    """Berechnet eine netzfreie Kalibrierungs-Näherung pro Aktion.
 
-    Wie ``_compute_kalibrierung_proxy``, aber aufgespalten nach KAUFEN / HALTEN /
-    VERKAUFEN.  Nutzt ebenfalls die final_decision als Hit-Proxy.
+    Wie ``_compute_kalibrierung_proxy``, aber aufgespalten nach KAUFEN und
+    VERKAUFEN (Phase 1: HALTEN ist kein Trade → kein Proxy-Segment).
+    Nutzt ebenfalls die final_decision als Hit-Proxy.
 
     Returns:
         dict {aktion: {avg_confidence, genehmigungs_rate, gap, tendenz, n}}.
         Nur Aktionen mit ≥3 gültigen Zeilen. Leeres dict bei zu wenigen Daten.
     """
-    # Zeilen nach Aktion gruppieren (nur 3-stufig)
+    # Zeilen nach Aktion gruppieren (nur echte Trades; HALTEN wird ausgeschlossen)
     per_action: dict[str, list[dict[str, str]]] = {
         "KAUFEN": [],
-        "HALTEN": [],
         "VERKAUFEN": [],
     }
     for row in rows:
@@ -262,8 +269,9 @@ def _compute_kalibrierung_proxy_per_action(
 def _compute_kalibrierung_echt(cal: dict[str, Any]) -> dict[str, Any]:
     """Berechnet die Kalibrierung aus der echten Hit-Rate (aus calibration.json).
 
-    avg_confidence = Ø über alle Aktionen, gewichtet nach n.
-    hit_rate = echte hit_rate_gesamt aus der JSON.
+    avg_confidence = Ø über echte Trades (KAUFEN/VERKAUFEN), gewichtet nach n.
+    HALTEN wird ignoriert (kein Trade → nicht in total_n/conf_sum).
+    hit_rate = echte hit_rate_gesamt aus der JSON (bereits nur Trades).
     gap = avg_confidence - hit_rate.
     tendenz = Schwellen ±0.15 wie bestehend.
 
@@ -282,10 +290,13 @@ def _compute_kalibrierung_echt(cal: dict[str, Any]) -> dict[str, Any]:
     if hit_rate is None or not isinstance(hit_rate, (int, float)):
         return empty
 
-    # Gewichtete Ø-Confidence über alle Aktionen
+    # Gewichtete Ø-Confidence über echte Trades (KAUFEN/VERKAUFEN);
+    # HALTEN fließt nicht ein (Phase 1: HALTEN ist kein Trade).
     total_n = 0
     conf_sum = 0.0
     for action, adata in (cal.get("nach_aktion") or {}).items():
+        if action not in ("KAUFEN", "VERKAUFEN"):
+            continue  # HALTEN aus der Kalibrierung ausnehmen
         n = adata.get("n", 0)
         avg_conf = adata.get("avg_confidence")
         if n > 0 and avg_conf is not None and isinstance(avg_conf, (int, float)):
@@ -319,14 +330,15 @@ def _compute_kalibrierung_echt_per_action(
     """Berechnet die echte Kalibrierung pro Aktion aus calibration.json.
 
     Pro Aktion: {avg_confidence, hit_rate (echt), gap, tendenz, n}.
-    Nur Aktionen mit n >= 3.
+    Nur echte Trades (KAUFEN/VERKAUFEN) mit n >= 3; HALTEN wird ignoriert
+    (Phase 1: HALTEN ist kein Trade und bleibt außen vor).
 
     Returns:
         dict {aktion: {avg_confidence, hit_rate, gap, tendenz, n}}.
         Leeres dict bei fehlenden/ungültigen Daten. Crasht nie.
     """
     result: dict[str, dict[str, Any]] = {}
-    for action in ("KAUFEN", "HALTEN", "VERKAUFEN"):
+    for action in ("KAUFEN", "VERKAUFEN"):
         adata = (cal.get("nach_aktion") or {}).get(action)
         if not adata or not isinstance(adata, dict):
             continue
@@ -367,6 +379,10 @@ def _compute_stats(rows: list[dict[str, str]], *, min_decisions: int = 5) -> dic
     Nutzt NUR die im Journal gespeicherten Felder — kein yfinance.
     Wenn eine gültige calibration.json existiert, wird die echte Hit-Rate
     verwendet (statt des Genehmigungs-Rate-Proxys).
+
+    Phase 1: Die ``actions``-Zählung behält HALTEN (Transparenz im Report),
+    aber die Kalibrierungs-Berechnung (echt wie Proxy) wertet nur echte
+    Trades (KAUFEN/VERKAUFEN) — HALTEN ist kein Trade.
     """
     n_total = len(rows)
 
@@ -532,11 +548,12 @@ def build_feedback_context(
         ]
 
         # --- Kalibrierung pro Aktion (nur wenn Daten vorhanden) --- #
+        # Phase 1: nur echte Trades (KAUFEN/VERKAUFEN) — HALTEN ist kein Trade.
         kal_pro_aktion = stats.get("kalibrierung_pro_aktion", {})
         if kal_pro_aktion:
             lines.append("")
             lines.append("Kalibrierung pro Aktion:")
-            for action_name in ("KAUFEN", "HALTEN", "VERKAUFEN"):
+            for action_name in ("KAUFEN", "VERKAUFEN"):
                 entry = kal_pro_aktion.get(action_name)
                 if entry is None:
                     continue

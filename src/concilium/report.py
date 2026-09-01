@@ -956,7 +956,17 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
     lines.append("| Kennzahl | Wert |")
     lines.append("|---|---|")
     lines.append(f"| Anzahl Entscheidungen | {n} |")
-    lines.append(f"| Hit-Rate gesamt | {_fmt_pct2(eval_result.get('hit_rate_gesamt'))} |")
+    lines.append(
+        f"| Hit-Rate (nur Trades KAUFEN/VERKAUFEN) "
+        f"| {_fmt_pct2(eval_result.get('hit_rate_gesamt'))} |"
+    )
+    # HALTEN: separat ausgewiesen (kein Trade — "kein Handlungsbedarf").
+    halten_n = eval_result.get("halten_n", 0)
+    halten_quote = eval_result.get("halten_quote")
+    halten_quote_str = _fmt_pct2(halten_quote)
+    lines.append(
+        f"| HALTEN: {halten_n} Entscheidungen, davon {halten_quote_str} stabil (±2%) |"
+    )
     lines.append(
         f"| Durchschnittliche Rendite | {_fmt_num(eval_result.get('durchschnitt_rendite_gesamt'), ' %')} |"
     )
@@ -976,17 +986,24 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
     nach_aktion = eval_result.get("nach_aktion", {})
     for action in ("KAUFEN", "HALTEN", "VERKAUFEN"):
         a = nach_aktion.get(action, {})
+        label = f"{action}*" if action == "HALTEN" else action
         lines.append(
-            f"| {action} | {a.get('n', 0)} | "
+            f"| {label} | {a.get('n', 0)} | "
             f"{_fmt_pct2(a.get('hit_rate'))} | "
             f"{_fmt_num(a.get('avg_rendite'), ' %')} |"
         )
+    lines.append("")
+    lines.append(
+        "_\\* HALTEN ist kein Trade (kein Handlungsbedarf). Die HALTEN-Hit-Rate "
+        "ist rein deskriptiv (Anteil stabiler Verläufe ±2%) und fließt NICHT in die "
+        "Gesamt-Hit-Rate oder die Konfidenz-Kalibrierung ein._"
+    )
     lines.append("")
 
     # --- Konfidenz-Bänder ---
     konfidenz_baende = eval_result.get("konfidenz_baende", [])
     if konfidenz_baende:
-        lines.append("## Konfidenz-Bänder (Trefferquote nach Confidence)")
+        lines.append("## Konfidenz-Bänder (Trefferquote nach Confidence, nur Trades)")
         lines.append("")
         lines.append("| Band | n | Hit-Rate |")
         lines.append("|---|---|---|")
@@ -1003,10 +1020,17 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
         lines.append("")
 
     # --- Konfidenz-Kalibrierung (Brier-Score, Gap, Reliability-Bänder) ---
+    # Phase 1: Kalibrierung misst nur Richtungsprognosen (KAUFEN/VERKAUFEN);
+    # HALTEN ("kein Handlungsbedarf") ist keine Richtungsprognose → ausgenommen.
     kal = eval_result.get("konfidenz_kalibrierung") or {}
     reliability_bins = eval_result.get("reliability_bins") or []
     if kal.get("brier_score") is not None or reliability_bins:
         lines.append("## Konfidenz-Kalibrierung")
+        lines.append("")
+        lines.append(
+            "_Nur echte Trades (KAUFEN/VERKAUFEN). HALTEN ist kein Handlungsbedarf "
+            "und keine Richtungsprognose — es fließt nicht in diese Kalibrierung ein._"
+        )
         lines.append("")
         lines.append("| Kennzahl | Wert |")
         lines.append("|---|---|")
@@ -1016,12 +1040,12 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
             f"| Ø Konfidenz (normalisiert) | {_fmt_num(kal.get('durchschnittliche_konfidenz'))} |"
         )
         lines.append(
-            f"| Ø tatsächliche Hit-Rate | {_fmt_num(kal.get('durchschnittliche_tatsaechliche_hit_rate'))} |"
+            f"| Ø tatsächliche Hit-Rate (Trades) | {_fmt_num(kal.get('durchschnittliche_tatsaechliche_hit_rate'))} |"
         )
         gap = kal.get("kalibrierungs_gap")
         lines.append(f"| Kalibrierungs-Gap | {_fmt_num(gap)} |")
         lines.append(f"| Tendenz | {kal.get('tendenz', 'N/A')} |")
-        lines.append(f"| n (bewertete Zeilen) | {kal.get('n', 0)} |")
+        lines.append(f"| n (Trades KAUFEN/VERKAUFEN) | {kal.get('n', 0)} |")
         lines.append("")
 
         # Reliability-Bänder-Tabelle
@@ -1048,11 +1072,11 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
         nach_rating_seg = seg.get("nach_rating", {})
 
         if nach_aktion_seg:
-            lines.append("### Nach Aktion")
+            lines.append("### Nach Aktion (nur Trades)")
             lines.append("")
             lines.append("| Aktion | n | Brier | Ø Konfidenz | Hit-Rate | Tendenz |")
             lines.append("|---|---|---|---|---|---|")
-            for action in ("KAUFEN", "HALTEN", "VERKAUFEN"):
+            for action in ("KAUFEN", "VERKAUFEN"):
                 a = nach_aktion_seg.get(action)
                 if a is None:
                     continue

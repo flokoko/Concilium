@@ -4,6 +4,14 @@ Liest journal/decisions.csv und bewertet jede Entscheidung (KAUFEN/VERKAUFEN/HAL
 gegen die tatsächliche Kursentwicklung via yfinance. Aggregiert Hit-Rate,
 Rendite, Zielkurs-/Stop-Quoten und Konfidenz-Korrelation.
 
+Semantik (Phase 1): HALTEN ist KEIN Trade und KEINE Richtungsprognose
+("kein Handlungsbedarf"). HALTEN-Zeilen werden weiterhin bewertet (hit/rendite
+für Transparenz), gehen aber NICHT mehr in hit_rate_gesamt oder die
+Konfidenz-Kalibrierung (Brier-Score, Gap, Reliability-Bänder) ein — diese
+Kennzahlen messen nur echte Trades (KAUFEN/VERKAUFEN). HALTEN wird separat
+als deskriptive Kennzahl ausgewiesen: halten_n (Anzahl) und halten_quote
+(Anteil stabiler Verläufe, |rendite| <= 2 %).
+
 Robust: crasht niemals — jede Zeile wird einzeln in try/except ausgewertet.
 yfinance-Aufrufe sind über den Tages-Cache aus data.py gespeichert (Wiederverwendung
 von _get_cache_dir / _get_today_key).
@@ -295,12 +303,14 @@ def _evaluate_single(
         dict mit: hit (bool|None), rendite_pct (float|None),
         ziel_erreicht (bool|None), stop_gerissen (bool|None),
         action (str), confidence (float|None),
-        portfolio_fit_score (float|None), ticker (str), timestamp (str).
+        portfolio_fit_score (float|None), ticker (str), timestamp (str),
+        ist_trade (bool — True nur für KAUFEN/VERKAUFEN; HALTEN ist kein Trade).
     """
     action = (row.get("action") or "").strip().upper()
     timestamp = row.get("timestamp", "")
     decision_date = _parse_timestamp(timestamp)
     rating = (row.get("rating") or "").strip().upper()
+    ist_trade = action in ("KAUFEN", "VERKAUFEN")
 
     # Leeres Ergebnis bei unbrauchbaren Daten
     empty = {
@@ -315,6 +325,7 @@ def _evaluate_single(
         "portfolio_fit_score": _safe_float(row.get("portfolio_fit_score")),
         "ticker": row.get("ticker", ""),
         "timestamp": timestamp,
+        "ist_trade": ist_trade,
     }
 
     if decision_date is None or not prices:
@@ -429,6 +440,7 @@ def _evaluate_single(
         "portfolio_fit_score": _safe_float(row.get("portfolio_fit_score")),
         "ticker": row.get("ticker", ""),
         "timestamp": timestamp,
+        "ist_trade": ist_trade,
     }
 
 
@@ -438,7 +450,12 @@ def _evaluate_single(
 
 
 def _empty_result() -> dict[str, Any]:
-    """Leeres Ergebnis-dict (für fehlende/leere Journal-Datei)."""
+    """Leeres Ergebnis-dict (für fehlende/leere Journal-Datei).
+
+    HALTEN-Zeilen zählen NICHT zu hit_rate_gesamt / Konfidenz-Kalibrierung
+    (nur echte Trades KAUFEN/VERKAUFEN). HALTEN wird deskriptiv über
+    halten_n / halten_quote ausgewiesen (beide None/0 im Leerfall).
+    """
     return {
         "anzahl_entscheidungen": 0,
         "nach_aktion": {
@@ -447,6 +464,8 @@ def _empty_result() -> dict[str, Any]:
             "VERKAUFEN": {"n": 0, "hit_rate": None, "avg_rendite": None, "avg_confidence": None},
         },
         "hit_rate_gesamt": None,
+        "halten_n": 0,
+        "halten_quote": None,
         "durchschnitt_rendite_gesamt": None,
         "durchschnitt_rating_distanz": None,
         "zielkurs_trefferquote": None,
@@ -492,6 +511,9 @@ def _compute_konfidenz_kalibrierung(
 
     Nur Zeilen mit confidence (nicht None, isfinite) und hit (nicht None)
     werden verwendet. Bei 0 gültigen Zeilen → None-Werte.
+
+    Phase 1: Es gehen NUR echte Trades (KAUFEN/VERKAUFEN) ein — HALTEN
+    ("kein Handlungsbedarf") ist keine Richtungsprognose und wird ausgeschlossen.
     """
     empty = {
         "brier_score": None,
@@ -502,9 +524,11 @@ def _compute_konfidenz_kalibrierung(
         "tendenz": None,
     }
 
-    # Nur Zeilen mit confidence und hit verwenden
+    # Nur echte Trades mit confidence und hit verwenden
     valid: list[dict[str, Any]] = []
     for e in evaluations:
+        if not _is_trade_eval(e):
+            continue  # HALTEN fließt nicht in die Kalibrierung ein
         conf = e.get("confidence")
         hit = e.get("hit")
         if conf is None or hit is None:
@@ -563,15 +587,20 @@ def _compute_konfidenz_kalibrierung_segmentiert(
         brier_i = (p - hit_int) ** 2
 
     Segmente:
-        - nach_aktion: KAUFEN, HALTEN, VERKAUFEN
+        - nach_aktion: KAUFEN, VERKAUFEN (HALTEN ist kein Trade → kein Segment)
         - nach_rating: STARK KAUFEN, KAUFEN, HALTEN, VERKAUFEN, STARK VERKAUFEN
 
     Leere Segmente (n=0) werden weggelassen.
 
+    Phase 1: Der nach_aktion-Loop enthält nur KAUFEN/VERKAUFEN (HALTEN ist
+    kein Trade). Die nach_rating-Segmentierung bleibt UNVERÄNDERT über alle
+    übergebenen Zeilen berechnet — das HALTEN-Rating ist ein legitimes
+    Rating-Segment (auch bei HALTEN-Aktionen).
+
     Returns:
         dict: {"nach_aktion": {action: {brier_score, n, ...}}, "nach_rating": {...}}
     """
-    _AKTIONEN = ("KAUFEN", "HALTEN", "VERKAUFEN")
+    _AKTIONEN = ("KAUFEN", "VERKAUFEN")
     _RATINGS = ("STARK KAUFEN", "KAUFEN", "HALTEN", "VERKAUFEN", "STARK VERKAUFEN")
 
     def _compute_segment(segment_evals: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -663,9 +692,14 @@ def _compute_reliability_bins(
 
     Nur Zeilen mit confidence (nicht None, isfinite, > 0) und hit (nicht None).
     Leere Bins werden nicht in die Liste aufgenommen.
+
+    Phase 1: Es gehen NUR echte Trades (KAUFEN/VERKAUFEN) ein — HALTEN ist
+    keine Richtungsprognose und verzerrt die Kalibrierung.
     """
     valid: list[dict[str, Any]] = []
     for e in evaluations:
+        if not _is_trade_eval(e):
+            continue  # HALTEN fließt nicht in die Kalibrierung ein (Phase 1)
         conf = e.get("confidence")
         hit = e.get("hit")
         if conf is None or hit is None:
@@ -703,19 +737,55 @@ def _compute_reliability_bins(
     return bins
 
 
+def _is_trade_eval(e: dict[str, Any]) -> bool:
+    """Gibt zurück, ob eine Einzel-Evaluierung ein echter Trade ist.
+
+    HALTEN ist kein Trade ("kein Handlungsbedarf") und fließt nicht in
+    hit_rate_gesamt oder die Konfidenz-Kalibrierung ein.
+    Nutzt das explizite ``ist_trade``-Feld, falls vorhanden; sonst Fallback
+    auf die Aktion (nur KAUFEN/VERKAUFEN gelten als Trades).
+    """
+    ist_trade = e.get("ist_trade")
+    if isinstance(ist_trade, bool):
+        return ist_trade
+    return (e.get("action") or "").strip().upper() in ("KAUFEN", "VERKAUFEN")
+
+
 def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregiert die Einzel-Ergebnisse zu einem Ergebnis-dict."""
+    """Aggregiert die Einzel-Ergebnisse zu einem Ergebnis-dict.
+
+    Semantik (Phase 1): ``hit_rate_gesamt`` und die Konfidenz-Kalibrierung
+    (Brier-Score, Gap, Tendenz, Reliability-Bänder, Segmentierung nach Aktion)
+    berücksichtigen NUR echte Trades (KAUFEN/VERKAUFEN). HALTEN wird als
+    separate deskriptive Kennzahl ausgewiesen (``halten_n``, ``halten_quote``).
+    """
     result = _empty_result()
     result["anzahl_entscheidungen"] = len(evaluations)
 
+    # --- HALTEN als deskriptive Kennzahl (kein Trade) ---
+    halten_evals = [e for e in evaluations if e.get("action") == "HALTEN"]
+    result["halten_n"] = len(halten_evals)
+    halten_rated = [e for e in halten_evals if e.get("hit") is not None]
+    halten_hits = [e for e in halten_rated if e["hit"] is True]
+    result["halten_quote"] = (
+        len(halten_hits) / len(halten_rated) if halten_rated else None
+    )
+
+    # --- Nur echte Trades (KAUFEN/VERKAUFEN) für Gesamt-/Kalibrierungs-Kennzahlen ---
+    trades = [e for e in evaluations if _is_trade_eval(e)]
+
     # --- Nach Aktion ---
     for action in ("KAUFEN", "HALTEN", "VERKAUFEN"):
-        action_evals = [e for e in evaluations if e["action"] == action]
+        action_evals = [e for e in evaluations if e.get("action") == action]
         n = len(action_evals)
-        hits = [e for e in action_evals if e["hit"] is True]
-        misses = [e for e in action_evals if e["hit"] is False]
+        hits = [e for e in action_evals if e.get("hit") is True]
+        misses = [e for e in action_evals if e.get("hit") is False]
         rated = len(hits) + len(misses)
-        renditen = [e["rendite_pct"] for e in action_evals if e["rendite_pct"] is not None]
+        renditen = [
+            e["rendite_pct"]
+            for e in action_evals
+            if e.get("rendite_pct") is not None
+        ]
 
         # Ø Confidence pro Aktion (normalisiert auf 0-1: conf/5)
         conf_vals = [
@@ -734,27 +804,31 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
             "avg_confidence": avg_conf,
         }
 
-    # --- Gesamt ---
-    all_hits = [e for e in evaluations if e["hit"] is True]
-    all_misses = [e for e in evaluations if e["hit"] is False]
+    # --- Gesamt (nur echte Trades KAUFEN/VERKAUFEN; HALTEN ist kein Trade) ---
+    all_hits = [e for e in trades if e.get("hit") is True]
+    all_misses = [e for e in trades if e.get("hit") is False]
     all_rated = len(all_hits) + len(all_misses)
     result["hit_rate_gesamt"] = len(all_hits) / all_rated if all_rated > 0 else None
 
-    all_renditen = [e["rendite_pct"] for e in evaluations if e["rendite_pct"] is not None]
+    all_renditen = [
+        e["rendite_pct"]
+        for e in trades
+        if e.get("rendite_pct") is not None
+    ]
     result["durchschnitt_rendite_gesamt"] = (
         sum(all_renditen) / len(all_renditen) if all_renditen else None
     )
 
     # --- Zielkurs-Trefferquote ---
-    ziel_evals = [e for e in evaluations if e["ziel_erreicht"] is not None]
-    ziel_treffer = [e for e in ziel_evals if e["ziel_erreicht"] is True]
+    ziel_evals = [e for e in evaluations if e.get("ziel_erreicht") is not None]
+    ziel_treffer = [e for e in ziel_evals if e.get("ziel_erreicht") is True]
     result["zielkurs_trefferquote"] = (
         len(ziel_treffer) / len(ziel_evals) if ziel_evals else None
     )
 
     # --- Stop-Verletzungsquote ---
-    stop_evals = [e for e in evaluations if e["stop_gerissen"] is not None]
-    stop_hits = [e for e in stop_evals if e["stop_gerissen"] is True]
+    stop_evals = [e for e in evaluations if e.get("stop_gerissen") is not None]
+    stop_hits = [e for e in stop_evals if e.get("stop_gerissen") is True]
     result["stop_verletzungsquote"] = (
         len(stop_hits) / len(stop_evals) if stop_evals else None
     )
@@ -779,8 +853,8 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
         n = len(band_evals)
         if n == 0:
             continue
-        hits = [e for e in band_evals if e["hit"] is True]
-        misses = [e for e in band_evals if e["hit"] is False]
+        hits = [e for e in band_evals if e.get("hit") is True]
+        misses = [e for e in band_evals if e.get("hit") is False]
         rated = len(hits) + len(misses)
         konfidenz_baende.append(
             {
@@ -815,15 +889,19 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
     # --- Konfidenz-Kalibrierung (Brier-Score, Gap, Tendenz) ---
-    result["konfidenz_kalibrierung"] = _compute_konfidenz_kalibrierung(evaluations)
+    # Nur echte Trades (KAUFEN/VERKAUFEN) — HALTEN ist keine Richtungsprognose.
+    result["konfidenz_kalibrierung"] = _compute_konfidenz_kalibrierung(trades)
 
     # --- Segmentierte Konfidenz-Kalibrierung (pro Aktion, pro Rating) ---
+    # nach_aktion: nur KAUFEN/VERKAUFEN (HALTEN ist kein Trade → kein Segment);
+    # nach_rating: unverändert über ALLE Zeilen (HALTEN-Rating = legitimes Segment).
+    # Deshalb hier evaluations (nicht trades) übergeben.
     result["konfidenz_kalibrierung_segmentiert"] = (
         _compute_konfidenz_kalibrierung_segmentiert(evaluations)
     )
 
     # --- Reliability-Bänder (feinere Konfidenz-Intervalle) ---
-    result["reliability_bins"] = _compute_reliability_bins(evaluations)
+    result["reliability_bins"] = _compute_reliability_bins(trades)
 
     return result
 
@@ -847,6 +925,14 @@ def _build_llm_summary(result: dict[str, Any], llm: LLMClient) -> str | None:
         kauf = result["nach_aktion"]["KAUFEN"]
         kauf_hr = f"{kauf['hit_rate'] * 100:.1f}%" if kauf["hit_rate"] and not (isinstance(kauf["hit_rate"], float) and math.isnan(kauf["hit_rate"])) else "N/A"
 
+        halten_n = result.get("halten_n", 0)
+        halten_q = result.get("halten_quote")
+        halten_str = (
+            f"{halten_q * 100:.1f}%"
+            if halten_q is not None and not (isinstance(halten_q, float) and math.isnan(halten_q))
+            else "N/A"
+        )
+
         bands_str = ", ".join(
             f"{b['band']} ({b['n']}): "
             f"{b['hit_rate'] * 100:.0f}%" if b["hit_rate"] is not None and not (isinstance(b["hit_rate"], float) and math.isnan(b["hit_rate"]))
@@ -859,7 +945,8 @@ def _build_llm_summary(result: dict[str, Any], llm: LLMClient) -> str | None:
             f"(2-4 Sätze) über die Track-Record-Qualität eines Trading-Systems.\n\n"
             f"Daten:\n"
             f"- Anzahl Entscheidungen: {n}\n"
-            f"- Hit-Rate gesamt: {hr_str}\n"
+            f"- Hit-Rate (nur Trades KAUFEN/VERKAUFEN; HALTEN nicht enthalten): {hr_str}\n"
+            f"- HALTEN: {halten_n} Entscheidungen, davon {halten_str} stabil (±2%)\n"
             f"- Durchschnittliche Rendite: {dr_str}\n"
             f"- Zielkurs-Trefferquote: {zt_str}\n"
             f"- KAUFEN Hit-Rate: {kauf_hr}\n"

@@ -79,8 +79,8 @@ class TestKalibrierungProAktionStats:
         assert kaufen["tendenz"] == "überkonfident"
         assert kaufen["n"] == 3
 
-    def test_halten_gut_kalibriert(self):
-        """HALTEN mit Confidence ≈ Genehmigungs-Rate → gut kalibriert."""
+    def test_halten_nicht_mehr_in_per_action(self):
+        """Phase 1: HALTEN ist kein Trade → kein HALTEN-Segment in der Proxy-Kalibrierung."""
         rows = [
             _make_row(ticker="A", action="HALTEN", confidence="4", final_decision="GENEHMIGT"),
             _make_row(ticker="B", action="HALTEN", confidence="4", final_decision="ABGELEHNT"),
@@ -88,17 +88,9 @@ class TestKalibrierungProAktionStats:
             _make_row(ticker="D", action="HALTEN", confidence="4", final_decision="ABGELEHNT"),
         ]
         result = _compute_kalibrierung_proxy_per_action(rows)
-        # conf = 4/5 = 0.8 für alle, genehmigt 2/4 = 0.5
-        # gap = 0.8 - 0.5 = 0.3 > 0.15 → überkonfident
-        # Korrektur: gap = 0.3 → überkonfident, nicht gut kalibriert
-        # Lass uns das genauer testen:
-        assert "HALTEN" in result
-        halten = result["HALTEN"]
-        assert halten["n"] == 4
-        assert abs(halten["avg_confidence"] - 0.8) < 0.01
-        assert abs(halten["genehmigungs_rate"] - 0.5) < 0.01
-        assert halten["gap"] > 0.15
-        assert halten["tendenz"] == "überkonfident"
+        # HALTEN wird aus der Trade-Kalibrierung herausgenommen (auch beim Proxy)
+        assert "HALTEN" not in result
+        assert result == {}
 
     def test_verkaufen_unterkonfident(self):
         """VERKAUFEN mit niedriger Confidence, hoher Genehmigungs-Rate → unterkonfident."""
@@ -119,7 +111,7 @@ class TestKalibrierungProAktionStats:
         assert verkaufen["tendenz"] == "unterkonfident"
 
     def test_less_than_3_rows_excluded(self):
-        """Aktionen mit <3 gültigen Zeilen werden weggelassen."""
+        """Aktionen mit <3 gültigen Zeilen werden weggelassen; HALTEN immer."""
         rows = [
             _make_row(ticker="A", action="KAUFEN", confidence="4"),
             _make_row(ticker="B", action="KAUFEN", confidence="4"),  # nur 2 → excluded
@@ -129,7 +121,7 @@ class TestKalibrierungProAktionStats:
         ]
         result = _compute_kalibrierung_proxy_per_action(rows)
         assert "KAUFEN" not in result  # nur 2 Zeilen → excluded
-        assert "HALTEN" in result      # 3 Zeilen → included
+        assert "HALTEN" not in result  # Phase 1: HALTEN ist kein Trade → nie
         assert "VERKAUFEN" not in result  # 0 Zeilen → excluded
 
     def test_empty_rows_returns_empty(self):
@@ -164,7 +156,7 @@ class TestKalibrierungProAktionStats:
         assert result["KAUFEN"]["tendenz"] == "gut kalibriert"
 
     def test_multiple_actions_in_parallel(self):
-        """Mehrere Aktionen mit ≥3 Zeilen → alle im Ergebnis."""
+        """Mehrere Trade-Aktionen mit ≥3 Zeilen → im Ergebnis; HALTEN nie."""
         rows = [
             _make_row(ticker="A", action="KAUFEN", confidence="4", final_decision="GENEHMIGT"),
             _make_row(ticker="B", action="KAUFEN", confidence="4", final_decision="GENEHMIGT"),
@@ -175,7 +167,8 @@ class TestKalibrierungProAktionStats:
         ]
         result = _compute_kalibrierung_proxy_per_action(rows)
         assert "KAUFEN" in result
-        assert "HALTEN" in result
+        # Phase 1: HALTEN wird aus der Trade-Kalibrierung herausgenommen
+        assert "HALTEN" not in result
         assert "VERKAUFEN" not in result
 
 
@@ -298,7 +291,7 @@ class TestFeedbackProAktionBlock:
         assert "überkonfidenter" in result
 
     def test_pro_aktion_block_with_all_three_actions(self, tmp_path):
-        """Alle drei Aktionen mit ≥3 Zeilen → alle drei im Block."""
+        """Trade-Aktionen mit ≥3 Zeilen → im Block; HALTEN nie (Phase 1)."""
         rows = [
             _make_row(ticker="A", action="KAUFEN", confidence="4", final_decision="GENEHMIGT"),
             _make_row(ticker="B", action="KAUFEN", confidence="4", final_decision="ABGELEHNT"),
@@ -315,5 +308,6 @@ class TestFeedbackProAktionBlock:
 
         assert "Kalibrierung pro Aktion:" in result
         assert "- KAUFEN:" in result
-        assert "- HALTEN:" in result
+        # Phase 1: HALTEN ist kein Trade → nicht im Kalibrierungs-Block
+        assert "- HALTEN:" not in result
         assert "- VERKAUFEN:" in result

@@ -281,7 +281,7 @@ class TestComputeKalibrierungEcht:
     """Testet die echte Kalibrierung aus JSON."""
 
     def test_overconfident(self):
-        """Hohe Confidence, niedrige Hit-Rate → überkonfident."""
+        """Hohe Confidence, niedrige Hit-Rate → überkonfident (nur Trades gewichtet)."""
         cal = _make_cal_json(
             hit_rate_gesamt=0.34,
             nach_aktion={
@@ -291,10 +291,10 @@ class TestComputeKalibrierungEcht:
             },
         )
         result = _compute_kalibrierung_echt(cal)
-        # Gewichtete avg_confidence:
-        # (0.80*22 + 0.91*9 + 1.0*1) / 32 = (17.6 + 8.19 + 1.0) / 32 = 26.79/32 ≈ 0.837
+        # Gewichtete avg_confidence NUR über Trades (Phase 1 — HALTEN ausgenommen):
+        # (0.80*22 + 1.0*1) / 23 = (17.6 + 1.0) / 23 ≈ 0.8087
         assert result["avg_confidence"] is not None
-        assert abs(result["avg_confidence"] - (17.6 + 8.19 + 1.0) / 32) < 0.01
+        assert abs(result["avg_confidence"] - (17.6 + 1.0) / 23) < 0.01
         assert result["hit_rate"] == 0.34
         assert result["gap"] > 0.15
         assert result["tendenz"] == "überkonfident"

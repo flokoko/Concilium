@@ -77,6 +77,12 @@ def _write_calibration_json(eval_result: dict, *, state_dir: str | None = None) 
     Inhalt: nur aggregierte Werte (hit_rate_gesamt, nach_aktion mit hit_rate
     und avg_confidence) — KEINE Rohdaten, KEINE Kurse.
 
+    Phase 1: hit_rate_gesamt aus evaluate.py enthaelt bereits nur echte Trades
+    (KAUFEN/VERKAUFEN); HALTEN verbleibt in nach_aktion zur Transparenz, wird
+    aber von den Konsumenten (feedback.py, agents.py) aus der Kalibrierung
+    ausgenommen. HALTEN bleibt hier drin, damit alte Konsumenten (und der
+    HALTEN-Rating-Fallback) nicht brechen.
+
     Atomar (tmpfile + os.replace) mit fcntl-Lock (best effort).
     Crasht nie — bei Fehler wird nur gewarnt.
     """
