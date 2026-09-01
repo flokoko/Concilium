@@ -576,7 +576,7 @@ def _call_agent(
     temperature: float = 0.3,
     response_format: dict[str, Any] | None = None,
     structured: bool = False,
-    max_tokens: int = 1000,
+    max_tokens: int = 4000,
 ) -> dict[str, Any]:
     """Führt einen einzelnen Agenten-Call aus und parst das Ergebnis.
 
@@ -593,10 +593,12 @@ def _call_agent(
     Downstream-Consumer (z.B. _clean_debate_text, _parse_debate_confidence)
     darauf zugreifen können.
 
-    ``max_tokens`` (Default 1000) caps die Output-Länge pro LLM-Call, um
-    Token-Verschwendung durch ausufernde Antworten zu verhindern. 1000 ist
+    ``max_tokens`` (Default 4000) caps die Output-Länge pro LLM-Call, um
+    Token-Verschwendung durch ausufernde Antworten zu verhindern. 4000 ist
     großzügig für alle Agenten-Rollen (Debatte ~300-400, Analysten ~150,
-    Trader/Risk/PM ~200).
+    Trader/Risk/PM ~200) und nötig, weil die Reasoning-Modelle (glm-5.x)
+    einen Teil der Tokens fürs Reasoning verbrauchen — bei 1000 blieb der
+    eigentliche Content leer (finish_reason=length).
     """
     messages = [
         {"role": "system", "content": system_prompt},

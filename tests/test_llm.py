@@ -202,7 +202,7 @@ class TestMaxTokensCallAgent:
             structured=True,
         )
 
-        assert llm.captured_kwargs.get("max_tokens") == 1000
+        assert llm.captured_kwargs.get("max_tokens") == 4000
 
     def test_call_agent_passes_max_tokens_unstructured(self):
         """_call_agent (structured=False) gibt max_tokens an llm.chat weiter."""
@@ -219,7 +219,7 @@ class TestMaxTokensCallAgent:
         llm = _CapturingLLM()
         _call_agent(llm, "system prompt", "user text")
 
-        assert llm.captured_kwargs.get("max_tokens") == 1000
+        assert llm.captured_kwargs.get("max_tokens") == 4000
 
     def test_call_agent_custom_max_tokens(self):
         """_call_agent gibt custom max_tokens weiter."""
