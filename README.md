@@ -205,6 +205,15 @@ Concilium ist explizit lernend über mehrere Mechanismen:
   werden automatisch zu KAUFEN/VERKAUFEN **gedämpft**, wenn die Historie
   überkonfident ist. `--evaluate` schreibt die Diagnose in
   `state/calibration.json`, die bei Folge-Läufen als Kontext dient.
+- **Kalibrierungs-gestützte Dämpfung der Ziel-Gewichtung**: Die vom
+  Portfolio-Fit-Analysten empfohlene Ziel-Gewichtung wird deterministisch an die
+  **echte historische Trefferquote** der Aktion skaliert
+  (`faktor = clamp(hit_rate, 0.3, 1.0)`), statt an die (oft überkonfidente)
+  LLM-Konfidenz. Beispiel: KAUFEN mit 52 % Hit-Rate → Gewichtung ×0.52; HALTEN
+  mit 14 % → ×0.3 (Untergrenze). Der Originalwert bleibt als
+  `ziel_gewichtung_original` im Journal und Report sichtbar („nach Kalibrierung
+  gedämpft, original X"). Damit wird die Positionsgröße an die reale
+  Trefferquote gekoppelt — der fehlende Hebel gegen Überkonfidenz.
 
 Die 5-stufige Skala macht zudem die `--evaluate`-Track-Record-Auswertung
 granularer: zusätzlich zur Hit-Rate wird die **durchschnittliche Rating-Distanz**
@@ -219,7 +228,7 @@ Die Agenten verwenden eine OpenAI-kompatible Schnittstelle, konfiguriert über U
 |---|---|---|
 | `LLM_BASE_URL` | `https://ollama.com/v1` | Base URL der OpenAI-kompatiblen API |
 | `LLM_API_KEY` | aus `OLLAMA_API_KEY` | API-Key für Authentifizierung |
-| `LLM_MODEL` | `glm-5.2:cloud` | Modellname |
+| `LLM_MODEL` | `glm-5.2` | Modellname (ohne `:cloud`-Suffix — das Suffix verursacht HTTP 400) |
 | `LLM_FALLBACK_MODEL` | – | Fallback-Modell nach erschöpften Retries bei 429/5xx |
 | `CONCILIUM_CACHE_DIR` | `<repo>/cache` | Tages-Cache für Marktdaten; leer = deaktiviert |
 | `CONCILIUM_STATE_DIR` | `<repo>/state` | Checkpoint-Verzeichnis für `--resume`; leer = deaktiviert |
