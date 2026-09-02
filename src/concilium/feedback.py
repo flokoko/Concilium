@@ -708,3 +708,249 @@ def build_reflection_context(
     except Exception as exc:  # noqa: BLE001 — crasht nie
         logger.warning("Reflexions-Kontext konnte nicht erstellt werden: %s", exc)
         return ""
+
+
+# --------------------------------------------------------------------------- #
+# Cross-Ticker-Gedächtnis — generalisierte Lektionen aus anderen Tickern (C4)
+# --------------------------------------------------------------------------- #
+
+
+def _deterministic_cross_ticker_lesson(lessons: list[dict[str, Any]]) -> str:
+    """Erzeugt eine deterministische generalisierte Lektion aus Cross-Ticker-Lektionen.
+
+    Analog ``_deterministic_lesson``, aber aggregiert über mehrere Lektionen:
+    Das Vorzeichen des DURCHSCHNITTLICHEN realisierten Returns bestimmt die
+    Tendenz. Erwartet Zeilen mit garantiert gültigem (nicht-None, finite)
+    ``raw_return_pct`` (so wird die Liste von build_cross_ticker_context gefüllt).
+    """
+    valid = [
+        _safe_float(entry.get("raw_return_pct"))
+        for entry in lessons
+        if isinstance(entry, dict)
+    ]
+    valid = [v for v in valid if v is not None and math.isfinite(v)]
+    if not valid:
+        return (
+            "Keine aussagekräftigen Cross-Ticker-Renditen verfügbar — "
+            "prüfe deine Annahmen sorgfältig."
+        )
+    avg = sum(valid) / len(valid)
+    if avg > 0.5:
+        return (
+            "Die letzten Entscheidungen anderer Ticker liefen insgesamt positiv — "
+            "behalte deine Methodik bei, prüfe aber, ob sich diese Marktlage "
+            "auf den aktuellen Ticker überträgt."
+        )
+    if avg < -0.5:
+        return (
+            "Die letzten Entscheidungen anderer Ticker liefen insgesamt negativ — "
+            "prüfe, ob sich Sektor- oder Marktrisiken auch auf den aktuellen "
+            "Ticker übertragen, und sei vorsichtiger mit Timing und Zielsetzung."
+        )
+    return (
+        "Die letzten Entscheidungen anderer Ticker blieben insgesamt neutral — "
+        "übertrage deren Muster nur bei klarer Übereinstimmung mit dem "
+        "aktuellen Ticker."
+    )
+
+
+def build_cross_ticker_context(
+    ticker: str,
+    llm: LLMClient | None = None,
+    lookback_days: int = 30,
+    max_lessons: int = 3,
+) -> str:
+    """Baut einen Kontext-Block mit den letzten Entscheidungen ANDERER Ticker (C4).
+
+    Liest das Entscheidungs-Journal, findet die jüngsten Entscheidungen
+    ANDERER Ticker (case-insensitive, neueste zuerst), berechnet für jede
+    den realisierten Return via evaluate.realised_return_for_row und nimmt
+    die ersten ``max_lessons`` Zeilen mit verfügbarem Return.
+
+    Wenn ein LLMClient übergeben wird, wird EIN deutscher Satz als
+    generalisierte Lektion über alle Cross-Ticker-Lektionen generiert
+    (analog build_reflection_context). Bei Fehlern oder ohne LLM wird eine
+    deterministische Lektion verwendet.
+
+    Args:
+        ticker: Ticker-Symbol (dessen EIGENE Entscheidungen werden ausgeschlossen).
+        llm: Optionaler LLMClient für die generalisierte Lektion.
+        lookback_days: Zeitfenster für die Rendite-Berechnung (Default 30).
+        max_lessons: Maximale Anzahl Cross-Ticker-Lektionen (Default 3) —
+            hält den Block kompakt, damit die Prompts nicht aufblähen.
+
+    Returns:
+        Deutscher Kontext-String oder "" bei leerem/fehlerhaftem Journal,
+        keinen Cross-Ticker-Zeilen oder keinen berechenbaren Returns.
+        Crasht niemals.
+    """
+    try:
+        if not (ticker or "").strip():
+            return ""
+
+        journal_file = os.path.join("journal", "decisions.csv")
+        rows = _read_journal_rows(journal_file)
+        if not rows:
+            return ""
+
+        target = (ticker or "").strip().lower()
+
+        # Cross-Ticker-Zeilen: anderer Ticker (case-insensitive) mit parsebarem
+        # Timestamp. Zeilen ohne Timestamp sind für die Chronologie unbrauchbar.
+        cross_rows: list[dict[str, str]] = []
+        for row in rows:
+            row_ticker = (row.get("ticker") or "").strip().lower()
+            if not row_ticker or row_ticker == target:
+                continue
+            ts = (row.get("timestamp") or "").strip()
+            if ts:
+                cross_rows.append(row)
+
+        if not cross_rows:
+            return ""
+
+        # Neueste zuerst: Journal-Timestamps sind ISO-ähnlich
+        # ('YYYY-MM-DD HH:MM:SS') → lexikalische Sortierung = chronologisch.
+        cross_rows.sort(key=lambda r: (r.get("timestamp") or "").strip(), reverse=True)
+
+        # Erste max_lessons Zeilen MIT berechenbarem Return sammeln
+        # (Zeilen ohne realisierbaren Return werden übersprungen).
+        lessons: list[dict[str, Any]] = []
+        budget = max(0, max_lessons)
+        for row in cross_rows:
+            if len(lessons) >= budget:
+                break
+            rr = realised_return_for_row(row, lookback_days=lookback_days)
+            if rr is None:
+                continue
+            raw = rr.get("raw_return_pct")
+            if raw is None or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+                continue
+            lessons.append(rr)
+
+        if not lessons:
+            return ""
+
+        # Generalisierte Lektion: LLM (ein Satz über alle Lektionen) oder
+        # deterministischer Fallback.
+        lesson = _deterministic_cross_ticker_lesson(lessons)
+        if llm is not None:
+            try:
+                lehrzeilen = []
+                for rr in lessons:
+                    alpha = rr.get("alpha_pct")
+                    alpha_str = (
+                        f"{alpha:+.2f}%"
+                        if alpha is not None and math.isfinite(alpha)
+                        else "nicht verfügbar"
+                    )
+                    lehrzeilen.append(
+                        f"- {rr.get('ticker', '?')} ({rr.get('timestamp', '')}): "
+                        f"Aktion {rr.get('action', '')}, realisierter Return "
+                        f"{rr.get('raw_return_pct'):+.2f}%, Alpha vs SPY {alpha_str}"
+                    )
+                prompt = (
+                    "Du bist ein Trading-Coach. Formuliere EINEN deutschen Satz als "
+                    "generalisierte Lektion aus den letzten Entscheidungen ANDERER "
+                    "Ticker (Cross-Ticker-Gedächtnis). Erkenne übergreifende Muster "
+                    "(z. B. Sektor-Trends) statt Ticker-Details.\n\n"
+                    + "\n".join(lehrzeilen)
+                    + "\n\nAntworte mit genau einem deutschen Satz (maximal 30 Wörter)."
+                )
+                messages = [
+                    {"role": "system", "content": "Du bist ein präziser Trading-Coach."},
+                    {"role": "user", "content": prompt},
+                ]
+                llm_lesson = llm.chat(messages, temperature=0.3)
+                if llm_lesson and llm_lesson.strip():
+                    lesson = llm_lesson.strip()
+            except Exception as llm_exc:  # noqa: BLE001 — Fallback
+                logger.debug(
+                    "LLM-Cross-Ticker-Lektion fehlgeschlagen, verwende "
+                    "deterministische Lektion: %s",
+                    llm_exc,
+                )
+
+        lines = [
+            "=== LETZTE ENTSCHEIDUNGEN ANDERER TICKER (Cross-Ticker-Gedächtnis) ==="
+        ]
+        for rr in lessons:
+            raw = rr.get("raw_return_pct")
+            raw_str = (
+                f"{raw:+.2f}%"
+                if isinstance(raw, (int, float)) and math.isfinite(raw)
+                else "N/A"
+            )
+            alpha = rr.get("alpha_pct")
+            alpha_str = (
+                f"{alpha:+.2f}%"
+                if alpha is not None and math.isfinite(alpha)
+                else "-"
+            )
+            lines.append(
+                f"- {str(rr.get('ticker') or '').upper()} ({rr.get('timestamp', '')}): "
+                f"Aktion {rr.get('action', '')} | Realisierter Return {raw_str} "
+                f"| Alpha vs SPY {alpha_str}"
+            )
+        lines.append(f"Lektion: {lesson}")
+        lines.append(
+            "Lerne aus diesen generalisierten Mustern — übertrage sie aber nur, "
+            "wenn sie auf den aktuellen Ticker passen."
+        )
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.warning("Cross-Ticker-Kontext konnte nicht erstellt werden: %s", exc)
+        return ""
+
+
+def build_memory_context(
+    ticker: str,
+    llm: LLMClient | None = None,
+    lookback_days: int = 30,
+    max_same: int = 1,
+    max_cross: int = 3,
+) -> str:
+    """Orchestriert Same-Ticker-Reflexion + Cross-Ticker-Lektionen (C4).
+
+    Kombiniert die bestehende Ticker-spezifische Reflexion
+    (``build_reflection_context`` — die letzte Entscheidung DESSELBEN
+    Tickers) mit generalisierten Cross-Ticker-Lektionen
+    (``build_cross_ticker_context`` — die jüngsten Entscheidungen ANDERER
+    Ticker mit realisiertem Return) zu EINEM Kontext-Block für die
+    Trader-/Ensemble-Trader-/Risk-/PM-Prompts.
+
+    Args:
+        ticker: Ticker-Symbol.
+        llm: Optionaler LLMClient für die LLM-generierten Lektionen.
+        lookback_days: Zeitfenster für die Rendite-Berechnung (Default 30).
+        max_same: Wenn <= 0, wird der Same-Ticker-Teil übersprungen
+            (Default 1 = aktiv; die Reflexion ist ein einzelner Block).
+        max_cross: Maximale Anzahl Cross-Ticker-Lektionen (Default 3).
+
+    Returns:
+        Kombinierter deutscher Kontext-String (Teile durch Leerzeile
+        getrennt) oder "" wenn beide Teile leer sind. Crasht niemals.
+    """
+    try:
+        parts: list[str] = []
+
+        if max_same > 0:
+            same = build_reflection_context(
+                ticker, llm=llm, lookback_days=lookback_days
+            )
+            if same:
+                parts.append(same)
+
+        cross = build_cross_ticker_context(
+            ticker,
+            llm=llm,
+            lookback_days=lookback_days,
+            max_lessons=max_cross,
+        )
+        if cross:
+            parts.append(cross)
+
+        return "\n\n".join(parts)
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.warning("Memory-Kontext konnte nicht erstellt werden: %s", exc)
+        return ""

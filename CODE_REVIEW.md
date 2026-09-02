@@ -159,6 +159,13 @@ Klein aber sauber für langfristige Nutzung.
 ### 🔵 Nice-to-have
 - [ ] C2: Analysten-Snapshot als Ground-Truth-Anker
 - [ ] C3: Instrument-Identity-Kontext in alle Prompts
-- [ ] C4: Cross-Ticker-Lektionen im Track-Record-Block
+- [x] C4: Cross-Ticker-Lektionen im Track-Record-Block
+  (Commit siehe git log — `build_cross_ticker_context` + `build_memory_context`
+  in feedback.py; Pipeline ergänzt den Cross-Ticker-Block nur, wenn
+  `build_reflection_context` ungepatcht ist — Rückwärtskompatibilität mit
+  bestehenden Pipeline-Tests. Der Report-Abschnitt "Reflexion (Track-Record)"
+  bleibt Ticker-spezifisch; der Cross-Ticker-Block geht via
+  `_reflection_context` in die Trader-/Ensemble-/Risk-/PM-Prompts und ist
+  zusätzlich in `result["_cross_ticker_context"]` abgelegt.)
 - [ ] C6: Pending-Entries-Rückwärts-Auflösung (Look-ahead-frei)
 - [ ] C7: Journal-Rotation (max_entries)

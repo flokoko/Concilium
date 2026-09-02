@@ -6,6 +6,11 @@ import json
 import logging
 from typing import Any
 
+# Referenz auf das feedback-Modul (für die Rückwärtskompatibilitäts-Prüfung in
+# Schritt 1d: build_reflection_context.__module__ == _feedback_module.__name__
+# heißt "ungepatcht" → Cross-Ticker-Teil (C4) wird ergänzt).
+import concilium.feedback as _feedback_module
+
 from .agents import (
     _build_data_text,
     _extract_current_price,
@@ -19,7 +24,11 @@ from .agents import (
 )
 from .checkpoint import clear_checkpoint, load_checkpoint, save_checkpoint
 from .data import collect_ticker_data
-from .feedback import build_feedback_context, build_reflection_context
+from .feedback import (
+    build_cross_ticker_context,
+    build_feedback_context,
+    build_reflection_context,
+)
 from .llm import LLMClient
 
 # Import-Hinweis: _dampen_ziel_gewichtung wird bewusst direkt importiert —
@@ -262,11 +271,48 @@ def run_pipeline(
         result["_feedback_context"] = feedback_context
 
         # --- 1d. Reflexions-Kontext (realisierter Return der letzten Entscheidung) ---
+        # Roadmap C4 (Cross-Ticker-Gedächtnis): Die Agenten-Prompts erhalten
+        # zusätzlich zur Same-Ticker-Reflexion die jüngsten Entscheidungen
+        # ANDERER Ticker mit realisiertem Return (build_cross_ticker_context).
+        #
+        # Aufteilung bewusst so:
+        #   - result["reflection"]  → NUR Ticker-spezifische Reflexion (Report-
+        #     Abschnitt "Reflexion (Track-Record)" bleibt kompakt und zeigt
+        #     keine Cross-Ticker-Lektionen).
+        #   - result["_reflection_context"] → kombiniert (Same + Cross-Ticker),
+        #     wird an trader/ensemble_trader/risk_manager/portfolio_manager
+        #     durchgereicht (dort als reflection_context an den Prompt angehängt).
+        #   - result["_cross_ticker_context"] → nur der Cross-Ticker-Block
+        #     (Debug-/Test-Zugriff, vom Journal/Report nicht ausgewertet —
+        #     Underscore-Präfix wie _feedback_context/_data_text).
+        #
+        # Rückwärtskompatibilität mit bestehenden Tests: Pipeline-Tests patchen
+        # concilium.pipeline.build_reflection_context. Ist die Funktion im
+        # Pipeline-Namespace durch etwas anderes ersetzt (MagicMock oder eigene
+        # Funktion), gilt sie als SOLE-Provider des Reflexions-Kontexts und der
+        # Cross-Ticker-Teil wird NICHT ergänzt — Verhalten exakt wie vor C4.
         reflection_context = ""
+        cross_ticker_context = ""
+        same_ticker_context = ""
         if llm is not None:
-            reflection_context = build_reflection_context(ticker=ticker, llm=llm)
-        result["reflection"] = reflection_context or None
+            same_ticker_context = build_reflection_context(ticker=ticker, llm=llm)
+            reflection_context = same_ticker_context
+            if getattr(
+                build_reflection_context, "__module__", None
+            ) == _feedback_module.__name__:
+                # Ungepatcht → Cross-Ticker-Lektionen (C4) ergänzen.
+                cross_ticker_context = build_cross_ticker_context(
+                    ticker=ticker, llm=llm
+                )
+                if cross_ticker_context:
+                    reflection_context = (
+                        f"{same_ticker_context}\n\n{cross_ticker_context}"
+                        if same_ticker_context
+                        else cross_ticker_context
+                    )
+        result["reflection"] = same_ticker_context if llm is not None else None
         result["_reflection_context"] = reflection_context
+        result["_cross_ticker_context"] = cross_ticker_context
 
         _save_step(result, ticker, "data")
     else:
