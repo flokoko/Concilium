@@ -11,6 +11,10 @@ Ablauf:
   3. Optional max_positions: nur die größten Positionen (nach depot_pct).
   4. Pro Aktie: normale Pipeline (run_pipeline), aber der Report wird im
      Review-Kontext gerendert (generate_report(..., review_mode=True)).
+     Die Pipeline läuft mit journal=False — Review-Läufe (Verkauf-
+     Fragestellung) schreiben KEINE Zeilen ins Entscheidungs-Journal
+     (journal/decisions.csv), damit die Kalibrierung/der Track-Record der
+     Neukauf-Analysen nicht verunreinigt wird.
   5. verkauf_empfehlung wird deterministisch abgeleitet (siehe
      derive_verkauf_empfehlung).
 
@@ -195,6 +199,10 @@ def run_review(
                 debate_rounds=debate_rounds,
                 peers=peers,
                 as_of=as_of,
+                # Review-Läufe (Verkauf-Fragestellung) verunreinigen nicht das
+                # Entscheidungs-Journal der Neukauf-Analysen: PM + Report laufen
+                # normal, aber append_decision wird unterdrückt.
+                journal=False,
             )
             if not isinstance(result, dict):
                 raise ValueError(f"Unerwartetes Pipeline-Ergebnis für '{ticker}'")

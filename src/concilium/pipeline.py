@@ -79,6 +79,7 @@ def run_pipeline(
     skip_final: bool = False,
     debate_rounds: int = 1,
     as_of: str | None = None,
+    journal: bool = True,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -117,6 +118,14 @@ def run_pipeline(
             collect_ticker_data durchgereicht (Kurs-Historie bis zu diesem
             Datum; Fundamentals/Makro/News bleiben aktuell). Default None =
             bisheriges Verhalten.
+        journal: Wenn True (Default — bisheriges Verhalten), wird die finale
+            Entscheidung via append_decision ins Entscheidungs-Journal
+            (journal/decisions.csv) geschrieben. Wenn False, wird NUR der
+            append_decision-Aufruf unterdrückt — Portfolio-Manager-Schritt,
+            Usage-Recording und Checkpoint-Cleanup laufen normal weiter.
+            Der Exit-Review-Modus (``--review``) nutzt journal=False, damit
+            die Depot-Review-Läufe (Verkauf-Fragestellung) die Kalibrierung/
+            den Track-Record der Neukauf-Analysen nicht verunreinigen.
 
     Returns:
         dict mit allen Zwischenergebnissen.
@@ -279,38 +288,6 @@ def run_pipeline(
             result["portfolio_fit"] = None
         _save_step(result, ticker, "portfolio_fit")
 
-    # --- 5b'. Kalibrierungs-gestützte Dämpfung der Ziel-Gewichtung ---
-    # Der Track-Record zeigt, dass das System überkonfident ist (Konfidenz 4-5,
-    # aber ~29-34% Hit-Rate). Die LLM-empfohlene Ziel-Gewichtung wird daher
-    # deterministisch mit der historischen Trefferquote der Aktion skaliert.
-    # Original wird in ziel_gewichtung_original erhalten; die Dämpfung darf
-    # NIEMALS crashen (bei Exception läuft die Pipeline unverändert weiter).
-    pf_for_dampen = result.get("portfolio_fit")
-    if isinstance(pf_for_dampen, dict):
-        try:
-            aktion = (trade or {}).get("aktion")
-            if aktion:
-                pf_for_dampen["ziel_gewichtung_original"] = pf_for_dampen.get(
-                    "ziel_gewichtung_pct"
-                )
-                ziel = pf_for_dampen.get("ziel_gewichtung_pct")
-                if isinstance(ziel, int | float) and not isinstance(ziel, bool):
-                    gedämpft = _dampen_ziel_gewichtung(float(ziel), str(aktion))
-                    if gedämpft is not None:
-                        pf_for_dampen["ziel_gewichtung_pct"] = gedämpft
-                        pf_for_dampen["ziel_gewichtung_gedämpft"] = True
-                        logger.info(
-                            "Ziel-Gewichtung kalibrierungs-gedämpft (%s): "
-                            "%.1f → %.1f",
-                            aktion,
-                            float(ziel),
-                            gedämpft,
-                        )
-        except Exception as exc:  # noqa: BLE001 — nie crashen
-            logger.warning(
-                "Dämpfung der Ziel-Gewichtung fehlgeschlagen: %s", exc
-            )
-
     # --- 5c. Trade-Revision (2nd Pass) --- #
     if not _is_completed(result, "trade_revision"):
         result["trade_original"] = None
@@ -337,6 +314,48 @@ def run_pipeline(
             logger.warning("Trade-Revision fehlgeschlagen: %s", exc)
         _save_step(result, ticker, "trade_revision")
 
+    # --- 5b'. Kalibrierungs-gestützte Dämpfung der Ziel-Gewichtung ---
+    # Wird NACH Schritt 5c (Trade-Revision) ausgeführt: Die Dämpfung basiert
+    # auf der FINALEN (revidierten) Trade-Aktion — die Trade-Revision kann die
+    # Aktion ändern (z. B. KAUFEN→HALTEN), und die Ziel-Gewichtung muss zur
+    # Aktion konsistent sein, die Journal + PM schließlich sehen.
+    # Der Track-Record zeigt, dass das System überkonfident ist (Konfidenz 4-5,
+    # aber ~29-34% Hit-Rate). Die LLM-empfohlene Ziel-Gewichtung wird daher
+    # deterministisch mit der historischen Trefferquote der Aktion skaliert.
+    # Original wird in ziel_gewichtung_original erhalten; die Dämpfung darf
+    # NIEMALS crashen (bei Exception läuft die Pipeline unverändert weiter).
+    # Resume-Idempotenz: Bei Resume mit bereits abgeschlossenem trade_revision
+    # ist `trade` der revidierte Trade aus dem Checkpoint — der Block läuft
+    # dann trotzdem (er steht bewusst NICHT unter dem trade_revision-Guard),
+    # darf aber einen bereits gedämpften Wert nicht erneut dämpfen (sonst
+    # würde z. B. 10.0 → 5.2 → 2.7 doppelt skaliert).
+    pf_for_dampen = result.get("portfolio_fit")
+    if isinstance(pf_for_dampen, dict):
+        bereits_gedämpft = bool(pf_for_dampen.get("ziel_gewichtung_gedämpft"))
+        try:
+            aktion = (trade or {}).get("aktion")
+            if aktion and not bereits_gedämpft:
+                pf_for_dampen["ziel_gewichtung_original"] = pf_for_dampen.get(
+                    "ziel_gewichtung_pct"
+                )
+                ziel = pf_for_dampen.get("ziel_gewichtung_pct")
+                if isinstance(ziel, int | float) and not isinstance(ziel, bool):
+                    gedämpft = _dampen_ziel_gewichtung(float(ziel), str(aktion))
+                    if gedämpft is not None:
+                        pf_for_dampen["ziel_gewichtung_pct"] = gedämpft
+                        pf_for_dampen["ziel_gewichtung_gedämpft"] = True
+                        logger.info(
+                            "Ziel-Gewichtung kalibrierungs-gedämpft (%s): "
+                            "%.1f → %.1f",
+                            aktion,
+                            float(ziel),
+                            gedämpft,
+                        )
+        except Exception as exc:  # noqa: BLE001 — nie crashen
+            logger.warning(
+                "Dämpfung der Ziel-Gewichtung fehlgeschlagen: %s", exc
+            )
+
     # --- 6. Portfolio-Manager ---
     if skip_final:
         # Im Portfolio-Modus wird der PM zurückgehalten bis der Portfolio-Kontext
@@ -360,10 +379,13 @@ def run_pipeline(
         _save_step(result, ticker, "final")
 
     # --- Feature 4: Entscheidungs-Journal ---
-    # Nur im LLM-Modus (llm nicht None), wenn final existiert, und NICHT
+    # Nur im LLM-Modus (llm nicht None), wenn final existiert, NICHT
     # im skip_final-Modus (dort wird das Journal später von run_portfolio
-    # mit dem Portfolio-Kontext-final geschrieben).
-    if not skip_final:
+    # mit dem Portfolio-Kontext-final geschrieben) und nur wenn journal=True.
+    # journal=False (z. B. Exit-Review) unterdrückt ausschließlich das
+    # append_decision — PM, Usage-Recording und Checkpoint-Cleanup laufen
+    # unverändert weiter.
+    if not skip_final and journal:
         try:
             from .journal import append_decision
 

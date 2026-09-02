@@ -739,3 +739,104 @@ class TestReviewCliMode:
 
         code, _ = _run_cli_review(monkeypatch, tmp_path, hooks={"run_review": boom})
         assert code == 1
+
+
+# --------------------------------------------------------------------------- #
+# (h) Review schreibt kein Journal (Bug 2: run_pipeline mit journal=False)
+# --------------------------------------------------------------------------- #
+
+
+class TestRunReviewNoJournal:
+    """Der Review-Modus verunreinigt das Entscheidungs-Journal nicht."""
+
+    def test_run_review_passes_journal_false(self):
+        """run_review übergibt journal=False an run_pipeline."""
+        captured: dict = {}
+
+        def mock_run_pipeline(ticker, **kwargs):
+            captured.update(kwargs)
+            return _make_result(ticker)
+
+        with patch("concilium.review.fetch_portfolio_positions",
+                   side_effect=lambda: _mock_positions()):
+            with patch("concilium.review.run_pipeline", side_effect=mock_run_pipeline):
+                run_review(None)
+
+        assert captured.get("journal") is False
+
+    def test_run_review_full_run_writes_no_journal_csv(self, tmp_path, monkeypatch):
+        """End-to-End: ein ganzer Review-Lauf erzeugt KEINE journal/decisions.csv.
+
+        Die Pipeline wird NICHT gemockt — alle Agenten laufen offline mit
+        Mocks (wie in test_pipeline_dampen_order.py). append_decision wird
+        bewusst NICHT gepatcht: Der Test beweist, dass die Pipeline real
+        keinen Journal-Eintrag schreibt.
+        """
+        from unittest.mock import MagicMock
+
+        monkeypatch.chdir(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(state))
+
+        llm = MagicMock()
+        llm.total_usage = {"prompt_tokens": 0, "completion_tokens": 0,
+                           "total_tokens": 0}
+
+        mock_data = {
+            "ticker": "AAPL",
+            "fundamentals": {"name": "Apple", "sector": "Tech"},
+            "technicals": {"current_price": 150},
+            "sentiment": {},
+            "news": [],
+        }
+        mock_analysts = {
+            "fundamental": {"stimmung": "bullish", "score": 4,
+                            "zusammenfassung": "Gut", "_raw": ""},
+            "technical": {"stimmung": "bullish", "score": 4,
+                          "zusammenfassung": "Gut", "_raw": ""},
+            "sentiment": {"stimmung": "neutral", "score": 3,
+                          "zusammenfassung": "Ok", "_raw": ""},
+        }
+        mock_trade = {
+            "rolle": "Trader", "aktion": "VERKAUFEN", "rating": "VERKAUFEN",
+            "zielkurs": 140, "stop_loss": 165, "positionsanteil": 0, "_raw": "",
+        }
+
+        patches = {
+            "collect_ticker_data": MagicMock(return_value=mock_data),
+            "analyst_team": MagicMock(return_value=mock_analysts),
+            "debate": MagicMock(
+                return_value={"bull": {"_raw": "Bull"}, "bear": {"_raw": "Bear"}}
+            ),
+            "trader": MagicMock(return_value=mock_trade),
+            "ensemble_trader": MagicMock(return_value=mock_trade),
+            "risk_manager": MagicMock(
+                return_value={"risiko_score": 3, "empfehlung": "GENEHMIGT"}
+            ),
+            "portfolio_fit_agent": MagicMock(return_value=None),
+            "trade_revision": MagicMock(return_value=mock_trade),
+            "portfolio_manager": MagicMock(
+                return_value={"entscheidung": "ABGELEHNT", "confidence": 3}
+            ),
+            "build_feedback_context": MagicMock(return_value=""),
+            "build_reflection_context": MagicMock(return_value=""),
+        }
+
+        with patch("concilium.review.fetch_portfolio_positions",
+                   side_effect=lambda: _mock_positions()):
+            with patch.multiple("concilium.pipeline", **patches):
+                review_result = run_review(llm)
+
+        # Review-Ergebnis unverändert: verkauf_empfehlung abgeleitet, Report da
+        entry = review_result["ergebnisse"]["AAPL"]
+        assert entry["verkauf_empfehlung"] is True
+        assert "REVIEW-MODUS" in entry["report"]
+        assert isinstance(entry["result"], dict)
+        assert entry["result"]["ticker"] == "AAPL"
+        assert review_result["fehler"] == 0
+        # Der Kern: KEIN decisions.csv geschrieben, kein _journal_written-Marker
+        assert not (tmp_path / "journal" / "decisions.csv").exists()
+        assert "_journal_written" not in entry["result"]
+        # Auch die usage/usage.csv bleibt unberührt (total_usage leer)
+        assert not (tmp_path / "usage" / "usage.csv").exists()

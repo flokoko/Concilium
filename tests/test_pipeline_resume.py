@@ -393,3 +393,140 @@ class TestEnsembleResume:
         assert result["final"]["entscheidung"] == "GENEHMIGT"
         # ensemble_trader sollte beim Resume aufgerufen worden sein
         agents_ok["ensemble_trader"].assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# journal-Parameter: append_decision wird nur bei journal=True geschrieben
+# --------------------------------------------------------------------------- #
+
+
+def _llm_without_usage() -> MagicMock:
+    """LLM-Mock mit leerem total_usage (verhindert usage/usage.csv-Einträge)."""
+    llm = MagicMock()
+    llm.total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    return llm
+
+
+class TestJournalParameter:
+    """run_pipeline(journal=False) unterdrückt NUR append_decision."""
+
+    def test_journal_false_no_append_decision(self, state_dir, tmp_path, monkeypatch):
+        """journal=False → append_decision wird nicht aufgerufen, _journal_written fehlt."""
+        from concilium.pipeline import run_pipeline
+
+        monkeypatch.chdir(tmp_path)
+
+        agents = _patch_all_agents()
+        with patch.multiple("concilium.pipeline", **agents), \
+             patch("concilium.journal.append_decision") as mock_journal:
+            result = run_pipeline(
+                "TEST", llm=_llm_without_usage(), ensemble=False, resume=False,
+                journal=False,
+            )
+
+        mock_journal.assert_not_called()
+        assert "_journal_written" not in result
+        # Kein decisions.csv im Arbeitsverzeichnis geschrieben
+        assert not (tmp_path / "journal" / "decisions.csv").exists()
+
+    def test_journal_true_writes_journal(self, state_dir):
+        """journal=True → append_decision wird aufgerufen, Marker gesetzt."""
+        from concilium.pipeline import run_pipeline
+
+        agents = _patch_all_agents()
+        with patch.multiple("concilium.pipeline", **agents), \
+             patch("concilium.journal.append_decision") as mock_journal:
+            result = run_pipeline(
+                "TEST", llm=_llm_without_usage(), ensemble=False, resume=False,
+                journal=True,
+            )
+
+        mock_journal.assert_called_once()
+        assert result["_journal_written"] is True
+
+    def test_default_journal_true_backward_compatible(self, state_dir):
+        """Ohne journal-Argument (Default True) → Journal wird geschrieben."""
+        from inspect import signature
+
+        from concilium.pipeline import run_pipeline
+
+        sig = signature(run_pipeline)
+        assert sig.parameters["journal"].default is True
+
+        agents = _patch_all_agents()
+        with patch.multiple("concilium.pipeline", **agents), \
+             patch("concilium.journal.append_decision") as mock_journal:
+            result = run_pipeline(
+                "TEST", llm=_llm_without_usage(), ensemble=False, resume=False
+            )
+
+        mock_journal.assert_called_once()
+        assert result["_journal_written"] is True
+
+    def test_journal_false_still_runs_pm_and_clears_checkpoint(self, state_dir):
+        """journal=False unterdrückt NICHT PM-Schritt und Checkpoint-Cleanup."""
+        from concilium.checkpoint import load_checkpoint
+        from concilium.pipeline import run_pipeline
+
+        agents = _patch_all_agents()
+        with patch.multiple("concilium.pipeline", **agents), \
+             patch("concilium.journal.append_decision") as mock_journal:
+            result = run_pipeline(
+                "TEST", llm=_llm_without_usage(), ensemble=False, resume=False,
+                journal=False,
+            )
+
+        # PM lief normal
+        agents["portfolio_manager"].assert_called_once()
+        assert result["final"]["entscheidung"] == "GENEHMIGT"
+        assert "final" in result["_completed_steps"]
+        # append_decision wurde übersprungen
+        mock_journal.assert_not_called()
+        # Checkpoint wurde trotzdem aufgeräumt
+        assert load_checkpoint("TEST") is None
+
+    def test_journal_false_with_skip_final_still_clears_checkpoint(self, state_dir):
+        """skip_final=True + journal=False → Checkpoint-Cleanup läuft trotzdem.
+
+        Der Cleanup hängt ausschließlich an skip_final (nicht an journal):
+        journal=False darf das Cleanup-Verhalten von skip_final nicht ändern.
+        """
+        from concilium.checkpoint import load_checkpoint, save_checkpoint
+        from concilium.pipeline import run_pipeline
+
+        # Checkpoint manuell anlegen (realistisch: bis trade_revision fertig)
+        save_checkpoint(
+            {
+                "ticker": "TEST",
+                "data": _MOCK_DATA,
+                "_data_text": None,
+                "_feedback_context": "",
+                "_reflection_context": "",
+                "analysts": _MOCK_ANALYSTS,
+                "debate": _MOCK_DEBATE,
+                "trade": _MOCK_TRADE,
+                "risk": _MOCK_RISK,
+                "portfolio_fit": _MOCK_PORTFOLIO_FIT,
+                "_completed_steps": [
+                    "data", "analysts", "debate", "trade", "risk",
+                    "portfolio_fit", "trade_revision",
+                ],
+            },
+            "TEST",
+        )
+        assert load_checkpoint("TEST") is not None
+
+        agents = _patch_all_agents()
+        with patch.multiple("concilium.pipeline", **agents), \
+             patch("concilium.journal.append_decision"):
+            result = run_pipeline(
+                "TEST", llm=_llm_without_usage(), ensemble=False, resume=True,
+                skip_final=True, journal=False,
+            )
+
+        # skip_final-Verhalten unverändert: PM pending, final None
+        assert result["final"] is None
+        assert result["_final_pending"] is True
+        # Checkpoint NICHT aufgeräumt (skip_final-Verhalten — run_portfolio
+        # übernimmt die Endabwicklung)
+        assert load_checkpoint("TEST") is not None
