@@ -143,16 +143,18 @@ Klein aber sauber für langfristige Nutzung.
 
 ## ✅ PRIORISIERTE TODO-LISTE
 ### 🔴 Sofort
-- [ ] B1: `_idx` in `_parse_positions` setzen / `portfolio_overlap` fixen
-- [ ] B2: `_dampen_stark_rating` in `trade_revision` nachziehen (Disziplin nicht umgehen)
+- [x] B1: `_idx` in `_parse_positions` setzen / `portfolio_overlap` fixen
+- [x] B2: `_dampen_stark_rating` in `trade_revision` nachziehen (Disziplin nicht umgehen)
+- [x] **Neu 02.09. N1:** Ziel-Gewichtungs-Dämpfung NACH Trade-Revision (Commit `628814a`) — vorher lief die Dämpfung mit der alten Aktion, obwohl die Revision die Aktion ändern kann
+- [x] **Neu 02.09. N2:** `--review` schreibt kein Journal mehr (Commit `628814a`) — Exit-Review-Läufe verunreinigten die Kalibrierung der Neukauf-Analysen
 
 ### 🟡 Bald
-- [ ] B3: `current_price` in `compute_multi_factor_score` einspeisen
-- [ ] B4: Prompt-%-Einheit (×100) vereinheitlichen
-- [ ] B5: Positionsgrößen-String defensiv normalisieren
-- [ ] B6: `--portfolio --peers` durchreichen
-- [ ] C1: Multi-Runden-Debatte & Risk-Debatte (konfigurierbar)
-- [ ] C5: Resume-Signatur mit Konfigurations-Fingerprint
+- [x] B3: `current_price` in `compute_multi_factor_score` einspeisen
+- [x] B4: Prompt-%-Einheit (×100) vereinheitlichen
+- [x] B5: Positionsgrößen-String defensiv normalisieren
+- [x] B6: `--portfolio --peers` durchreichen
+- [x] C1: Multi-Runden-Debatte & Risk-Debatte (konfigurierbar)
+- [x] C5: Resume-Signatur mit Konfigurations-Fingerprint (Commit `8f3db46`)
 
 ### 🔵 Nice-to-have
 - [ ] C2: Analysten-Snapshot als Ground-Truth-Anker

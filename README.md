@@ -182,6 +182,17 @@ letzten abgeschlossenen Stelle fort — die bereits berechneten Agent-Schritte w
 nicht erneut ausgeführt. Erfolgreiche Läufe räumen ihren Checkpoint auf. Bei
 `SIGINT` wird sauber beendet (Exit-Code 130) und der Checkpoint bleibt erhalten.
 
+**Konfigurations-Fingerprint (Roadmap C5):** Ein Checkpoint wird nur dann
+wiederverwendet, wenn die Pipeline-Konfiguration des aktuellen Aufrufs exakt mit der
+beim Checkpoint-Schreiben übereinstimmt — geprüft über einen deterministischen
+Fingerprint aus `ensemble`, `ensemble_runs`, `peers` (sortiert normalisiert),
+`debate_rounds` und `backtest` sowie das gepinnte Analysedatum `as_of`. Wird
+`--resume` mit **geänderten Flags** gestartet (z. B. anderes `--ensemble-runs`,
+andere `--peers`, `--debate-rounds`, `--backtest`), wird der Checkpoint ignoriert und
+die Pipeline startet von vorn — damit werden Zwischenergebnisse aus einer anderen
+Konfiguration nicht inkonsistent fortgeschrieben. Checkpoints aus früheren Versionen
+ohne Fingerprint gelten ebenfalls als inkompatibel.
+
 ## Lernen aus dem Track-Record
 
 Concilium ist explizit lernend über mehrere Mechanismen:
