@@ -31,7 +31,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from concilium.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
-from concilium.pipeline import run_pipeline  # noqa: E402
+from concilium.pipeline import _pipeline_fingerprint, run_pipeline  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Mock-Daten (analog test_ziel_gewichtung_daempfung.py / test_pipeline_resume.py)
@@ -256,6 +256,15 @@ class TestDaempfungResumeIdempotenz:
                     "portfolio_fit",
                     "trade_revision",
                 ],
+                # C5: Fingerprint der identischen Resume-Konfiguration —
+                # ohne ihn würde der Checkpoint als Altdaten ignoriert.
+                "_pipeline_fingerprint": _pipeline_fingerprint(
+                    ensemble=False,
+                    ensemble_runs=3,
+                    peers=None,
+                    debate_rounds=1,
+                    backtest=False,
+                ),
             },
             "TEST",
         )
@@ -305,6 +314,15 @@ class TestDaempfungResumeIdempotenz:
                     "portfolio_fit",
                     "trade_revision",
                 ],
+                # C5: Fingerprint der identischen Resume-Konfiguration —
+                # ohne ihn würde der Checkpoint als Altdaten ignoriert.
+                "_pipeline_fingerprint": _pipeline_fingerprint(
+                    ensemble=False,
+                    ensemble_runs=3,
+                    peers=None,
+                    debate_rounds=1,
+                    backtest=False,
+                ),
             },
             "TEST",
         )

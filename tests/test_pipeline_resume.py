@@ -14,6 +14,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+from concilium.pipeline import run_pipeline  # noqa: E402
+
 
 @pytest.fixture
 def state_dir(tmp_path, monkeypatch):
@@ -340,7 +342,7 @@ class TestNoLlmCheckpoint:
     def test_no_llm_clears_checkpoint(self, state_dir):
         """run_pipeline(llm=None) räumt den Checkpoint auf."""
         from concilium.checkpoint import load_checkpoint, save_checkpoint
-        from concilium.pipeline import run_pipeline
+        from concilium.pipeline import _pipeline_fingerprint, run_pipeline
 
         # Checkpoint manuell anlegen (mit data-Key, realistisch)
         save_checkpoint(
@@ -351,6 +353,16 @@ class TestNoLlmCheckpoint:
                 "_feedback_context": "",
                 "_reflection_context": "",
                 "_completed_steps": ["data"],
+                # C5: Fingerprint der identischen Resume-Konfiguration
+                # (Defaults) — ohne ihn würde der Checkpoint als Altdaten
+                # ignoriert und nicht aufgeräumt.
+                "_pipeline_fingerprint": _pipeline_fingerprint(
+                    ensemble=True,
+                    ensemble_runs=3,
+                    peers=None,
+                    debate_rounds=1,
+                    backtest=False,
+                ),
             },
             "TEST",
         )
@@ -492,7 +504,7 @@ class TestJournalParameter:
         journal=False darf das Cleanup-Verhalten von skip_final nicht ändern.
         """
         from concilium.checkpoint import load_checkpoint, save_checkpoint
-        from concilium.pipeline import run_pipeline
+        from concilium.pipeline import _pipeline_fingerprint, run_pipeline
 
         # Checkpoint manuell anlegen (realistisch: bis trade_revision fertig)
         save_checkpoint(
@@ -511,6 +523,16 @@ class TestJournalParameter:
                     "data", "analysts", "debate", "trade", "risk",
                     "portfolio_fit", "trade_revision",
                 ],
+                # C5: Fingerprint der identischen Resume-Konfiguration
+                # (Defaults) — ohne ihn würde der Checkpoint als Altdaten
+                # ignoriert und der PM-Pending-Ablauf nicht getestet.
+                "_pipeline_fingerprint": _pipeline_fingerprint(
+                    ensemble=False,
+                    ensemble_runs=3,
+                    peers=None,
+                    debate_rounds=1,
+                    backtest=False,
+                ),
             },
             "TEST",
         )
@@ -530,3 +552,231 @@ class TestJournalParameter:
         # Checkpoint NICHT aufgeräumt (skip_final-Verhalten — run_portfolio
         # übernimmt die Endabwicklung)
         assert load_checkpoint("TEST") is not None
+
+
+# --------------------------------------------------------------------------- #
+# C5: Resume-Konfigurations-Fingerprint
+# --------------------------------------------------------------------------- #
+
+
+class TestPipelineFingerprintFunction:
+    """_pipeline_fingerprint: deterministisch + peers-Normalisierung."""
+
+    def test_deterministic_same_input_same_string(self):
+        """Gleiche Eingaben → exakt derselbe Fingerprint-String."""
+        from concilium.pipeline import _pipeline_fingerprint
+
+        a = _pipeline_fingerprint(True, 3, ["AAPL", "MSFT"], 2, False)
+        b = _pipeline_fingerprint(True, 3, ["AAPL", "MSFT"], 2, False)
+        assert a == b
+        assert isinstance(a, str)
+
+    def test_peer_order_irrelevant(self):
+        """Reihenfolge der Peers ist egal — Fingerprint identisch."""
+        from concilium.pipeline import _pipeline_fingerprint
+
+        a = _pipeline_fingerprint(True, 3, ["MSFT", "AAPL"], 1, False)
+        b = _pipeline_fingerprint(True, 3, ["AAPL", "MSFT"], 1, False)
+        assert a == b
+
+    def test_peers_none_equals_empty_list(self):
+        """peers=None und peers=[] sind äquivalent (gleicher Fingerprint)."""
+        from concilium.pipeline import _pipeline_fingerprint
+
+        assert _pipeline_fingerprint(True, 3, None, 1, False) == (
+            _pipeline_fingerprint(True, 3, [], 1, False)
+        )
+
+    def test_every_parameter_changes_fingerprint(self):
+        """Jede Parameter-Änderung (außer Peer-Reihenfolge) ändert den Fingerprint."""
+        from concilium.pipeline import _pipeline_fingerprint
+
+        base = _pipeline_fingerprint(True, 3, ["AAPL"], 1, False)
+        assert _pipeline_fingerprint(False, 3, ["AAPL"], 1, False) != base  # ensemble
+        assert _pipeline_fingerprint(True, 5, ["AAPL"], 1, False) != base  # runs
+        assert _pipeline_fingerprint(True, 3, ["MSFT"], 1, False) != base  # peers
+        assert _pipeline_fingerprint(True, 3, ["AAPL"], 2, False) != base  # rounds
+        assert _pipeline_fingerprint(True, 3, ["AAPL"], 1, True) != base  # backtest
+
+    def test_as_of_not_in_fingerprint(self):
+        """as_of gehört NICHT in den Fingerprint (separater Check im Resume)."""
+        import inspect
+
+        from concilium.pipeline import _pipeline_fingerprint
+
+        sig = inspect.signature(_pipeline_fingerprint)
+        assert "as_of" not in sig.parameters
+
+    def test_fingerprint_is_stable_json(self):
+        """Fingerprint ist kompakter, sortierter JSON-String der Konfiguration."""
+        import json as _json
+
+        from concilium.pipeline import _FINGERPRINT_KEY, _pipeline_fingerprint
+
+        fp = _pipeline_fingerprint(True, 3, ["AAPL"], 1, False)
+        parsed = _json.loads(fp)
+        assert parsed == {
+            "ensemble": True,
+            "ensemble_runs": 3,
+            "peers": ["AAPL"],
+            "debate_rounds": 1,
+            "backtest": False,
+        }
+        assert fp == _json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        assert _FINGERPRINT_KEY == "_pipeline_fingerprint"
+
+
+class TestResumeFingerprintCompat:
+    """C5: Resume nutzt Checkpoint nur bei identischer Konfiguration.
+
+    Muster: Phase 1 crasht bei risk_manager (Checkpoint bis debate, MIT
+    Fingerprint); Phase 2 resumt mit geänderten Konfigurations-Parametern —
+    der Checkpoint muss ignoriert und von vorn gestartet werden.
+    """
+
+    def _crash_run(self, **run_kwargs):
+        """Phase 1: Crash bei risk_manager → Checkpoint bis debate."""
+        agents_crash = _patch_all_agents(
+            risk_manager=MagicMock(side_effect=RuntimeError("Crash")),
+        )
+        with patch.multiple("concilium.pipeline", **agents_crash), \
+             patch("concilium.journal.append_decision"):
+            with pytest.raises(RuntimeError):
+                run_pipeline("TEST", llm=MagicMock(), resume=False, **run_kwargs)
+
+    def test_checkpoint_contains_fingerprint(self, state_dir):
+        """Der Crash-Checkpoint trägt den Fingerprint des Laufs."""
+        from concilium.checkpoint import load_checkpoint
+        from concilium.pipeline import _FINGERPRINT_KEY, _pipeline_fingerprint
+
+        self._crash_run(ensemble=False, ensemble_runs=3, peers=None,
+                        debate_rounds=1, backtest=False)
+
+        cp = load_checkpoint("TEST")
+        assert cp is not None
+        assert cp[_FINGERPRINT_KEY] == _pipeline_fingerprint(
+            ensemble=False, ensemble_runs=3, peers=None,
+            debate_rounds=1, backtest=False,
+        )
+
+    def test_same_config_checkpoint_is_reused(self, state_dir):
+        """Gleicher Fingerprint → Resume nutzt den Checkpoint (kein data-Recollect)."""
+        self._crash_run(ensemble=False)
+        with patch("concilium.pipeline.collect_ticker_data") as mock_collect:
+            mock_collect.return_value = _MOCK_DATA
+            agents_ok = _patch_all_agents()
+            with patch.multiple("concilium.pipeline", **agents_ok), \
+                 patch("concilium.journal.append_decision"):
+                run_pipeline("TEST", llm=MagicMock(), ensemble=False, resume=True)
+        # data-Schritt war im Checkpoint komplett → collect NICHT erneut
+        mock_collect.assert_not_called()
+
+    def test_changed_ensemble_runs_restarts_fresh(self, state_dir):
+        """Anderes ensemble_runs → Checkpoint ignoriert, von vorn (data neu)."""
+        self._crash_run(ensemble=True, ensemble_runs=3)
+        mock_collect = MagicMock(return_value=_MOCK_DATA)
+        agents_ok = _patch_all_agents(collect_ticker_data=mock_collect)
+        with patch.multiple("concilium.pipeline", **agents_ok), \
+             patch("concilium.journal.append_decision"):
+            result = run_pipeline(
+                "TEST", llm=MagicMock(), ensemble=True, ensemble_runs=5,
+                resume=True,
+            )
+        # Checkpoint verworfen → data wurde neu gesammelt
+        mock_collect.assert_called_once()
+        # result trägt den Fingerprint der NEUEN Konfiguration
+        import json as _json
+
+        from concilium.pipeline import _FINGERPRINT_KEY
+
+        assert _json.loads(result[_FINGERPRINT_KEY])["ensemble_runs"] == 5
+
+    def test_changed_peers_restart_fresh(self, state_dir):
+        """Andere peers → Checkpoint ignoriert, von vorn."""
+        self._crash_run(peers=["AAPL"])
+        mock_collect = MagicMock(return_value=_MOCK_DATA)
+        agents_ok = _patch_all_agents(collect_ticker_data=mock_collect)
+        with patch.multiple("concilium.pipeline", **agents_ok), \
+             patch("concilium.journal.append_decision"):
+            run_pipeline(
+                "TEST", llm=MagicMock(), ensemble=False,
+                peers=["MSFT"], resume=True,
+            )
+        mock_collect.assert_called_once()
+
+    def test_changed_debate_rounds_restart_fresh(self, state_dir):
+        """Andere debate_rounds → Checkpoint ignoriert, von vorn."""
+        self._crash_run(debate_rounds=1)
+        mock_collect = MagicMock(return_value=_MOCK_DATA)
+        agents_ok = _patch_all_agents(collect_ticker_data=mock_collect)
+        with patch.multiple("concilium.pipeline", **agents_ok), \
+             patch("concilium.journal.append_decision"):
+            run_pipeline(
+                "TEST", llm=MagicMock(), ensemble=False,
+                debate_rounds=2, resume=True,
+            )
+        mock_collect.assert_called_once()
+
+    def test_changed_backtest_restart_fresh(self, state_dir):
+        """Anderes backtest-Flag → Checkpoint ignoriert, von vorn."""
+        self._crash_run(backtest=False)
+        # history=[] → echtes run_backtest kehrt sicher mit None-Metriken zurück
+        mock_collect = MagicMock(return_value=dict(_MOCK_DATA, history=[], peers=[]))
+        agents_ok = _patch_all_agents(collect_ticker_data=mock_collect)
+        with patch.multiple("concilium.pipeline", **agents_ok), \
+             patch("concilium.journal.append_decision"):
+            run_pipeline(
+                "TEST", llm=MagicMock(), ensemble=False,
+                backtest=True, resume=True,
+            )
+        mock_collect.assert_called_once()
+
+    def test_checkpoint_without_fingerprint_treated_as_incompatible(self, state_dir):
+        """Altdaten-Checkpoint (ohne Fingerprint) → ignoriert, von vorn."""
+        from concilium.checkpoint import save_checkpoint
+
+        save_checkpoint(
+            {
+                "ticker": "TEST",
+                "data": _MOCK_DATA,
+                "_data_text": None,
+                "_feedback_context": "",
+                "_reflection_context": "",
+                "analysts": _MOCK_ANALYSTS,
+                "debate": _MOCK_DEBATE,
+                "_completed_steps": ["data", "analysts", "debate"],
+                # bewusst OHNE _pipeline_fingerprint (Altdaten-Simulation)
+            },
+            "TEST",
+        )
+        mock_collect = MagicMock(return_value=_MOCK_DATA)
+        agents_ok = _patch_all_agents(collect_ticker_data=mock_collect)
+        with patch.multiple("concilium.pipeline", **agents_ok), \
+             patch("concilium.journal.append_decision"):
+            run_pipeline("TEST", llm=MagicMock(), ensemble=False, resume=True)
+        # Checkpoint verworfen → alle Schritte inkl. data neu
+        mock_collect.assert_called_once()
+        agents_ok["analyst_team"].assert_called_once()
+        agents_ok["debate"].assert_called_once()
+
+    def test_fingerprint_survives_full_run_and_resume_reload(self, state_dir):
+        """Fingerprint bleibt über Checkpoint-Schreiben/Lesen stabil."""
+        from concilium.checkpoint import load_checkpoint
+        from concilium.pipeline import _FINGERPRINT_KEY, _pipeline_fingerprint
+
+        self._crash_run(ensemble=False)
+        cp = load_checkpoint("TEST")
+        assert cp is not None
+        expected = _pipeline_fingerprint(
+            ensemble=False, ensemble_runs=3, peers=None,
+            debate_rounds=1, backtest=False,
+        )
+        assert cp[_FINGERPRINT_KEY] == expected
+
+        # Phase 2: identische Konfiguration → Resume übernimmt Checkpoint,
+        # result trägt denselben Fingerprint weiter
+        agents_ok = _patch_all_agents()
+        with patch.multiple("concilium.pipeline", **agents_ok), \
+             patch("concilium.journal.append_decision"):
+            result = run_pipeline("TEST", llm=MagicMock(), ensemble=False, resume=True)
+        assert result[_FINGERPRINT_KEY] == expected

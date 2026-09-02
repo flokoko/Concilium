@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -55,6 +56,42 @@ def _mark_completed(result: dict[str, Any], step: str) -> None:
 def _is_completed(result: dict[str, Any], step: str) -> bool:
     """Gibt True zurück, wenn step in _completed_steps enthalten ist."""
     return step in result.get("_completed_steps", [])
+
+
+# Key unter dem der Konfigurations-Fingerprint im result-dict (und damit im
+# Checkpoint) persistiert wird. Underscore-Präfix = interner Bookkeeping-Key,
+# wird vom Journal/Report nicht ausgewertet (analog _completed_steps etc.).
+_FINGERPRINT_KEY = "_pipeline_fingerprint"
+
+
+def _pipeline_fingerprint(
+    ensemble: bool,
+    ensemble_runs: int,
+    peers: list[str] | None,
+    debate_rounds: int,
+    backtest: bool,
+) -> str:
+    """Erzeugt einen deterministischen Fingerprint der Pipeline-Konfiguration.
+
+    Der Fingerprint deckt alle run_pipeline-Parameter ab, die die Zwischen-
+    ergebnisse (Analysten, Debatte, Trade, Risk, Portfolio-Fit) beeinflussen
+    können — mit Ausnahme von ``as_of`` (wird separat über den bestehenden
+    as_of-Check geprüft). Bei Resume stellen Checkpoint-Fingerprint und
+    aktueller Fingerprint sicher, dass nur bei identischer Konfiguration
+    fortgeschrieben wird.
+
+    Deterministisch: identische Eingaben → identischer String. Peers werden
+    sortiert normalisiert (None und [] sind äquivalent), damit die Listen-
+    reihenfolge keinen falschen Konflikt erzeugt.
+    """
+    config = {
+        "ensemble": bool(ensemble),
+        "ensemble_runs": int(ensemble_runs),
+        "peers": sorted(peers) if peers else [],
+        "debate_rounds": int(debate_rounds),
+        "backtest": bool(backtest),
+    }
+    return json.dumps(config, sort_keys=True, separators=(",", ":"))
 
 
 def _save_step(result: dict[str, Any], ticker: str, step: str) -> None:
@@ -127,26 +164,59 @@ def run_pipeline(
             die Depot-Review-Läufe (Verkauf-Fragestellung) die Kalibrierung/
             den Track-Record der Neukauf-Analysen nicht verunreinigen.
 
+    Resume-Kompatibilität:
+        Ein Checkpoint wird nur wiederverwendet, wenn (a) das gepinnte
+        Analysedatum (as_of) übereinstimmt UND (b) der beim Checkpoint-
+        Schreiben persistierte Konfigurations-Fingerprint (_pipeline_fingerprint)
+        dem des aktuellen Aufrufs entspricht. Der Fingerprint deckt ensemble,
+        ensemble_runs, peers (sortiert normalisiert), debate_rounds und
+        backtest ab. Checkpoints ohne Fingerprint (Altdaten) gelten als
+        konfigurations-inkompatibel und werden ignoriert — die Pipeline
+        startet dann von vorn.
+
     Returns:
         dict mit allen Zwischenergebnissen.
     """
     result: dict[str, Any] = {}
 
+    # --- Konfigurations-Fingerprint (Roadmap C5) -------------------------------
+    # Einmalig VOR allen Schritten berechnen und in result persistieren: Er
+    # landet damit über _save_step → save_checkpoint automatisch in jedem
+    # Checkpoint. as_of gehört bewusst NICHT hinein — es wird separat über
+    # den bestehenden as_of-Check unten geprüft.
+    fingerprint = _pipeline_fingerprint(
+        ensemble=ensemble,
+        ensemble_runs=ensemble_runs,
+        peers=peers,
+        debate_rounds=debate_rounds,
+        backtest=backtest,
+    )
+
     # --- Resume: Checkpoint laden, falls vorhanden und gewünscht ---
     # Bei gepinntem Analysedatum (as_of) darf ein Checkpoint nur wiederverwendet
     # werden, wenn er mit demselben as_of erzeugt wurde — sonst sind Historie,
     # Indikatoren und Kurs inkonsistent zum gepinnten Datum.
+    # Zusätzlich (C5): Der Checkpoint darf nur bei identischer Pipeline-
+    # Konfiguration fortgeschrieben werden — Zwischenergebnisse aus einer
+    # anderen Konfiguration (z. B. anderes ensemble_runs, andere peers) wären
+    # inkonsistent zum aktuellen Aufruf. Checkpoints ohne Fingerprint
+    # (Altdaten) gelten ebenfalls als inkompatibel (starte von vorn).
     if resume:
         cp = load_checkpoint(ticker)
-        if (
-            cp is not None
-            and (cp.get("data") or {}).get("as_of") != as_of
-        ):
+        if cp is not None and (cp.get("data") or {}).get("as_of") != as_of:
             logger.info(
                 "Resume-Checkpoint ignoriert (anderes Analysedatum: "
                 "Checkpoint as_of=%s, angefordert as_of=%s) — starte von vorn.",
                 (cp.get("data") or {}).get("as_of"),
                 as_of,
+            )
+            cp = None
+        if cp is not None and cp.get(_FINGERPRINT_KEY) != fingerprint:
+            logger.info(
+                "Resume-Checkpoint ignoriert (Konfiguration geändert: "
+                "Checkpoint-Fingerprint=%s, angefordert=%s) — starte von vorn.",
+                cp.get(_FINGERPRINT_KEY) or "(keiner — Altdaten)",
+                fingerprint,
             )
             cp = None
         if cp is not None:
@@ -161,6 +231,12 @@ def run_pipeline(
     else:
         # Auch ohne resume: eventuell vorhandenen Checkpoint ignorieren (nicht löschen).
         pass
+
+    # Fingerprint in result persistieren — wird über _save_step mit jedem
+    # Checkpoint geschrieben (C5). Nach dem Resume-Block gesetzt, damit der
+    # geladene Checkpoint (falls akzeptiert) seinen gespeicherten Fingerprint
+    # nicht verliert bzw. der frische Lauf ihn gleich korrekt trägt.
+    result[_FINGERPRINT_KEY] = fingerprint
 
     # --- 1. Daten sammeln ---
     if not _is_completed(result, "data"):
