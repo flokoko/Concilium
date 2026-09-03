@@ -157,8 +157,8 @@ Klein aber sauber für langfristige Nutzung.
 - [x] C5: Resume-Signatur mit Konfigurations-Fingerprint (Commit `8f3db46`)
 
 ### 🔵 Nice-to-have
-- [ ] C2: Analysten-Snapshot als Ground-Truth-Anker
-- [ ] C3: Instrument-Identity-Kontext in alle Prompts
+- [x] C2: Analysten-Snapshot als Ground-Truth-Anker (Commit `2f99e11`)
+- [x] C3: Instrument-Identity-Kontext in alle Prompts (Commit `2f99e11`)
 - [x] C4: Cross-Ticker-Lektionen im Track-Record-Block
   (Commit siehe git log — `build_cross_ticker_context` + `build_memory_context`
   in feedback.py; Pipeline ergänzt den Cross-Ticker-Block nur, wenn
