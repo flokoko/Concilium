@@ -19,7 +19,14 @@ import os
 from datetime import datetime, timedelta
 from typing import Any
 
-from .evaluate import realised_return_for_row
+from .evaluate import _parse_timestamp, realised_return_for_row
+from .journal import (  # noqa: F401 — JOURNAL_HEADER: re-export für _write_resolution-Fallback
+    JOURNAL_HEADER,
+    REFLECTION_STATUS_PENDING,
+    REFLECTION_STATUS_RESOLVED,
+    _acquire_lock,
+    _release_lock,
+)
 from .llm import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -614,6 +621,345 @@ def _deterministic_lesson(raw_return_pct: float | None, action: str) -> str:
     return "Die Marktlage blieb weitgehend neutral — justiere deine Erwartungen nicht über."
 
 
+def _window_elapsed(decision_date: Any, lookback_days: int, *, today: Any = None) -> bool:
+    """Prüft, ob das Ausgangsfenster einer Entscheidung vollständig abgelaufen ist.
+
+    Look-ahead-frei (Roadmap C6): Eine Entscheidung liefert erst dann eine
+    Reflexion/Lektion, wenn ``decision_date + lookback_days <= today`` gilt —
+    also der komplette Ausgangszeitraum real vergangen ist und die Kurse für
+    das volle Fenster existieren können.
+
+    Args:
+        decision_date: Journal-Timestamp (String) oder bereits geparstes
+            datetime-Objekt. Nicht parsebare Werte → False (nie look-ahead).
+        lookback_days: Zeitfenster in Tagen.
+        today: Optionaler Stichtag (für Tests); Default ``datetime.now()``.
+
+    Returns:
+        True wenn das Fenster vollständig abgelaufen ist, sonst False.
+        Crasht nie.
+    """
+    try:
+        if isinstance(decision_date, datetime):
+            parsed = decision_date
+        else:
+            parsed = _parse_timestamp(str(decision_date or ""))
+        if parsed is None:
+            return False
+        days = max(0, int(lookback_days))
+        deadline = parsed + timedelta(days=days)
+        now = today if today is not None else datetime.now()
+        return deadline <= now
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.debug("Fenster-Check fehlgeschlagen: %s", exc)
+        return False
+
+
+def _status(row: dict[str, Any]) -> str:
+    """Liest den reflection_status einer Journal-Zeile (normalisiert)."""
+    status = (row.get("reflection_status") or "").strip().lower()
+    if status in ("pending", "resolved"):
+        return status
+    return ""  # Legacy-Zeile (vor C6) oder unbekannter Wert
+
+
+def _resolved_returns_from_row(row: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Extrahiert die persistierten Returns (realised_return_pct, alpha_pct).
+
+    Gibt ``(None, None)`` zurück, wenn keine gültigen Werte in der Zeile
+    stehen (z. B. Legacy-Zeile oder unvollständige Auflösung). Crasht nie.
+    """
+    raw = _safe_float(row.get("realised_return_pct"))
+    alpha = _safe_float(row.get("alpha_pct"))
+    return raw, alpha
+
+
+def _lesson_from_returns(
+    ticker: str,
+    raw_return_pct: float | None,
+    alpha_pct: float | None,
+    action: str,
+    ts: str,
+    llm: LLMClient | None = None,
+) -> str:
+    """Erzeugt die Lektion (LLM oder deterministisch) für persistierte Returns.
+
+    Analog zum Lektionsteil von ``build_reflection_context``: Bei übergebenem
+    LLM wird ein Ein-Satz-Coach-Prompt gestellt, bei Fehlern/ohne LLM greift
+    ``_deterministic_lesson``. Crasht nie.
+    """
+    lesson = _deterministic_lesson(raw_return_pct, action)
+    if llm is None:
+        return lesson
+    try:
+        alpha_str = (
+            f"{alpha_pct:+.2f}%" if alpha_pct is not None and math.isfinite(alpha_pct) else "nicht verfügbar"
+        )
+        raw_str = (
+            f"{raw_return_pct:+.2f}%"
+            if raw_return_pct is not None and math.isfinite(raw_return_pct)
+            else "nicht verfügbar"
+        )
+        prompt = (
+            f"Du bist ein Trading-Coach. Formuliere EIN deutschen Satz als Lektion "
+            f"aus einer vergangenen Handelsentscheidung.\n\n"
+            f"Ticker: {ticker}\n"
+            f"Aktion: {action}\n"
+            f"Realisierter Return: {raw_str}\n"
+            f"Alpha vs SPY: {alpha_str}\n\n"
+            f"Antworte mit genau einem deutschen Satz (maximal 30 Wörter)."
+        )
+        messages = [
+            {"role": "system", "content": "Du bist ein präziser Trading-Coach."},
+            {"role": "user", "content": prompt},
+        ]
+        llm_lesson = llm.chat(messages, temperature=0.3)
+        if llm_lesson and llm_lesson.strip():
+            return llm_lesson.strip()
+    except Exception as llm_exc:  # noqa: BLE001 — Fallback
+        logger.debug(
+            "LLM-Lektion fehlgeschlagen, verwende deterministische Lektion: %s", llm_exc
+        )
+    return lesson
+
+
+def _format_reflection_text(
+    ticker: str,
+    raw_return_pct: float | None,
+    alpha_pct: float | None,
+    action: str,
+    ts: str,
+    lesson: str,
+) -> str:
+    """Formatiert den Reflexions-Block (gleiche Form wie bisher)."""
+    alpha_str = (
+        f"{alpha_pct:+.2f}%"
+        if alpha_pct is not None and math.isfinite(alpha_pct)
+        else "-"
+    )
+    raw_str = (
+        f"{raw_return_pct:+.2f}%"
+        if raw_return_pct is not None and math.isfinite(raw_return_pct)
+        else "N/A"
+    )
+    return (
+        f"=== DEINE LETZTE ENTSCHEIDUNG ZU {ticker.upper()} ({ts}) ===\n"
+        f"Aktion: {action} | Realisierter Return: {raw_str} "
+        f"| Alpha vs SPY: {alpha_str}\n"
+        f"Lerne daraus: {lesson}"
+    )
+
+
+def _latest_pending_row(rows: list[dict[str, str]], ticker: str) -> dict[str, str] | None:
+    """Findet die jüngste Zeile für den Ticker, die noch NICHT resolved ist.
+
+    Case-insensitive Ticker-Matching; Zeilen mit ``reflection_status`` in
+    ("", "pending") zählen als unaufgelöst. Rückgabe: die letzte passende
+    Zeile (Annahme: chronologisch sortiert) oder None.
+    """
+    target = (ticker or "").strip().lower()
+    for row in reversed(rows):
+        row_ticker = (row.get("ticker") or "").strip().lower()
+        if row_ticker != target:
+            continue
+        if _status(row) in ("", REFLECTION_STATUS_PENDING):
+            return row
+    return None
+
+
+def resolve_pending_reflections(
+    ticker: str,
+    llm: LLMClient | None = None,
+    lookback_days: int = 30,
+    *,
+    journal_file: str | None = None,
+    _today: datetime | None = None,
+) -> str:
+    """Löst den jüngsten Pending-Eintrag eines Tickers auf, sobald das Ausgangs-
+    fenster vollständig abgelaufen ist (Roadmap C6, look-ahead-frei).
+
+    Ablauf:
+      1. Journal lesen; jüngste Zeile des Tickers mit Status "" oder "pending"
+         finden (case-insensitive). Keine → "".
+      2. Prüfen, ob ``decision_date + lookback_days <= today`` gilt. Wenn das
+         Fenster noch läuft → "" (KEIN Look-ahead: der Ausgang existiert noch
+         nicht, also gibt es auch keine Reflexion).
+      3. Realisierten Return (inkl. Alpha vs SPY) via
+         ``evaluate.realised_return_for_row`` berechnen. None → "".
+      4. Lektion generieren (LLM-Ein-Satz oder deterministischer Fallback).
+      5. Auflösung atomar + lock-sicher ins Journal zurückschreiben:
+         reflection_status="resolved", resolved_at=jetzt, realised_return_pct,
+         alpha_pct. Bei Schreibfehlern wird trotzdem der Text zurückgegeben
+         (nächster Lauf würde erneut resolven — idempotent, crasht nie).
+
+    Args:
+        ticker: Ticker-Symbol.
+        llm: Optionaler LLMClient für die LLM-generierte Lektion.
+        lookback_days: Zeitfenster für die Rendite-Berechnung (Default 30).
+        journal_file: Optionaler Pfad zur Journal-CSV (für Tests). Default:
+            journal/decisions.csv (relativ zum Arbeitsverzeichnis).
+        _today: Optionaler Stichtag (nur für Tests, um Zeitabhängigkeit zu
+            eliminieren). Default None = datetime.now().
+
+    Returns:
+        Der aufgelöste Reflexions-Text im Format von build_reflection_context
+        oder "" wenn nichts auflösbar ist. Crasht niemals.
+    """
+    try:
+        if journal_file is None:
+            journal_file = os.path.join("journal", "decisions.csv")
+        rows = _read_journal_rows(journal_file)
+        if not rows:
+            return ""
+
+        row = _latest_pending_row(rows, ticker)
+        if row is None:
+            return ""
+
+        ts = (row.get("timestamp") or "").strip()
+        decision_date = _parse_timestamp(ts)
+        if decision_date is None:
+            return ""
+
+        # Look-ahead-Schutz: Das Ausgangsfenster muss vollständig abgelaufen
+        # sein, bevor der Return berechnet und die Lektion generiert wird.
+        if not _window_elapsed(decision_date, lookback_days, today=_today):
+            return ""
+
+        # Realisierter Return (yfinance-basiert; im Offline-Test gemockt)
+        rr = realised_return_for_row(row, lookback_days=lookback_days)
+        if rr is None:
+            return ""
+
+        raw_return_pct = rr.get("raw_return_pct")
+        alpha_pct = rr.get("alpha_pct")
+        if raw_return_pct is None or not isinstance(raw_return_pct, (int, float)) \
+                or not math.isfinite(raw_return_pct):
+            return ""
+
+        action = str(rr.get("action") or "")
+        resolved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Lektion generieren (LLM oder deterministischer Fallback) — VOR dem
+        # Zurückschreiben, damit sie mit persistiert wird.
+        lesson = _lesson_from_returns(ticker, raw_return_pct, alpha_pct, action, ts, llm)
+
+        # Auflösung ins Journal zurückschreiben (atomar, lock-sicher,
+        # crasht nie — Erfolg ist keine Voraussetzung für den Rückgabewert).
+        _write_resolution(
+            journal_file,
+            row,
+            resolved_at=resolved_at,
+            realised_return_pct=float(raw_return_pct),
+            alpha_pct=(float(alpha_pct) if isinstance(alpha_pct, (int, float)) and math.isfinite(alpha_pct) else None),
+            lesson=lesson,
+        )
+
+        return _format_reflection_text(
+            ticker, raw_return_pct, alpha_pct, action, ts, lesson
+        )
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.warning("Pending-Reflexion konnte nicht aufgelöst werden: %s", exc)
+        return ""
+
+
+def _write_resolution(
+    journal_file: str,
+    target_row: dict[str, Any],
+    *,
+    resolved_at: str,
+    realised_return_pct: float,
+    alpha_pct: float | None,
+    lesson: str = "",
+) -> bool:
+    """Schreibt die Pending-Auflösung atomar + lock-sicher ins Journal.
+
+    Liest alle Zeilen, ersetzt die Zielfeile (Identifikation über ticker +
+    timestamp), setzt reflection_status/resolved_at/realised_return_pct/
+    alpha_pct und schreibt die Datei neu (tmpfile + os.replace, fcntl-Lock
+    analog journal.py). Gibt True bei Erfolg zurück, False bei Fehlern
+    (crasht nie — die Zeile bleibt in dem Fall unresolve't und würde beim
+    nächsten Lauf erneut resolviert — idempotent).
+    """
+    tmp_path = ""
+    try:
+        with open(journal_file, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            fieldnames = list(reader.fieldnames or JOURNAL_HEADER)
+            rows = list(reader)
+
+        # C6-Spalten im Header ergänzen (falls die Datei noch vor C6 angelegt
+        # wurde — die append_decision-Migration deckt nur den append-Pfad ab).
+        c6_cols = (
+            "reflection_status",
+            "resolved_at",
+            "realised_return_pct",
+            "alpha_pct",
+            "lesson",
+        )
+        for col in c6_cols:
+            if col not in fieldnames:
+                fieldnames.append(col)
+
+        target_ticker = (target_row.get("ticker") or "").strip().lower()
+        target_ts = (target_row.get("timestamp") or "").strip()
+        replaced = False
+        out_rows: list[dict[str, str]] = []
+        for row in rows:
+            row_ticker = (row.get("ticker") or "").strip().lower()
+            row_ts = (row.get("timestamp") or "").strip()
+            if (
+                not replaced
+                and row_ticker == target_ticker
+                and row_ts == target_ts
+                and _status(row) in ("", REFLECTION_STATUS_PENDING)
+            ):
+                row = dict(row)
+                row["reflection_status"] = REFLECTION_STATUS_RESOLVED
+                row["resolved_at"] = resolved_at
+                row["realised_return_pct"] = f"{realised_return_pct:+.2f}"
+                row["alpha_pct"] = f"{alpha_pct:+.2f}" if alpha_pct is not None else ""
+                row["lesson"] = str(lesson or "") if lesson else ""
+                replaced = True
+            out_rows.append(row)
+
+        if not replaced:
+            return False
+
+        # Atomar schreiben: erst in tmpfile, dann os.replace. Auf der
+        # ZIELDATEI wird ein exklusiver fcntl-Lock gehalten (analog
+        # _rewrite_journal_with_header in journal.py), damit parallele
+        # append_decision-Schreiber nicht kollidieren.
+        tmp_path = f"{journal_file}.tmp"
+        with open(tmp_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in out_rows:
+                for field in fieldnames:
+                    if field not in row:
+                        row[field] = ""
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+        try:
+            with open(journal_file, encoding="utf-8") as lock_fh:
+                _acquire_lock(lock_fh)
+                try:
+                    os.replace(tmp_path, journal_file)
+                finally:
+                    _release_lock(lock_fh)
+        except OSError:
+            # Lock auf der Zieldatei nicht möglich → replace ohne Lock (best effort)
+            os.replace(tmp_path, journal_file)
+        return True
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.warning("Auflösung konnte nicht ins Journal geschrieben werden: %s", exc)
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
 def build_reflection_context(
     ticker: str,
     llm: LLMClient | None = None,
@@ -621,9 +967,21 @@ def build_reflection_context(
 ) -> str:
     """Baut einen Reflexions-Kontext-Block für den letzten Entscheidungs-Eintrag eines Tickers.
 
-    Liest das Entscheidungs-Journal, findet die jüngste Zeile für den Ticker,
-    berechnet den realisierten Return (inkl. Alpha vs SPY) via evaluate.realised_return
-    und erzeugt einen deutschen Reflexions-Absatz.
+    Look-ahead-frei (Roadmap C6): Reflexionen entstehen NUR aus
+    Entscheidungen, deren Ausgangsfenster vollständig abgelaufen ist
+    (``decision_date + lookback_days <= today``). Solange das Fenster läuft,
+    gibt es KEINE Reflexion — der Ausgang existiert zum Zeitpunkt der
+    Reflexions-Generierung sonst nur in der Zukunft (Look-ahead-Bias).
+
+    Es gibt zwei Pfade:
+      - ``reflection_status="resolved"``: Der Return wurde beim Resolving
+        (resolve_pending_reflections) bereits berechnet und im Journal
+        persistiert (realised_return_pct/alpha_pct) → NUR diese gespeicherten
+        Werte werden verwendet, KEIN neuer realised_return_for_row-Aufruf.
+      - Legacy-Zeile ("" bzw. "pending"): Erst den vollständigen Ablauf des
+        Fensters prüfen; nur dann via evaluate.realised_return_for_row
+        berechnen (Legacy-Pfad für Zeilen vor C6 bzw. noch nicht resolvierte
+        Einträge).
 
     Wenn ein LLMClient übergeben wird, wird die "Lektion" vom LLM generiert
     (einziger Satz). Bei Fehlern oder ohne LLM wird eine deterministische
@@ -635,8 +993,8 @@ def build_reflection_context(
         lookback_days: Zeitfenster für die Rendite-Berechnung (Default 30).
 
     Returns:
-        Deutscher Reflexions-String oder "" wenn kein Eintrag/Fehler.
-        Crasht niemals.
+        Deutscher Reflexions-String oder "" wenn kein Eintrag/Fehler/Fenster
+        nicht abgelaufen. Crasht niemals.
     """
     try:
         journal_file = os.path.join("journal", "decisions.csv")
@@ -660,51 +1018,57 @@ def build_reflection_context(
 
         # Jüngste Zeile = letzte im Journal (Annahme: chronologisch sortiert)
         row = matching_rows[-1]
+        ts = (row.get("timestamp") or "").strip()
+        action = (row.get("action") or "").strip().upper()
+        status = _status(row)
 
+        if status == REFLECTION_STATUS_RESOLVED:
+            # Resolved: gespeicherte Returns verwenden — kein Netz-Zugriff,
+            # kein Look-ahead (die Auflösung erfolgte erst nach Ablauf).
+            raw_return_pct, alpha_pct = _resolved_returns_from_row(row)
+            # Persistierte Lektion wiederverwenden (nicht bei jedem Lauf neu
+            # berechnen — Kern des C6-Persistenz-Gedankens).
+            lesson = (row.get("lesson") or "").strip()
+            if raw_return_pct is None or not math.isfinite(raw_return_pct):
+                # Unvollständige Auflösung (Datenanomalie) → Legacy-Pfad,
+                # aber weiterhin nur bei abgelaufenem Fenster.
+                if not _window_elapsed(ts, lookback_days):
+                    return ""
+                rr = realised_return_for_row(row, lookback_days=lookback_days)
+                if rr is None:
+                    return ""
+                raw_return_pct = rr.get("raw_return_pct")
+                alpha_pct = rr.get("alpha_pct")
+                if raw_return_pct is None:
+                    return ""
+            if not lesson:
+                lesson = _lesson_from_returns(
+                    ticker, raw_return_pct, alpha_pct, action, ts, llm
+                )
+            return _format_reflection_text(
+                ticker, raw_return_pct, alpha_pct, action, ts, lesson
+            )
+
+        # Legacy- oder Pending-Zeile: KEIN Look-ahead — Reflexion nur,
+        # wenn das Ausgangsfenster vollständig abgelaufen ist.
+        if not _window_elapsed(ts, lookback_days):
+            return ""
         rr = realised_return_for_row(row, lookback_days=lookback_days)
         if rr is None:
             return ""
-
         raw_return_pct = rr.get("raw_return_pct")
         alpha_pct = rr.get("alpha_pct")
-        action = rr.get("action", "")
-        ts = rr.get("timestamp", "")
+        if raw_return_pct is None:
+            return ""
 
-        # Lektion generieren
-        lesson = _deterministic_lesson(raw_return_pct, action)
-        if llm is not None:
-            try:
-                alpha_str = (
-                    f"{alpha_pct:+.2f}%" if alpha_pct is not None else "nicht verfügbar"
-                )
-                prompt = (
-                    f"Du bist ein Trading-Coach. Formuliere EIN deutschen Satz als Lektion "
-                    f"aus einer vergangenen Handelsentscheidung.\n\n"
-                    f"Ticker: {ticker}\n"
-                    f"Aktion: {action}\n"
-                    f"Realisierter Return: {raw_return_pct:+.2f}%\n"
-                    f"Alpha vs SPY: {alpha_str}\n\n"
-                    f"Antworte mit genau einem deutschen Satz (maximal 30 Wörter)."
-                )
-                messages = [
-                    {"role": "system", "content": "Du bist ein präziser Trading-Coach."},
-                    {"role": "user", "content": prompt},
-                ]
-                llm_lesson = llm.chat(messages, temperature=0.3)
-                if llm_lesson and llm_lesson.strip():
-                    lesson = llm_lesson.strip()
-            except Exception as llm_exc:  # noqa: BLE001 — Fallback
-                logger.debug("LLM-Lektion fehlgeschlagen, verwende deterministische Lektion: %s", llm_exc)
-
-        alpha_str = f"{alpha_pct:+.2f}%" if alpha_pct is not None and math.isfinite(alpha_pct) else "-"
-        raw_str = f"{raw_return_pct:+.2f}%" if raw_return_pct is not None and math.isfinite(raw_return_pct) else "N/A"
-        text = (
-            f"=== DEINE LETZTE ENTSCHEIDUNG ZU {ticker.upper()} ({ts}) ===\n"
-            f"Aktion: {action} | Realisierter Return: {raw_str} "
-            f"| Alpha vs SPY: {alpha_str}\n"
-            f"Lerne daraus: {lesson}"
+        # Lektion generieren (LLM oder deterministischer Fallback)
+        lesson = _lesson_from_returns(
+            ticker, raw_return_pct, alpha_pct, action, ts, llm
         )
-        return text
+
+        return _format_reflection_text(
+            ticker, raw_return_pct, alpha_pct, action, ts, lesson
+        )
     except Exception as exc:  # noqa: BLE001 — crasht nie
         logger.warning("Reflexions-Kontext konnte nicht erstellt werden: %s", exc)
         return ""
@@ -815,11 +1179,49 @@ def build_cross_ticker_context(
 
         # Erste max_lessons Zeilen MIT berechenbarem Return sammeln
         # (Zeilen ohne realisierbaren Return werden übersprungen).
+        #
+        # Look-ahead-frei (Roadmap C6): Nur Entscheidungen mit VOLLSTÄNDIG
+        # abgelaufenem Ausgangsfenster (decision_date + lookback_days <= today)
+        # liefern Cross-Ticker-Lektionen. Resolved-Zeilen nutzen die
+        # persistierten Returns (kein neuer realised_return_for_row-Aufruf);
+        # Legacy-/Pending-Zeilen werden nur bei abgelaufenem Fenster über
+        # realised_return_for_row aufgelöst. Nicht abgelaufene Fenster werden
+        # übersprungen — auch dann, wenn sie "neuere" Timestamps haben.
         lessons: list[dict[str, Any]] = []
         budget = max(0, max_lessons)
         for row in cross_rows:
             if len(lessons) >= budget:
                 break
+            status = _status(row)
+            if status == REFLECTION_STATUS_RESOLVED:
+                raw, alpha = _resolved_returns_from_row(row)
+                if raw is None or not math.isfinite(raw):
+                    # Unvollständige Auflösung → Legacy-Pfad mit Fenster-Check
+                    if not _window_elapsed(row.get("timestamp", ""), lookback_days):
+                        continue
+                    rr = realised_return_for_row(row, lookback_days=lookback_days)
+                    if rr is None:
+                        continue
+                    raw = rr.get("raw_return_pct")
+                    alpha = rr.get("alpha_pct")
+                    if raw is None or not math.isfinite(raw):
+                        continue
+                    lessons.append(rr)
+                    continue
+                lessons.append({
+                    "ticker": row.get("ticker", ""),
+                    "raw_return_pct": raw,
+                    "spy_return_pct": None,
+                    "alpha_pct": alpha,
+                    "timestamp": (row.get("timestamp") or "").strip(),
+                    "action": (row.get("action") or "").strip().upper(),
+                })
+                continue
+
+            # Legacy-/Pending-Zeile: Look-ahead-Schutz — Fenster muss
+            # vollständig abgelaufen sein, bevor der Return berechnet wird.
+            if not _window_elapsed(row.get("timestamp", ""), lookback_days):
+                continue
             rr = realised_return_for_row(row, lookback_days=lookback_days)
             if rr is None:
                 continue

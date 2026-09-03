@@ -646,7 +646,11 @@ class TestJournalZielGewichtungOriginal:
         with open(journal_file, encoding="utf-8") as fh:
             reader = csv_mod.DictReader(fh)
             rows = list(reader)
-        assert reader.fieldnames[-1] == "ziel_gewichtung_original"
+        fieldnames = list(reader.fieldnames or [])
+        assert "ziel_gewichtung_original" in fieldnames
+        # C6-Spalten sind ebenfalls im migrierten Header enthalten
+        for c6_col in ("reflection_status", "resolved_at", "realised_return_pct", "alpha_pct", "lesson"):
+            assert c6_col in fieldnames
         assert len(rows) == 2
         # Der neue Eintrag trägt die Werte
         assert rows[-1]["ticker"] == "AAPL"

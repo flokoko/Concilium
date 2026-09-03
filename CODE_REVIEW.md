@@ -167,5 +167,16 @@ Klein aber sauber für langfristige Nutzung.
   bleibt Ticker-spezifisch; der Cross-Ticker-Block geht via
   `_reflection_context` in die Trader-/Ensemble-/Risk-/PM-Prompts und ist
   zusätzlich in `result["_cross_ticker_context"]` abgelegt.)
-- [ ] C6: Pending-Entries-Rückwärts-Auflösung (Look-ahead-frei)
+- [x] C6: Pending-Entries-Rückwärts-Auflösung (Look-ahead-frei)
+  (Commit siehe git log — JOURNAL_HEADER um reflection_status/resolved_at/
+  realised_return_pct/alpha_pct/lesson erweitert; append_decision schreibt
+  neue Entscheidungen als "pending". feedback.py::resolve_pending_reflections
+  löst die jüngste Pending-Entry beim nächsten Lauf auf, sobald
+  decision_date + lookback_days vollständig abgelaufen ist (atomarer,
+  lock-gesicherter Zurückschreib ins Journal; Return + Lektion werden
+  persistiert und von build_reflection_context wiederverwendet).
+  build_reflection_context und build_cross_ticker_context liefern nur noch
+  Reflexionen aus VOLLSTÄNDIG abgelaufenen Ausgangsfenstern — kein Look-ahead
+  mehr. Pipeline ruft resolve_pending_reflections im Normal-Modus (journal=True)
+  vor build_reflection_context auf; --review (journal=False) löst nichts auf.)
 - [ ] C7: Journal-Rotation (max_entries)

@@ -210,7 +210,12 @@ class TestBuildReflectionContext:
         assert result == ""
 
     def test_matching_ticker_returns_content(self, tmp_path, monkeypatch):
-        """Ticker im Journal + gültige Preisdaten → nicht-leerer String."""
+        """Ticker im Journal + abgelaufenes Fenster + Preise → nicht-leerer String.
+
+        C6 look-ahead-frei: Der Timestamp liegt bewusst 45 Tage zurück
+        (lookback_days=30 → Fenster vollständig abgelaufen), sonst würde der
+        Legacy-Pfad korrekt "" liefern.
+        """
         from concilium.feedback import build_reflection_context
 
         monkeypatch.chdir(tmp_path)
@@ -221,7 +226,7 @@ class TestBuildReflectionContext:
             "ticker": "AAPL",
             "action": "KAUFEN",
             "rating": "STARK KAUFEN",
-            "timestamp": (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S"),
         }]
         _write_journal(tmp_path, rows)
         import shutil
@@ -244,6 +249,107 @@ class TestBuildReflectionContext:
         assert "AAPL" in result
         assert "Realisierter Return" in result
         assert "Alpha vs SPY" in result
+
+    def test_pending_row_with_unexpired_window_returns_empty(self, tmp_path, monkeypatch):
+        """C6: Pending-Zeile mit NICHT abgelaufenem Fenster → "" (kein Look-ahead)."""
+        from concilium.feedback import build_reflection_context
+
+        monkeypatch.chdir(tmp_path)
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir(exist_ok=True)
+
+        rows = [{
+            "ticker": "AAPL",
+            "action": "KAUFEN",
+            "timestamp": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S"),
+            "reflection_status": "pending",
+        }]
+        _write_journal(tmp_path, rows)
+        import shutil
+
+        shutil.copy(str(tmp_path / "decisions.csv"), str(journal_dir / "decisions.csv"))
+
+        prices = _make_prices(100, 60, drift=0.01)
+
+        def mock_load(ticker, *, lookback_days=30):
+            if ticker == "SPY":
+                return _make_prices(100, 60, drift=0.0)
+            return prices
+
+        # Preise wären verfügbar — trotzdem KEINE Reflexion (Fenster läuft)
+        with patch("concilium.evaluate._load_price_history", side_effect=mock_load):
+            result = build_reflection_context("AAPL")
+
+        assert result == ""
+
+    def test_pending_row_with_expired_window_uses_legacy_path(self, tmp_path, monkeypatch):
+        """C6: Pending-Zeile mit abgelaufenem Fenster → Reflexion (Legacy-Pfad)."""
+        from concilium.feedback import build_reflection_context
+
+        monkeypatch.chdir(tmp_path)
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir(exist_ok=True)
+
+        rows = [{
+            "ticker": "AAPL",
+            "action": "KAUFEN",
+            "timestamp": (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S"),
+            "reflection_status": "pending",
+        }]
+        _write_journal(tmp_path, rows)
+        import shutil
+
+        shutil.copy(str(tmp_path / "decisions.csv"), str(journal_dir / "decisions.csv"))
+
+        prices = _make_prices(100, 60, drift=0.01)
+        spy_prices = _make_prices(100, 60, drift=0.005)
+
+        def mock_load(ticker, *, lookback_days=30):
+            if ticker == "SPY":
+                return spy_prices
+            return prices
+
+        with patch("concilium.evaluate._load_price_history", side_effect=mock_load):
+            result = build_reflection_context("AAPL")
+
+        assert result != ""
+        assert "Realisierter Return" in result
+
+    def test_resolved_row_uses_persisted_returns_without_price_lookup(self, tmp_path, monkeypatch):
+        """C6: Resolved-Zeile nutzt gespeicherte Returns/Lektion — KEIN Preis-Lookup."""
+        from concilium.feedback import build_reflection_context
+
+        monkeypatch.chdir(tmp_path)
+        journal_dir = tmp_path / "journal"
+        journal_dir.mkdir(exist_ok=True)
+
+        rows = [{
+            "ticker": "AAPL",
+            "action": "KAUFEN",
+            "timestamp": (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S"),
+            "reflection_status": "resolved",
+            "resolved_at": "2026-09-01 12:00:00",
+            "realised_return_pct": "+7.25",
+            "alpha_pct": "+2.10",
+            "lesson": "Persistierte Lektion aus der Auflösung.",
+        }]
+        _write_journal(tmp_path, rows)
+        import shutil
+
+        shutil.copy(str(tmp_path / "decisions.csv"), str(journal_dir / "decisions.csv"))
+
+        # KEIN Preis-Mock: realised_return_for_row dürfte NICHT aufgerufen
+        # werden (persistierte Werte reichen).
+        with patch(
+            "concilium.feedback.realised_return_for_row",
+            side_effect=AssertionError("resolved-Zeile darf keinen Return-Lookup machen"),
+        ):
+            result = build_reflection_context("AAPL")
+
+        assert result != ""
+        assert "+7.25%" in result
+        assert "+2.10%" in result
+        assert "Persistierte Lektion aus der Auflösung." in result
 
     def test_deterministic_lesson_positive(self):
         """Deterministische Lektion bei positivem Return."""
@@ -278,7 +384,7 @@ class TestBuildReflectionContext:
             "ticker": "AAPL",
             "action": "KAUFEN",
             "rating": "STARK KAUFEN",
-            "timestamp": (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S"),
         }]
         _write_journal(tmp_path, rows)
         import shutil
@@ -316,7 +422,7 @@ class TestBuildReflectionContext:
             "ticker": "AAPL",
             "action": "KAUFEN",
             "rating": "STARK KAUFEN",
-            "timestamp": (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S"),
         }]
         _write_journal(tmp_path, rows)
         import shutil
@@ -377,7 +483,7 @@ class TestBuildReflectionContext:
             "ticker": "aapl",
             "action": "KAUFEN",
             "rating": "KAUFEN",
-            "timestamp": (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S"),
         }]
         _write_journal(tmp_path, rows)
         import shutil

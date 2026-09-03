@@ -68,8 +68,15 @@ def _write_journal(tmp_path, rows: list[dict]) -> str:
 
 
 def _ts(days_ago: int) -> str:
-    """Journal-Timestamp vor days_ago Tagen (Format wie append_decision)."""
-    return (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
+    """Journal-Timestamp im Format wie append_decision.
+
+    C6 look-ahead-frei: Der Wert wird um +35 Tage in die Vergangenheit
+    verschoben, damit das Ausgangsfenster (lookback_days=30) bei jedem
+    Test vollständig abgelaufen ist — sonst liefern die Legacy-/Pending-
+    Zeilen korrekt keine Reflexion mehr (kein Look-ahead). Die relative
+    Ordnung (größeres days_ago = älter) bleibt erhalten.
+    """
+    return (datetime.now() - timedelta(days=days_ago + 35)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _mock_load_factory(price_map: dict[str, list[dict]]):
@@ -292,12 +299,19 @@ class TestBuildCrossTickerContext:
         assert build_cross_ticker_context("   ") == ""
 
     def test_uses_realised_return_for_row(self, tmp_path, monkeypatch):
-        """Verwendet realised_return_for_row (wird gemockt → isoliert vom Netz)."""
+        """Verwendet realised_return_for_row (wird gemockt → isoliert vom Netz).
+
+        C6 look-ahead-frei: Der Journal-Timestamp liegt 45 Tage zurück, damit
+        das Ausgangsfenster (lookback_days=30) vollständig abgelaufen ist —
+        sonst würde die Legacy-Zeile korrekt übersprungen.
+        """
         monkeypatch.chdir(tmp_path)
         _write_journal(tmp_path, [
             {"ticker": "MSFT", "action": "KAUFEN", "rating": "KAUFEN",
-             "timestamp": "2026-08-01 10:00:00"},
+             "timestamp": (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S")},
         ])
+
+        fake_ts = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S")
 
         def fake_rr(row, lookback_days=30):
             return {
@@ -307,7 +321,7 @@ class TestBuildCrossTickerContext:
                 "raw_return_pct": 3.2,
                 "spy_return_pct": 2.1,
                 "alpha_pct": 1.1,
-                "timestamp": "2026-08-01 10:00:00",
+                "timestamp": fake_ts,
                 "action": "KAUFEN",
             }
 
@@ -601,9 +615,9 @@ class TestPipelineCrossTicker:
         monkeypatch.chdir(tmp_path)
         _journal_setup(tmp_path, [
             {"ticker": "MSFT", "action": "KAUFEN", "rating": "KAUFEN",
-             "timestamp": (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")},
+             "timestamp": (datetime.now() - timedelta(days=55)).strftime("%Y-%m-%d %H:%M:%S")},
             {"ticker": "TEST", "action": "HALTEN", "rating": "HALTEN",
-             "timestamp": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")},
+             "timestamp": (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")},
         ])
         monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
 
@@ -662,9 +676,9 @@ class TestPipelineCrossTicker:
         monkeypatch.chdir(tmp_path)
         _journal_setup(tmp_path, [
             {"ticker": "MSFT", "action": "KAUFEN", "rating": "KAUFEN",
-             "timestamp": (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")},
+             "timestamp": (datetime.now() - timedelta(days=55)).strftime("%Y-%m-%d %H:%M:%S")},
             {"ticker": "TEST", "action": "HALTEN", "rating": "HALTEN",
-             "timestamp": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")},
+             "timestamp": (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")},
         ])
         monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
 
@@ -709,9 +723,9 @@ class TestPipelineCrossTicker:
         monkeypatch.chdir(tmp_path)
         _journal_setup(tmp_path, [
             {"ticker": "MSFT", "action": "KAUFEN", "rating": "KAUFEN",
-             "timestamp": (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")},
+             "timestamp": (datetime.now() - timedelta(days=55)).strftime("%Y-%m-%d %H:%M:%S")},
             {"ticker": "TEST", "action": "HALTEN", "rating": "HALTEN",
-             "timestamp": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")},
+             "timestamp": (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")},
         ])
         monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
 
@@ -735,3 +749,114 @@ class TestPipelineCrossTicker:
         # Same-Ticker-Reflexion sichtbar, Cross-Ticker-Block NICHT im Report
         assert "LETZTE ENTSCHEIDUNG ZU TEST" in report
         assert "LETZTE ENTSCHEIDUNGEN ANDERER TICKER" not in report
+
+
+# --------------------------------------------------------------------------- #
+# Tests: C6 look-ahead-frei (nur abgelaufene Fenster liefern Lektionen)
+# --------------------------------------------------------------------------- #
+
+
+class TestCrossTickerLookaheadFree:
+    """C6: build_cross_ticker_context überspringt nicht-abgelaufene Fenster."""
+
+    def test_unexpired_windows_are_skipped(self, tmp_path, monkeypatch):
+        """Cross-Ticker-Zeilen mit laufendem Fenster → keine Lektion (kein Look-ahead)."""
+        monkeypatch.chdir(tmp_path)
+        _write_journal(tmp_path, [
+            # Abgelaufen (45 Tage) → gültige Lektion
+            {"ticker": "MSFT", "action": "KAUFEN", "rating": "KAUFEN", "timestamp": _ts(10)},
+            # Nicht abgelaufen (3 Tage) → MUSS übersprungen werden
+            {"ticker": "NVDA", "action": "KAUFEN", "rating": "KAUFEN", "timestamp": _ts(-32)},
+        ])
+        prices = _make_prices(100, 60, drift=0.01)
+        spy = _make_prices(100, 60, drift=0.0)
+
+        def mock_load(ticker, *, lookback_days=30):
+            return {"SPY": spy, "MSFT": prices, "NVDA": prices}.get(ticker)
+
+        with patch("concilium.evaluate._load_price_history", side_effect=mock_load):
+            result = build_cross_ticker_context("AAPL")
+
+        assert result != ""
+        assert "MSFT" in result
+        assert "NVDA" not in result
+
+    def test_resolved_row_uses_persisted_returns(self, tmp_path, monkeypatch):
+        """Resolved-Zeile → persistierte Returns werden verwendet (kein RR-Call)."""
+        monkeypatch.chdir(tmp_path)
+        _write_journal(tmp_path, [
+            {
+                "ticker": "MSFT", "action": "KAUFEN", "rating": "KAUFEN",
+                "timestamp": (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d %H:%M:%S"),
+                "reflection_status": "resolved",
+                "resolved_at": "2026-09-01 10:00:00",
+                "realised_return_pct": "+3.20",
+                "alpha_pct": "+1.10",
+                "lesson": "Persistiert.",
+            },
+            # Nicht abgelaufene Legacy-Zeile → übersprungen (Look-ahead-Schutz)
+            {"ticker": "NVDA", "action": "KAUFEN", "rating": "KAUFEN", "timestamp": _ts(-32)},
+        ])
+
+        def failing_rr(row, lookback_days=30):
+            raise AssertionError("resolved-Zeile darf keinen Return-Lookup machen")
+
+        with patch("concilium.feedback.realised_return_for_row", side_effect=failing_rr):
+            result = build_cross_ticker_context("AAPL")
+
+        assert result != ""
+        assert "MSFT" in result
+        assert "+3.20%" in result
+        assert "+1.10%" in result
+        assert "NVDA" not in result
+
+    def test_pending_unexpired_row_not_resolved_for_cross(self, tmp_path, monkeypatch):
+        """Pending-Zeile mit laufendem Fenster → kein Return-Lookup (crascht nie)."""
+        monkeypatch.chdir(tmp_path)
+        _write_journal(tmp_path, [
+            # 3 Tage alt → Fenster läuft; NVDA hätte Kursdaten, darf aber
+            # NICHT abgefragt werden (kein Look-ahead).
+            {"ticker": "NVDA", "action": "KAUFEN", "rating": "KAUFEN", "timestamp": _ts(-32)},
+        ])
+        prices = _make_prices(100, 60, drift=0.01)
+        spy = _make_prices(100, 60, drift=0.0)
+
+        def mock_load(ticker, *, lookback_days=30):
+            return {"SPY": spy, "NVDA": prices}.get(ticker)
+
+        with patch("concilium.evaluate._load_price_history", side_effect=mock_load):
+            result = build_cross_ticker_context("AAPL")
+
+        assert result == ""  # nichts aufnehmbar
+
+    def test_mixed_resolved_and_expired_legacy(self, tmp_path, monkeypatch):
+        """Resolved + abgelaufene Legacy-Zeilen kombiniert → beide aufgenommen."""
+        monkeypatch.chdir(tmp_path)
+        _write_journal(tmp_path, [
+            {
+                "ticker": "MSFT", "action": "KAUFEN", "rating": "KAUFEN",
+                "timestamp": (datetime.now() - timedelta(days=50)).strftime("%Y-%m-%d %H:%M:%S"),
+                "reflection_status": "resolved",
+                "resolved_at": "2026-09-01 10:00:00",
+                "realised_return_pct": "+2.00",
+                "alpha_pct": "+0.50",
+            },
+            # Legacy-Zeile (Status "") mit abgelaufenem Fenster
+            {"ticker": "NVDA", "action": "VERKAUFEN", "rating": "VERKAUFEN", "timestamp": _ts(5)},
+        ])
+        nvda_prices = _make_prices(300, 60, drift=-0.01)  # fallend → VERKAUFEN gewinnt
+        spy = _make_prices(100, 60, drift=0.0)
+
+        def mock_load(ticker, *, lookback_days=30):
+            return {"SPY": spy, "NVDA": nvda_prices}.get(ticker)
+
+        with patch("concilium.evaluate._load_price_history", side_effect=mock_load):
+            result = build_cross_ticker_context("AAPL")
+
+        assert result != ""
+        assert "MSFT" in result
+        assert "+2.00%" in result
+        assert "NVDA" in result
+        assert "VERKAUFEN" in result
+        # Sortierung: NVDA (neuer) vor MSFT (älter)
+        assert result.index("NVDA") < result.index("MSFT")

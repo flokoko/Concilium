@@ -39,7 +39,26 @@ JOURNAL_HEADER = [
     "portfolio_fit_score",
     "ziel_gewichtung_pct",
     "ziel_gewichtung_original",
+    # --- Roadmap C6: Deferred Reflection (Pending-Entries, look-ahead-frei) ---
+    # reflection_status: "" (Legacy-Zeile vor C6) | "pending" (Ausgang unbekannt,
+    # wird beim nächsten Lauf resolved) | "resolved" (Return + Lektion persistiert)
+    "reflection_status",
+    # resolved_at: ISO-Timestamp der Auflösung (leer solange pending)
+    "resolved_at",
+    # realised_return_pct / alpha_pct: persistierter realisierter Return inkl.
+    # Alpha vs SPY (leer solange pending) — wird beim Resolving einmalig
+    # berechnet und danach von build_reflection_context wiederverwendet.
+    "realised_return_pct",
+    "alpha_pct",
+    # lesson: persistierte Lektion (LLM- oder deterministischer Satz) — wird
+    # beim Resolving einmalig generiert und danach wiederverwendet, damit die
+    # Reflexion nicht bei jedem Lauf neu berechnet werden muss.
+    "lesson",
 ]
+
+# Statuswerte für reflection_status (C6)
+REFLECTION_STATUS_PENDING = "pending"
+REFLECTION_STATUS_RESOLVED = "resolved"
 
 
 def _parse_confidence_from_debate(agent: dict[str, Any]) -> str:
@@ -195,6 +214,16 @@ def append_decision(
             "portfolio_fit_score": portfolio_fit_score,
             "ziel_gewichtung_pct": ziel_gewichtung_pct,
             "ziel_gewichtung_original": ziel_gewichtung_original,
+            # C6: Neue Entscheidungen starten als "pending" — der Ausgang
+            # existiert zum Entscheidungszeitpunkt noch gar nicht (kein
+            # Look-ahead). Der nächste Lauf derselben Aktie resolved den
+            # Eintrag, sobald decision_date + lookback_days vollständig
+            # abgelaufen ist (resolve_pending_reflections in feedback.py).
+            "reflection_status": REFLECTION_STATUS_PENDING,
+            "resolved_at": "",
+            "realised_return_pct": "",
+            "alpha_pct": "",
+            "lesson": "",
         }
 
         # Datei existiert? → Header nur schreiben wenn neu

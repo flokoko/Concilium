@@ -28,6 +28,7 @@ from .feedback import (
     build_cross_ticker_context,
     build_feedback_context,
     build_reflection_context,
+    resolve_pending_reflections,
 )
 from .llm import LLMClient
 
@@ -291,10 +292,21 @@ def run_pipeline(
         # Pipeline-Namespace durch etwas anderes ersetzt (MagicMock oder eigene
         # Funktion), gilt sie als SOLE-Provider des Reflexions-Kontexts und der
         # Cross-Ticker-Teil wird NICHT ergänzt — Verhalten exakt wie vor C4.
+        # resolve_pending_reflections (C6) läuft analog zu append_decision immer
+        # im Normal-Modus (journal=True) — in gemockten Pipeline-Tests liefert
+        # es "" (kein passender/auflösbarer Journal-Eintrag) und stört nicht;
+        # isolierende Tests patchen concilium.pipeline.resolve_pending_reflections.
         reflection_context = ""
         cross_ticker_context = ""
         same_ticker_context = ""
-        if llm is not None:
+        resolved_reflection = ""
+        if llm is not None and journal:
+            # C6: Zuerst einen evtl. auflösbaren Pending-Eintrag resolven
+            # (Ausgangsfenster vollständig abgelaufen) — das persistiert
+            # Return + Lektion im Journal und liefert den Reflexions-Text.
+            # Nur im Normal-Modus (journal=True); --review schreibt kein
+            # Journal und soll auch keine Journaleinträge auflösen/ändern.
+            resolved_reflection = resolve_pending_reflections(ticker=ticker, llm=llm)
             same_ticker_context = build_reflection_context(ticker=ticker, llm=llm)
             reflection_context = same_ticker_context
             if getattr(
@@ -310,9 +322,17 @@ def run_pipeline(
                         if same_ticker_context
                         else cross_ticker_context
                     )
+            # C6: Die frisch aufgelöste Reflexion fließt in den kombinierten
+            # Kontext ein, falls der Same-Ticker-/Cross-Ticker-Teil leer ist
+            # (typisch beim ersten Lauf nach Ablauf des Fensters: pending →
+            # resolved, aber build_reflection_context liefert erst beim
+            # NÄCHSTEN Lauf denselben Ticker wieder eine Reflexion).
+            if resolved_reflection and not reflection_context:
+                reflection_context = resolved_reflection
         result["reflection"] = same_ticker_context if llm is not None else None
         result["_reflection_context"] = reflection_context
         result["_cross_ticker_context"] = cross_ticker_context
+        result["_resolved_reflection"] = resolved_reflection
 
         _save_step(result, ticker, "data")
     else:
