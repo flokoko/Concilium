@@ -167,7 +167,7 @@ Klein aber sauber für langfristige Nutzung.
   bleibt Ticker-spezifisch; der Cross-Ticker-Block geht via
   `_reflection_context` in die Trader-/Ensemble-/Risk-/PM-Prompts und ist
   zusätzlich in `result["_cross_ticker_context"]` abgelegt.)
-- [x] C6: Pending-Entries-Rückwärts-Auflösung (Look-ahead-frei)
+- [x] C6: Pending-Entries-Rückwärts-Auflösung (Look-ahead-frei) (Commit `370887e`)
   (Commit siehe git log — JOURNAL_HEADER um reflection_status/resolved_at/
   realised_return_pct/alpha_pct/lesson erweitert; append_decision schreibt
   neue Entscheidungen als "pending". feedback.py::resolve_pending_reflections
