@@ -355,6 +355,10 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
             - ``"macro_news"``: Aktien-Identität, MAKRO-Sektion (vollständig),
               SENTIMENT-Sektion und Headlines. Keine FUNDAMENTALS- oder
               TECHNIK-Sektion, kein Währungsrisiko-Block.
+
+    Der Prolog (Aktien-Identität + INSTRUMENT-KONTEXT) ist rollenunabhängig
+    immer enthalten. Im TECHNIK-Block sind die Werte als verbindlicher
+    Markt-Snapshot (Ground-Truth) gekennzeichnet.
     """
     f = data.get("fundamentals", {})
     t = data.get("technicals", {})
@@ -368,6 +372,40 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
         f"Aktie: {data.get('ticker', '?')} ({f.get('name', 'N/A')})",
         f"Sektor: {f.get('sector', 'N/A')} / {f.get('industry', 'N/A')}",
     ]
+
+    # Instrument-Identity (Roadmap C3) — immer enthalten (alle Rollen).
+    # Zeigt die deterministisch aufgelösten Firmen-/Instrument-Fakten aus
+    # yfinance (Land, Börse, Währung, Typ), damit kein Agent das Unternehmen
+    # aus dem Chart "erfindet". Felder sind optional — fehlen sie, wird der
+    # Block weggelassen (kein Crash, kein N/A-Rauschen).
+    _boerse = f.get("full_exchange_name") or f.get("exchange")
+    _identity_fields: list[str] = [
+        f.get("instrument_type"),
+        _boerse,
+        f.get("country"),
+        f.get("currency"),
+        f.get("market"),
+    ]
+    if any(_identity_fields):
+        lines.append("")
+        lines.append("=== INSTRUMENT-KONTEXT ===")
+        ident_parts: list[str] = []
+        if f.get("instrument_type"):
+            ident_parts.append(f"Typ: {f['instrument_type']}")
+        if _boerse:
+            ident_parts.append(f"Börse: {_boerse}")
+        if f.get("country"):
+            ident_parts.append(f"Land: {f['country']}")
+        if ident_parts:
+            lines.append("  " + " | ".join(ident_parts))
+        # Währung/Markt in zweiter Zeile (falls vorhanden)
+        waehrung_markt: list[str] = []
+        if f.get("currency"):
+            waehrung_markt.append(f"Währung: {f['currency']}")
+        if f.get("market"):
+            waehrung_markt.append(f"Markt: {f['market']}")
+        if waehrung_markt:
+            lines.append("  " + " | ".join(waehrung_markt))
 
     # Datenqualitäts-Warnungen — für fundamental und alle
     if role in ("alle", "fundamental"):
@@ -463,6 +501,11 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
         lines.extend([
             "",
             "=== TECHNIK ===",
+            # Roadmap C2: Verbindlicher Markt-Snapshot als Ground-Truth-Anker —
+            # der Technik-Analyst soll exakt diese Zahlen übernehmen statt
+            # Kurs-/Indikator-Werte zu halluzinieren.
+            "  (VERBINDLICHE QUELLE: Diese Werte sind der verifizierte Markt-Snapshot.",
+            "  Nutze exakt diese Zahlen für Kurs-, SMA-, RSI- und MACD-Angaben — erfinde keine abweichenden Werte.)",
             f"  Aktueller Kurs: {_fmt_num(t.get('current_price'))}",
             f"  SMA50: {_fmt_num(t.get('sma50'))}",
             f"  SMA200: {_fmt_num(t.get('sma200'))}",

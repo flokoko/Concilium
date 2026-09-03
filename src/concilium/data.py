@@ -1042,6 +1042,44 @@ def _get_dividend_yield(info: dict[str, Any]) -> float | None:
     return None
 
 
+def _infer_instrument_type(info: dict[str, Any]) -> str | None:
+    """Leitet den Instrument-Typ aus dem yfinance-info-Dict ab.
+
+    Gleiche Heuristik wie portfolio_fit._infer_type (lokal implementiert,
+    um Zirkular-Importe zu vermeiden):
+      - "ETF": quoteType == "ETF" oder Name/Symbol enthält ISHS/ISHR/ISHARES.
+      - "Commodity": Name/Symbol enthält GOLD, COCOA oder WISDOMTREE.
+      - sonst "Aktie", wenn ein quoteType vorhanden ist.
+      - None, wenn weder quoteType noch Name/Symbol vorliegen.
+
+    Best effort: crasht nie.
+    """
+    try:
+        quote_type = (info.get("quoteType") or "").strip().upper()
+        name = (
+            str(info.get("shortName") or "")
+            + " "
+            + str(info.get("longName") or "")
+        ).upper()
+        symbol = str(info.get("symbol") or "").upper()
+
+        if quote_type == "ETF":
+            return "ETF"
+        if "GOLD" in name or "GOLD" in symbol or "COCOA" in name or "WISDOMTREE" in name:
+            return "Commodity"
+        if "ISHS" in name or "ISHR" in name or "ISHARES" in name:
+            return "ETF"
+        if quote_type:
+            return "Aktie"
+        # Kein quoteType, aber Name/Symbol vorhanden → Default "Aktie"
+        if info.get("shortName") or info.get("longName") or info.get("symbol"):
+            return "Aktie"
+        # Komplett leeres info → unbekannt
+        return None
+    except Exception:  # noqa: BLE001 — best effort, crasht nie
+        return None
+
+
 def _validate_fundamentals(fundamentals: dict[str, Any]) -> list[str]:
     """Prüft Fundamentals auf unplausible Werte und gibt deutsche Warn-Strings zurück.
 
@@ -1411,6 +1449,16 @@ def collect_ticker_data(
     industry = info.get("industry", "N/A")
     long_name = info.get("longName") or info.get("shortName") or ticker
 
+    # --- Instrument-Identity (Roadmap C3): deterministisch aufgelöste ---
+    # Unternehmens-/Instrument-Fakten für den Agenten-Kontext. Best effort:
+    # None/leer bei fehlendem Wert, crasht nie.
+    exchange = info.get("exchange") or None
+    full_exchange_name = info.get("fullExchangeName") or None
+    country = info.get("country") or None
+    quote_type = info.get("quoteType") or None
+    market = info.get("market") or None
+    instrument_type = _infer_instrument_type(info)
+
     # --- Feature 1: Analysten-Erwartungen ---
     analyst_target_mean = _safe_float(info.get("targetMeanPrice"))
     analyst_target_high = _safe_float(info.get("targetHighPrice"))
@@ -1483,6 +1531,13 @@ def collect_ticker_data(
         "sector": sector,
         "industry": industry,
         "currency": currency,
+        # Instrument-Identity (Roadmap C3) — optional, None bei fehlendem Wert
+        "exchange": exchange,
+        "full_exchange_name": full_exchange_name,
+        "country": country,
+        "quote_type": quote_type,
+        "market": market,
+        "instrument_type": instrument_type,
         "market_cap": market_cap,
         "pe_ratio": pe_ratio,
         "eps": eps,

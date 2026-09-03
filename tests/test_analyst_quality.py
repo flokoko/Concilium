@@ -221,6 +221,150 @@ class TestBuildDataTextDefault:
 
 
 # ===========================================================================
+# Roadmap C2: TECHNIK-Block als verbindlicher Markt-Snapshot (Ground-Truth)
+# ===========================================================================
+
+
+class TestBuildDataTextTechnikGroundTruth:
+    """Der TECHNIK-Block ist als verbindliche Quelle (Ground-Truth) markiert."""
+
+    def test_alle_contains_ground_truth_marker(self):
+        """role='alle': Ground-Truth-Kennzeichnung im TECHNIK-Block."""
+        text = _build_data_text(_FULL_DATA, role="alle")
+        assert "=== TECHNIK ===" in text
+        assert "VERBINDLICHE QUELLE" in text
+        assert "verifizierte Markt-Snapshot" in text
+        assert "erfinde keine abweichenden Werte" in text
+
+    def test_technik_contains_ground_truth_marker(self):
+        """role='technik': Ground-Truth-Kennzeichnung im TECHNIK-Block."""
+        text = _build_data_text(_FULL_DATA, role="technik")
+        assert "=== TECHNIK ===" in text
+        assert "VERBINDLICHE QUELLE" in text
+        assert "verifizierte Markt-Snapshot" in text
+
+    def test_ground_truth_marker_right_after_header(self):
+        """Die Kennzeichnung steht direkt nach dem '=== TECHNIK ==='-Header."""
+        text = _build_data_text(_FULL_DATA, role="technik")
+        header_pos = text.index("=== TECHNIK ===")
+        marker_pos = text.index("VERBINDLICHE QUELLE")
+        kurs_pos = text.index("Aktueller Kurs")
+        assert header_pos < marker_pos < kurs_pos
+
+    def test_no_ground_truth_marker_without_technik_role(self):
+        """Rollen ohne TECHNIK-Sektion zeigen die Kennzeichnung nicht."""
+        for role in ("fundamental", "sentiment", "macro_news"):
+            text = _build_data_text(_FULL_DATA, role=role)
+            assert "VERBINDLICHE QUELLE" not in text, f"role={role}"
+            assert "=== TECHNIK ===" not in text, f"role={role}"
+
+
+# ===========================================================================
+# Roadmap C3: INSTRUMENT-KONTEXT-Block im Prolog (alle Rollen)
+# ===========================================================================
+
+
+_FULL_DATA_WITH_IDENTITY = {
+    **_FULL_DATA,
+    "fundamentals": {
+        **_FULL_DATA["fundamentals"],
+        "currency": "USD",
+        "exchange": "NMS",
+        "full_exchange_name": "NasdaqGS",
+        "country": "United States",
+        "quote_type": "EQUITY",
+        "market": "us_market",
+        "instrument_type": "Aktie",
+    },
+}
+
+
+class TestBuildDataTextInstrumentContext:
+    """Der INSTRUMENT-KONTEXT-Block erscheint rollenunabhängig im Prolog."""
+
+    def test_instrument_context_in_alle(self):
+        """role='alle': Block mit Typ, Börse, Land, Währung, Markt."""
+        text = _build_data_text(_FULL_DATA_WITH_IDENTITY, role="alle")
+        assert "=== INSTRUMENT-KONTEXT ===" in text
+        assert "Typ: Aktie" in text
+        assert "Börse: NasdaqGS" in text  # full_exchange_name hat Vorrang
+        assert "Land: United States" in text
+        assert "Währung: USD" in text
+        assert "Markt: us_market" in text
+
+    def test_instrument_context_in_all_roles(self):
+        """Der Block erscheint für ALLE Rollen (Prolog, kein role-Guard)."""
+        for role in ("alle", "fundamental", "technik", "sentiment", "macro_news"):
+            text = _build_data_text(_FULL_DATA_WITH_IDENTITY, role=role)
+            assert "=== INSTRUMENT-KONTEXT ===" in text, f"role={role}"
+            assert "Land: United States" in text, f"role={role}"
+
+    def test_exchange_fallback_when_full_name_missing(self):
+        """Ohne full_exchange_name wird exchange angezeigt."""
+        data = {
+            **_FULL_DATA,
+            "fundamentals": {
+                **_FULL_DATA["fundamentals"],
+                "exchange": "GER",
+                "country": "Germany",
+            },
+        }
+        text = _build_data_text(data, role="alle")
+        assert "=== INSTRUMENT-KONTEXT ===" in text
+        assert "Börse: GER" in text
+        assert "Land: Germany" in text
+
+    def test_missing_fields_no_crash_and_no_block(self):
+        """Fehlende/None-Felder → kein Crash, Block wird weggelassen."""
+        data = {
+            **_FULL_DATA,
+            "fundamentals": {k: v for k, v in _FULL_DATA["fundamentals"].items()},
+        }
+        # Keine Identity-Felder gesetzt
+        text = _build_data_text(data, role="alle")
+        assert "=== INSTRUMENT-KONTEXT ===" not in text
+
+    def test_partial_fields_show_only_available(self):
+        """Nur gesetzte Felder werden angezeigt (keine N/A-Reste)."""
+        data = {
+            **_FULL_DATA,
+            "fundamentals": {
+                **_FULL_DATA["fundamentals"],
+                "instrument_type": "ETF",
+            },
+        }
+        text = _build_data_text(data, role="alle")
+        assert "=== INSTRUMENT-KONTEXT ===" in text
+        assert "Typ: ETF" in text
+        assert "Börse:" not in text
+        assert "Land:" not in text
+
+    def test_none_values_no_crash(self):
+        """Explizit None-Werte → kein Crash, Block wird weggelassen."""
+        data = {
+            **_FULL_DATA,
+            "fundamentals": {
+                **_FULL_DATA["fundamentals"],
+                "exchange": None,
+                "full_exchange_name": None,
+                "country": None,
+                "currency": None,
+                "market": None,
+                "instrument_type": None,
+            },
+        }
+        text = _build_data_text(data, role="alle")
+        assert "=== INSTRUMENT-KONTEXT ===" not in text
+
+    def test_block_does_not_duplicate_stock_identity(self):
+        """Der Block fokussiert neue Felder und dupliziert nicht Name/Sektor."""
+        text = _build_data_text(_FULL_DATA_WITH_IDENTITY, role="alle")
+        instrument_part = text.split("=== INSTRUMENT-KONTEXT ===")[1].split("===")[0]
+        assert "Sektor" not in instrument_part
+        assert "Typ:" in instrument_part
+
+
+# ===========================================================================
 # Feature B: _analyst_consistency_warning
 # ===========================================================================
 

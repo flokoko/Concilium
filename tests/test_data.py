@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from concilium.data import (  # noqa: E402
     _fetch_google_news,
     _get_dividend_yield,
+    _infer_instrument_type,
     collect_ticker_data,
 )
 from concilium.journal import append_decision
@@ -510,3 +511,173 @@ class TestGetDividendYield:
         """Beide None → None, kein Crash."""
         info = {"trailingAnnualDividendYield": None, "dividendYield": None}
         assert _get_dividend_yield(info) is None
+
+
+# ---------------------------------------------------------------------------
+# Roadmap C3: Instrument-Identity-Felder in fundamentals
+# ---------------------------------------------------------------------------
+
+
+# Info-dict mit Instrument-Identity-Feldern (yfinance-Style Keys)
+_INFO_WITH_IDENTITY = {
+    "longName": "Apple Inc.",
+    "shortName": "AAPL",
+    "symbol": "AAPL",
+    "sector": "Technology",
+    "industry": "Consumer Electronics",
+    "currency": "USD",
+    "exchange": "NMS",
+    "fullExchangeName": "NasdaqGS",
+    "country": "United States",
+    "quoteType": "EQUITY",
+    "market": "us_market",
+    "marketCap": 3_000_000_000_000,
+    "trailingPE": 30.0,
+}
+
+
+def _make_identity_ticker(info: dict) -> MagicMock:
+    """Mock-Ticker mit info-Dict + synthetischer Historie (offline, wie
+    test_fundamentals_extended._make_mock_ticker)."""
+    import pandas as pd
+
+    t = MagicMock()
+    t.info = info
+    dates = pd.date_range(end="2026-01-01", periods=250)
+    hist = pd.DataFrame(
+        {
+            "Close": [100.0 + i * 0.1 for i in range(250)],
+            "Volume": [1_000_000] * 250,
+            "Open": [99.0] * 250,
+            "High": [101.0] * 250,
+            "Low": [98.0] * 250,
+        },
+        index=dates,
+    )
+    t.history.return_value = hist
+    t.news = []
+    return t
+
+
+class TestInstrumentIdentityFields:
+    """collect_ticker_data setzt die neuen Instrument-Identity-Felder (C3)."""
+
+    @patch("concilium.data._fetch_reddit", return_value=[])
+    @patch("concilium.data._fetch_stocktwits", return_value=[])
+    @patch("concilium.data._fetch_google_news", return_value=[])
+    @patch("concilium.data._fetch_macro_data", return_value={})
+    @patch("concilium.data._save_cache")
+    @patch("concilium.data.yf.Ticker")
+    def test_identity_fields_present(
+        self, mock_ticker_class, mock_save, mock_macro, *_mocks
+    ):
+        """Alle neuen Felder sind im fundamentals-dict (Keys vorhanden)."""
+        mock_ticker_class.return_value = _make_identity_ticker(_INFO_WITH_IDENTITY)
+        data = collect_ticker_data("AAPL")
+        f = data["fundamentals"]
+        assert "exchange" in f
+        assert "full_exchange_name" in f
+        assert "country" in f
+        assert "quote_type" in f
+        assert "market" in f
+        assert "instrument_type" in f
+
+    @patch("concilium.data._fetch_reddit", return_value=[])
+    @patch("concilium.data._fetch_stocktwits", return_value=[])
+    @patch("concilium.data._fetch_google_news", return_value=[])
+    @patch("concilium.data._fetch_macro_data", return_value={})
+    @patch("concilium.data._save_cache")
+    @patch("concilium.data.yf.Ticker")
+    def test_identity_field_values(
+        self, mock_ticker_class, mock_save, mock_macro, *_mocks
+    ):
+        """Werte werden korrekt aus info.get() übernommen."""
+        mock_ticker_class.return_value = _make_identity_ticker(_INFO_WITH_IDENTITY)
+        data = collect_ticker_data("AAPL")
+        f = data["fundamentals"]
+        assert f["exchange"] == "NMS"
+        assert f["full_exchange_name"] == "NasdaqGS"
+        assert f["country"] == "United States"
+        assert f["quote_type"] == "EQUITY"
+        assert f["market"] == "us_market"
+        assert f["instrument_type"] == "Aktie"  # EQUITY → Aktie
+
+    @patch("concilium.data._fetch_reddit", return_value=[])
+    @patch("concilium.data._fetch_stocktwits", return_value=[])
+    @patch("concilium.data._fetch_google_news", return_value=[])
+    @patch("concilium.data._fetch_macro_data", return_value={})
+    @patch("concilium.data._save_cache")
+    @patch("concilium.data.yf.Ticker")
+    def test_identity_fields_optional_when_missing(
+        self, mock_ticker_class, mock_save, mock_macro, *_mocks
+    ):
+        """Fehlende info-Felder → None (kein Crash, keine Exceptions)."""
+        minimal_info = {"longName": "Minimal Corp", "currency": "EUR"}
+        mock_ticker_class.return_value = _make_identity_ticker(minimal_info)
+        data = collect_ticker_data("AAPL")
+        f = data["fundamentals"]
+        assert f["exchange"] is None
+        assert f["full_exchange_name"] is None
+        assert f["country"] is None
+        assert f["quote_type"] is None
+        assert f["market"] is None
+        # instrument_type: Name vorhanden → Default "Aktie"
+        assert f["instrument_type"] == "Aktie"
+
+    @patch("concilium.data._fetch_reddit", return_value=[])
+    @patch("concilium.data._fetch_stocktwits", return_value=[])
+    @patch("concilium.data._fetch_google_news", return_value=[])
+    @patch("concilium.data._fetch_macro_data", return_value={})
+    @patch("concilium.data._save_cache")
+    @patch("concilium.data.yf.Ticker")
+    def test_identity_fields_empty_info_no_crash(
+        self, mock_ticker_class, mock_save, mock_macro, *_mocks
+    ):
+        """Komplett leeres info → None-Felder, kein Crash."""
+        mock_ticker_class.return_value = _make_identity_ticker({})
+        data = collect_ticker_data("AAPL")
+        f = data["fundamentals"]
+        assert f["exchange"] is None
+        assert f["country"] is None
+        assert f["instrument_type"] is None
+
+
+class TestInferInstrumentType:
+    """Tests für _infer_instrument_type — Instrument-Typ-Heuristik (C3)."""
+
+    def test_etf_via_quote_type(self):
+        """quoteType == 'ETF' → 'ETF'."""
+        assert _infer_instrument_type({"quoteType": "ETF"}) == "ETF"
+
+    def test_etf_via_ishares_name(self):
+        """Name enthält ISHS/ISHR/ISHARES → 'ETF' (auch ohne quoteType)."""
+        assert _infer_instrument_type({"longName": "iShares Core MSCI World"}) == "ETF"
+        assert _infer_instrument_type({"shortName": "ISHS IV FTSE 100"}) == "ETF"
+        assert _infer_instrument_type({"shortName": "ISHR IV MSCI EM"}) == "ETF"
+
+    def test_commodity_via_name(self):
+        """Name/Symbol enthält GOLD/COCOA/WISDOMTREE → 'Commodity'."""
+        assert _infer_instrument_type({"longName": "WisdomTree Gold Bullion"}) == "Commodity"
+        assert _infer_instrument_type({"symbol": "GOLD"}) == "Commodity"
+        assert _infer_instrument_type({"longName": "Cocoa Futures Fund"}) == "Commodity"
+
+    def test_aktie_via_quote_type(self):
+        """quoteType == 'EQUITY' → 'Aktie'."""
+        assert _infer_instrument_type({"quoteType": "EQUITY"}) == "Aktie"
+
+    def test_aktie_via_name_when_no_quote_type(self):
+        """Kein quoteType, aber Name → Default 'Aktie'."""
+        assert _infer_instrument_type({"longName": "Apple Inc."}) == "Aktie"
+
+    def test_none_when_info_empty(self):
+        """Komplett leeres info → None (unbekannt)."""
+        assert _infer_instrument_type({}) is None
+        assert _infer_instrument_type({"quoteType": ""}) is None
+
+    def test_quote_type_beats_name_heuristics(self):
+        """quoteType 'EQUITY' gewinnt nicht gegen Name-Heuristik (ETF-Name → ETF)."""
+        # ISHS im Namen und quoteType EQUITY → Heuristik ordnet ETF zu
+        assert (
+            _infer_instrument_type({"quoteType": "EQUITY", "longName": "iShares World"})
+            == "ETF"
+        )
