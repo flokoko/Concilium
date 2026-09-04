@@ -694,6 +694,8 @@ class TestReviewCliMode:
     ):
         """Reports werden als reports/review_{TICKER}_{timestamp}.md gespeichert."""
         reports_dir = _reports_dir()
+        # In den ECHTEN reports/-Ordner schreiben (Datei-Check), Fixture übersteuern
+        monkeypatch.setenv("CONCILIUM_REPORTS_DIR", reports_dir)
 
         review_result = {
             "ergebnisse": {

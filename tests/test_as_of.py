@@ -392,7 +392,7 @@ class TestCliDateFlag:
         err = capsys.readouterr().err
         assert "--date" in err and "--evaluate" in err
 
-    def test_single_mode_passes_date_to_pipeline(self):
+    def test_single_mode_passes_date_to_pipeline(self, monkeypatch):
         """--ticker … --date YYYY-MM-DD → run_pipeline(as_of=…)."""
         from concilium.cli import main
 
@@ -404,6 +404,8 @@ class TestCliDateFlag:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         target = os.path.join(repo_root, "reports", "TEST_20250101_1200.md")
         try:
+            # In den ECHTEN reports/-Ordner schreiben (Datei-Check), Fixture übersteuern
+            monkeypatch.setenv("CONCILIUM_REPORTS_DIR", os.path.join(repo_root, "reports"))
             with patch("concilium.cli.run_pipeline") as mock_run, patch(
                 "concilium.cli.generate_report", return_value="# Report"
             ), patch("concilium.cli.datetime", _FixedDatetime):

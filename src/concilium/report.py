@@ -997,10 +997,22 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
     )
     lines.append("")
 
-    # Warnung bei übersprungenen Zeilen
+    # Warnung bei übersprungenen Zeilen / Guard gegen still leere Reports
     uebersprungen = eval_result.get("uebersprungen", 0)
     n = eval_result.get("anzahl_entscheidungen", 0)
-    if uebersprungen and uebersprungen > 0:
+    if not n:
+        # Guard: 0 bewertbare Zeilen → Report nie still leer lassen
+        # (z. B. wenn yfinance in der Umgebung keine Kurse liefert und
+        # evaluate_journal dadurch nichts bewerten kann).
+        total = (uebersprungen or 0) + n
+        lines.append(
+            "> ⚠️ **Keine bewertbaren Entscheidungen:** Es konnten keine "
+            "Journal-Entscheidungen gegen Kursdaten bewertet werden "
+            f"(0 von {total}). Mögliche Ursache: Kursdaten (yfinance) in "
+            "dieser Umgebung nicht verfügbar. Die Kennzahlen sind daher leer."
+        )
+        lines.append("")
+    elif uebersprungen and uebersprungen > 0:
         total = uebersprungen + n
         lines.append(
             f"> ⚠️ **Hinweis:** {uebersprungen} von {total} Journal-Entscheidungen "

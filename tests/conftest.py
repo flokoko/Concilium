@@ -57,3 +57,43 @@ def _isolate_default_state_dir():
         os.environ["CONCILIUM_STATE_DIR"] = old
     else:
         os.environ.pop("CONCILIUM_STATE_DIR", None)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_reports_dir():
+    """Isoliert alle Tests vom echten reports/-Ordner.
+
+    Setzt CONCILIUM_REPORTS_DIR auf ein Session-Temp-Verzeichnis, damit
+    CLI-Tests (main([...])) mit gemocktem run_pipeline NIE in den echten
+    reports/-Ordner schreiben (verhindert MagicMock-Leak-Dateien wie
+    "<MagicMock name='run_pipeline().get()' ...>_20260901_1551.md").
+
+    Bewusst ein beschreibbares Verzeichnis (statt eines nicht existierenden
+    Pfads): cli.py ruft an den Report-Stellen os.makedirs(..., exist_ok=True)
+    teils AUSSERHALB von try/except — ein unbeschreibbarer Pfad würde dort
+    PermissionError werfen und Dutzende CLI-Tests brechen, die rc == 0 bzw.
+    einen erfolgreichen Report-Schreiblauf erwarten. Die Isolation bleibt
+    trotzdem strikt: Der echte reports/-Ordner bleibt unberührt.
+
+    Tests, die einen Report-Datei-Check im ECHTEN reports/-Ordner brauchen
+    (test_review.py::test_review_saves_reports_as_review_ticker_timestamp,
+    test_as_of.py::test_single_mode_passes_date_to_pipeline), setzen
+    CONCILIUM_REPORTS_DIR selbst (monkeypatch) und räumen ihre Dateien auf.
+    """
+    import shutil
+    import tempfile
+
+    old = os.environ.get("CONCILIUM_REPORTS_DIR")
+    tmp_reports = tempfile.mkdtemp(prefix="concilium_test_reports_")
+    os.environ["CONCILIUM_REPORTS_DIR"] = tmp_reports
+
+    def _cleanup():
+        shutil.rmtree(tmp_reports, ignore_errors=True)
+        if old is not None:
+            os.environ["CONCILIUM_REPORTS_DIR"] = old
+        else:
+            os.environ.pop("CONCILIUM_REPORTS_DIR", None)
+
+    yield
+    # Restore
+    _cleanup()

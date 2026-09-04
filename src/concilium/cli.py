@@ -73,6 +73,21 @@ def _state_dir(state_dir: str | None = None) -> str:
     return "state"
 
 
+def _reports_dir() -> str:
+    """Löst das Reports-Verzeichnis auf (analog zu _state_dir / cache-dir).
+
+    Priorität: CONCILIUM_REPORTS_DIR-Env > Repo-Root/reports.
+    Damit lassen sich Tests vom echten reports/-Ordner isolieren
+    (autouse-Fixture in tests/conftest.py).
+    """
+    env = os.environ.get("CONCILIUM_REPORTS_DIR")
+    if env:
+        return env
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "reports"
+    )
+
+
 def _write_calibration_json(eval_result: dict, *, state_dir: str | None = None) -> None:
     """Schreibt eine netzfreie Kalibrierungs-JSON aus den evaluierten Kennzahlen.
 
@@ -431,9 +446,7 @@ def main(argv: list[str] | None = None) -> int:
             print(report)
 
             # Report als Datei speichern
-            reports_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "..", "..", "reports"
-            )
+            reports_dir = _reports_dir()
             os.makedirs(reports_dir, exist_ok=True)
             date_str = datetime.now().strftime("%Y%m%d")
             filepath = os.path.join(reports_dir, f"track_record_{date_str}.md")
@@ -469,9 +482,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.peers:
             peers_list = [p.strip() for p in args.peers.split(",") if p.strip()]
 
-        reports_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "..", "reports"
-        )
+        reports_dir = _reports_dir()
         os.makedirs(reports_dir, exist_ok=True)
 
         # Schritt 1: evaluate_journal + calibration.json (damit Feedback aktuell ist)
@@ -584,9 +595,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.peers:
             peers_list = [p.strip() for p in args.peers.split(",") if p.strip()]
 
-        reports_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "..", "reports"
-        )
+        reports_dir = _reports_dir()
         os.makedirs(reports_dir, exist_ok=True)
 
         # Schritt 1: evaluate_journal + calibration.json (Feedback/Dämpfung aktuell)
@@ -757,7 +766,7 @@ def main(argv: list[str] | None = None) -> int:
         peers_list = [p.strip() for p in args.peers.split(",") if p.strip()]
 
     # Reports-Verzeichnis
-    reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "reports")
+    reports_dir = _reports_dir()
     os.makedirs(reports_dir, exist_ok=True)
 
     # --- Portfolio-Modus (--portfolio) ---
