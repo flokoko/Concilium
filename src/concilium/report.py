@@ -132,6 +132,20 @@ def _management_summary(
                 f"wegen überkonfidenter Historie_"
             )
 
+        # Technik-Veto / Technik-Ausnahme (SMA200)
+        _technik_veto_info = trade.get("_technik_veto")
+        if isinstance(_technik_veto_info, dict):
+            if _technik_veto_info.get("vetoed"):
+                lines.append(
+                    "> ⚠️ **Technik-Veto:** Kurs unter SMA200 — "
+                    "KAUFEN auf HALTEN reduziert."
+                )
+            elif _technik_veto_info.get("ausnahme"):
+                lines.append(
+                    "> ⚠️ **Technik-Ausnahme:** RSI < 30 bei intaktem SMA200 — "
+                    "kleine Position (max 1.5%) mit strengem Stop erlaubt."
+                )
+
     # --- 2. Score-Zeile ---
     score_parts: list[str] = []
 
@@ -802,6 +816,21 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
                 lines.append(
                     f"_Original-Trade: {original.get('aktion', 'N/A')}"
                     f" → revidiert: {trade.get('aktion', 'N/A')}_"
+                )
+                lines.append("")
+        # Technik-Veto / Technik-Ausnahme (SMA200)
+        veto_info = trade.get("_technik_veto")
+        if isinstance(veto_info, dict):
+            if veto_info.get("vetoed"):
+                lines.append(
+                    "> ⚠️ **Technik-Veto:** Kurs unter SMA200 — "
+                    "KAUFEN auf HALTEN reduziert."
+                )
+                lines.append("")
+            elif veto_info.get("ausnahme"):
+                lines.append(
+                    "> ⚠️ **Technik-Ausnahme:** RSI < 30 bei intaktem SMA200 — "
+                    "kleine Position (max 1.5%) mit strengem Stop erlaubt."
                 )
                 lines.append("")
         lines.append(f"**Aktion:** {trade.get('aktion', 'N/A')}")

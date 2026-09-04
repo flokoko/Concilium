@@ -12,6 +12,7 @@ from typing import Any
 import concilium.feedback as _feedback_module
 
 from .agents import (
+    _apply_technik_veto,
     _build_data_text,
     _extract_current_price,
     analyst_team,
@@ -455,6 +456,21 @@ def run_pipeline(
         except Exception as exc:  # noqa: BLE001 — nie crashen
             logger.warning("Trade-Revision fehlgeschlagen: %s", exc)
         _save_step(result, ticker, "trade_revision")
+
+    # --- 5c'. Technik-Veto NACH der Trade-Revision erneut anwenden ---
+    # Die Trade-Revision (LLM) darf das Technik-Veto (Kurs unter SMA200) nicht
+    # umgehen: Liefert sie wieder KAUFEN, obwohl das Veto aktiv war, wird die
+    # Aktion deterministisch auf HALTEN zurückgesetzt (bzw. bei der RSI-Ausnahme
+    # Position/Stop nachjustiert). Der Veto-Check selbst ist idempotent — ein
+    # bereits gesetztes _technik_veto-Metadaten-Dict wird bei gleichem Ausgang
+    # konsistent neu gesetzt; HALTEN-Trades werden nie angetastet.
+    try:
+        _apply_technik_veto(trade, analysts)
+        # trade kann in-place mutiert worden sein (dict-Referenz) — sicherheitshalber
+        # zurückschreiben, falls die Revision ein neues dict eingesetzt hat.
+        result["trade"] = trade
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("Technik-Veto (nach Revision) fehlgeschlagen: %s", exc)
 
     # --- 5b'. Kalibrierungs-gestützte Dämpfung der Ziel-Gewichtung ---
     # Wird NACH Schritt 5c (Trade-Revision) ausgeführt: Die Dämpfung basiert

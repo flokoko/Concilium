@@ -401,19 +401,24 @@ def _evaluate_single(
                 for p in period_prices
             )
 
-    # Hit-Bestimmung — fachlich priorisierte Logik:
+    # Hit-Bestimmung — ehrliche Logik (Option 3):
     #   1. Stop gerissen → Miss (Risikoregel verletzt, hat Vorrang vor allem)
-    #   2. Ziel erreicht → Hit (Kursprognose erfüllt)
-    #   3. Sonst → Rendite-basiert (bisherige Logik)
+    #   2. Endrendite ist die PRIMÄRE Hit-Bedingung: Nur ein am Ende profitabler
+    #      Trade ist ein Hit. "Ziel erreicht" allein reicht nicht mehr, wenn der
+    #      Trade am Ende negativ war (z. B. "Ziel erreicht, aber Position nicht
+    #      geführt" — der Gewinn war unrealisiert und wurde zurückgegeben).
+    #   ziel_erreicht bleibt als separates Feld im Rückgabedict (Transparenz),
+    #   fließt aber nicht mehr direkt in hit ein.
     # stop_gerissen / ziel_erreicht is None (nicht angegeben) → Bedingung überspringen.
     hit: bool | None = None
     if action in ("KAUFEN", "VERKAUFEN"):
         if stop_gerissen is True:
             hit = False
-        elif ziel_erreicht is True:
+        elif rendite_pct is not None and rendite_pct > 0:
             hit = True
         else:
-            hit = rendite_pct > 0  # VERKAUFEN: bereits invertiert
+            # Ziel erreicht, aber Trade am Ende nicht profitabel → kein Hit
+            hit = False
     elif action == "HALTEN":
         if stop_gerissen is True:
             hit = False
