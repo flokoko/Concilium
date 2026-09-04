@@ -40,6 +40,22 @@ def _fmt_pct(val: Any) -> str:
         return "N/A"
 
 
+def _kompakte_zahl(val: Any) -> str | None:
+    """Kompakte Zahlformatierung für Prozent-Werte (z.B. 2.5 statt 2.50).
+
+    Liefert None bei fehlenden/ungültigen Werten (None, NaN, nicht-numerisch),
+    damit Aufrufer den Teil einfach weglassen können. Konsistent mit der
+    Anzeige der Rohwerte in Sektion 6 (Positionsanteil) und 8 (Ziel-Gewichtung).
+    """
+    try:
+        fval = float(val)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(fval):
+        return None
+    return repr(fval)
+
+
 def _clean_debate_text(agent: dict[str, Any]) -> str:
     """Entfernt das JSON-Preamble und Markdown-Codeblock-Wrapper aus Debatten-Texten.
 
@@ -116,6 +132,25 @@ def _management_summary(
             trade_parts.append(f"Stop {_fmt(stop_loss)}")
 
         lines.append(f"**Urteil:** {emoji} {entscheidung} — {', '.join(trade_parts)}")
+
+        # --- Empfohlene Gewichtung: Positionsanteil + Ziel-Gewichtung ---
+        pf_gew = result.get("portfolio_fit") or {}
+        gewicht_parts: list[str] = []
+        positionsanteil_str = _kompakte_zahl(trade.get("positionsanteil"))
+        if positionsanteil_str is not None:
+            gewicht_parts.append(f"Positionsanteil {positionsanteil_str} %")
+        ziel_str = _kompakte_zahl(pf_gew.get("ziel_gewichtung_pct"))
+        if ziel_str is not None:
+            ziel_teil = f"Ziel-Gewichtung {ziel_str} % des Portfolios"
+            if pf_gew.get("ziel_gewichtung_gedämpft"):
+                original_str = _kompakte_zahl(pf_gew.get("ziel_gewichtung_original"))
+                if original_str is not None:
+                    ziel_teil += (
+                        f" (nach Kalibrierung gedämpft, original {original_str})"
+                    )
+            gewicht_parts.append(ziel_teil)
+        if gewicht_parts:
+            lines.append(f"**Empfohlene Gewichtung:** {' · '.join(gewicht_parts)}")
 
         # --- Exit-Review: Verkaufsperspektive für Bestandspositionen ---
         if review_mode:
