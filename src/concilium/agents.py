@@ -2037,6 +2037,7 @@ def risk_debate(
     llm: LLMClient,
     data_text: str | None = None,
     feedback_context: str = "",
+    rounds: int | None = None,
 ) -> dict[str, Any]:
     """3-Perspektiven-Risiko-Debatte (aggressiv/neutral/konservativ, 2 Runden).
 
@@ -2047,12 +2048,12 @@ def risk_debate(
        risk_block an alle Prompts angehängt.
     2. Runde 1: Alle 3 Perspektiven bekommen Trade + Marktdaten + risk_block
        (parallel, wie analyst_team) und liefern je ein Fließtext-Argument.
-    3. Runde 2: Jede Perspektive bekommt zusätzlich die Argumente der
-       anderen beiden aus Runde 1 und antwortet konkret darauf (analog zur
-       Bull/Bear-Debatte).
+    3. Runde 2 (nur bei rounds >= 2): Jede Perspektive bekommt zusätzlich
+       die Argumente der anderen beiden aus Runde 1 und antwortet konkret
+       darauf (analog zur Bull/Bear-Debatte).
     4. Synthese: Ein finaler LLM-Call (SYSTEM_RISK_SYNTHESIS) bekommt alle
-       6 Argumente + Trade + Marktdaten + risk_block und liefert das finale
-       risk-dict via RISK_SCHEMA.
+       Argumente der gelaufenen Runden + Trade + Marktdaten + risk_block
+       und liefert das finale risk-dict via RISK_SCHEMA.
 
     Alle Calls sind best-effort: Fällt eine Perspektive aus, fährt die
     Debatte mit den anderen fort; schlägt die Synthese fehl, greift der
@@ -2066,6 +2067,9 @@ def risk_debate(
             _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
         feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
             Feedback). Wird an Perspektiven- UND Synthese-Prompt angehängt.
+        rounds: Anzahl der Debatten-Runden (1 = nur Runde 1, spart 3 LLM-Calls;
+            2 = Runde 1 + Runde 2). None liest CONCILIUM_RISK_DEBATE_ROUNDS
+            (Default 2). Werte < 2 überspringen Runde 2.
 
     Returns:
         risk-dict mit denselben Feldern wie der bisherige Single-Pass-Call
@@ -2073,9 +2077,14 @@ def risk_debate(
         positionsgröße_empfohlen, auflagen, empfehlung) plus den
         rechnerischen Feldern (volatilität_annualisiert_pct,
         positionsgröße_rechnerisch_pct). Zusätzlich werden die
-        Debatten-Argumente unter dem Key "_risk_debate" mitgeliefert
-        (für den Report).
+        Debatten-Argumente der GELAUFENEN Runden unter dem Key
+        "_risk_debate" mitgeliefert (für den Report) — bei 1 Runde nur
+        "runde1", kein leerer "runde2"-Eintrag.
     """
+    # Runden-Zahl auflösen: expliziter Parameter > Config (Default 2).
+    if rounds is None:
+        rounds = config.risk_debate_rounds()
+
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     if data_text is None:
         data_text = _build_data_text(data)
@@ -2115,38 +2124,47 @@ def risk_debate(
         llm, [(name, prompt, base_user) for name, prompt in perspektiven]
     )
 
-    # --- Runde 2: jede Perspektive antwortet auf die anderen beiden ---
-    jobs_runde2: list[tuple[str, str, str]] = []
-    for name, prompt in perspektiven:
-        andere_texte = "\n\n".join(
-            f"--- {anderer_name} (Runde 1) ---\n"
-            f"{runde1.get(anderer_name) or '(kein Argument geliefert)'}"
-            for anderer_name, _ in perspektiven
-            if anderer_name != name
-        )
-        user2 = (
-            f"{base_user}\n\n"
-            "=== Argumentation der anderen Risiko-Perspektiven (Runde 1) ===\n"
-            f"{andere_texte}\n\n"
-            "Gehe konkret auf diese Argumente ein: stimme zu, widersprich "
-            "mit Daten, oder ergänze. Wiederhole nicht deine vorherigen "
-            "Punkte, sondern vertiefe/verteidige sie."
-        )
-        jobs_runde2.append((name, prompt, user2))
-    runde2 = _run_risk_perspectives_parallel(llm, jobs_runde2)
+    # --- Runde 2 (nur wenn >= 2 Runden): Reaktion auf die anderen beiden ---
+    runde2: dict[str, str] = {}
+    if rounds > 1:
+        jobs_runde2: list[tuple[str, str, str]] = []
+        for name, prompt in perspektiven:
+            andere_texte = "\n\n".join(
+                f"--- {anderer_name} (Runde 1) ---\n"
+                f"{runde1.get(anderer_name) or '(kein Argument geliefert)'}"
+                for anderer_name, _ in perspektiven
+                if anderer_name != name
+            )
+            user2 = (
+                f"{base_user}\n\n"
+                "=== Argumentation der anderen Risiko-Perspektiven (Runde 1) ===\n"
+                f"{andere_texte}\n\n"
+                "Gehe konkret auf diese Argumente ein: stimme zu, widersprich "
+                "mit Daten, oder ergänze. Wiederhole nicht deine vorherigen "
+                "Punkte, sondern vertiefe/verteidige sie."
+            )
+            jobs_runde2.append((name, prompt, user2))
+        runde2 = _run_risk_perspectives_parallel(llm, jobs_runde2)
 
-    # --- Synthese: finaler LLM-Call mit allen 6 Argumenten ---
+    # --- Synthese: finaler LLM-Call mit den Argumenten der gelaufenen Runden ---
+    gelaufene_runden: list[tuple[int, dict[str, str]]] = [(1, runde1)]
+    if rounds > 1:
+        gelaufene_runden.append((2, runde2))
+
     synth_parts: list[str] = []
-    for runde_nr, runde_args in ((1, runde1), (2, runde2)):
+    for runde_nr, runde_args in gelaufene_runden:
         for name, _ in perspektiven:
             text = runde_args.get(name) or "(kein Argument geliefert)"
             synth_parts.append(f"=== {name} — Runde {runde_nr} ===\n{text}")
     synthese_args = "\n\n".join(synth_parts)
 
+    anzahl_runden = len(gelaufene_runden)
+    runden_wort = "Runde" if anzahl_runden == 1 else "Runden"
     synth_user = (
         f"Trade-Vorschlag:\n{trade_text}\n\n"
         f"Marktdaten:\n{data_text}{risk_block}\n\n"
-        f"=== DEBATTEN-ARGUMENTE (3 Perspektiven × 2 Runden) ===\n{synthese_args}"
+        f"=== DEBATTEN-ARGUMENTE (3 Perspektiven × {anzahl_runden} "
+        f"{runden_wort}) ===\n{synthese_args}"
     )
     if feedback_context:
         synth_user += f"\n\n{feedback_context}"
@@ -2183,11 +2201,11 @@ def risk_debate(
         risk.get("positionsgröße_empfohlen")
     )
 
-    # Debatten-Argumente für den Report (optionale Anzeige, nie crashen)
-    risk["_risk_debate"] = {
-        "runde1": dict(runde1),
-        "runde2": dict(runde2),
-    }
+    # Debatten-Argumente für den Report (optionale Anzeige, nie crashen) —
+    # nur die tatsächlich gelaufenen Runden (bei 1 Runde kein "runde2"-Key).
+    risk["_risk_debate"] = {"runde1": dict(runde1)}
+    if rounds > 1:
+        risk["_risk_debate"]["runde2"] = dict(runde2)
 
     return risk
 
@@ -2202,8 +2220,9 @@ def risk_manager(
     """Bewertet Risiko des Trades via 3-Perspektiven-Risiko-Debatte (Phase B).
 
     Dünne Hülle um risk_debate: Statt eines Single-Pass-Calls debattieren
-    drei Perspektiven (aggressiv/neutral/konservativ) über 2 Runden; eine
-    Synthese liefert das finale risk-dict (siehe risk_debate).
+    drei Perspektiven (aggressiv/neutral/konservativ) über die konfigurierte
+    Anzahl Runden (CONCILIUM_RISK_DEBATE_ROUNDS, Default 2); eine Synthese
+    liefert das finale risk-dict (siehe risk_debate).
 
     Signatur und Rückgabetyp sind identisch zur bisherigen Implementierung —
     pipeline.py, report.py, trade_revision, portfolio_manager und die
@@ -2221,8 +2240,17 @@ def risk_manager(
         feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
             Feedback). Wird am Ende der User-Prompts angehängt.
     """
+    # Config hier lesen (pipeline.py bleibt unverändert) und explizit
+    # durchreichen; risk_debate selbst hätte bei rounds=None denselben
+    # Fallback — beides abzudecken ist robust gegen beide Aufrufpfade.
+    rounds = config.risk_debate_rounds()
     return risk_debate(
-        trade, data, llm, data_text=data_text, feedback_context=feedback_context
+        trade,
+        data,
+        llm,
+        data_text=data_text,
+        feedback_context=feedback_context,
+        rounds=rounds,
     )
 
 

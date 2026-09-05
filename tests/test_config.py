@@ -140,6 +140,55 @@ class TestLLMConfig:
 
 
 # ---------------------------------------------------------------------------
+# Risiko-Debatten-Runden (CONCILIUM_RISK_DEBATE_ROUNDS)
+# ---------------------------------------------------------------------------
+
+
+class TestRiskDebateRounds:
+    """CONCILIUM_RISK_DEBATE_ROUNDS: Default 2, per Env auf 1 setzbar."""
+
+    def test_default_two_rounds(self, monkeypatch):
+        """Ohne Env → 2 (Rückwärtskompatibilität: Default bleibt 2 Runden)."""
+        monkeypatch.delenv("CONCILIUM_RISK_DEBATE_ROUNDS", raising=False)
+        assert config.risk_debate_rounds() == 2
+
+    def test_env_one_round(self, monkeypatch):
+        """CONCILIUM_RISK_DEBATE_ROUNDS=1 → 1 (Kosten-Sparmodus)."""
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "1")
+        assert config.risk_debate_rounds() == 1
+
+    def test_env_two_rounds(self, monkeypatch):
+        """CONCILIUM_RISK_DEBATE_ROUNDS=2 → 2 (explizit wie Default)."""
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "2")
+        assert config.risk_debate_rounds() == 2
+
+    def test_returns_int_not_str(self, monkeypatch):
+        """Rückgabetyp ist int (int()-Koerzion über dem String-Default)."""
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "1")
+        result = config.risk_debate_rounds()
+        assert result == 1
+        assert isinstance(result, int)
+
+    def test_env_typo_raises_loudly(self, monkeypatch):
+        """Tippfehler 'zwei' → LAUTE ValueError mit Env-Variablen-Namen."""
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "zwei")
+        with pytest.raises(ValueError) as exc_info:
+            config.risk_debate_rounds()
+        msg = str(exc_info.value)
+        assert "CONCILIUM_RISK_DEBATE_ROUNDS" in msg
+        assert "zwei" in msg
+
+    def test_lazy_loading_env_change_between_calls(self, monkeypatch):
+        """Lazy-Loading: Env-Änderung zwischen zwei Aufrufen wirkt sofort."""
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "2")
+        first = config.risk_debate_rounds()
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "1")
+        second = config.risk_debate_rounds()
+        assert first == 2
+        assert second == 1
+
+
+# ---------------------------------------------------------------------------
 # Typ-Koerzion (_coerce) — inkl. LAUTER Fehlermeldung
 # ---------------------------------------------------------------------------
 

@@ -321,7 +321,8 @@ class TestRiskManagerThinWrapper:
     """risk_manager bleibt mit identischer Signatur bestehen und delegiert."""
 
     def test_delegates_to_risk_debate(self):
-        """risk_manager ruft risk_debate mit identischen Argumenten auf."""
+        """risk_manager ruft risk_debate mit identischen Argumenten auf
+        und reicht die konfigurierten Runden explizit durch (Default 2)."""
         with patch("concilium.agents.risk_debate") as mock_rd:
             mock_rd.return_value = {"risiko_score": 2}
             result = risk_manager(
@@ -329,7 +330,8 @@ class TestRiskManagerThinWrapper:
                 data_text="dt", feedback_context="fb",
             )
         mock_rd.assert_called_once_with(
-            _TRADE, _MOCK_DATA, "llm", data_text="dt", feedback_context="fb"
+            _TRADE, _MOCK_DATA, "llm", data_text="dt", feedback_context="fb",
+            rounds=2,
         )
         assert result == {"risiko_score": 2}
 
@@ -343,6 +345,106 @@ class TestRiskManagerThinWrapper:
             "volatilität_annualisiert_pct", "positionsgröße_rechnerisch_pct",
         ):
             assert key in result, f"Key '{key}' fehlt im risk_manager-Ergebnis"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Runden-Konfiguration (CONCILIUM_RISK_DEBATE_ROUNDS)
+# ---------------------------------------------------------------------------
+
+
+class TestRiskDebateRounds:
+    """rounds-Parameter: 1 Runde spart Runde 2, Default bleibt 2 Runden."""
+
+    def test_rounds_one_skips_round_two(self):
+        """rounds=1 → nur 3 Perspektiven-Calls + 1 Synthese = 4 LLM-Calls."""
+        llm = _DebateMockLLM()
+        result = risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=1)
+
+        assert len(llm.captured) == 4
+        # Je Perspektive nur 1 Call (Runde 2 läuft nicht)
+        assert len(_calls_by_marker(llm, "Aggressive Risk-Analyst")) == 1
+        assert len(_calls_by_marker(llm, "Neutrale Risk-Analyst")) == 1
+        assert len(_calls_by_marker(llm, "Konservative Risk-Analyst")) == 1
+        assert len(_calls_by_marker(llm, "Risk-Manager und fasst die Risiko-Debatte")) == 1
+        # Ergebnis bleibt vollständig (nie crashen)
+        assert result["risiko_score"] == 3
+        assert result["empfehlung"] == "MODIFIZIERT"
+
+    def test_rounds_two_explicit_seven_calls(self):
+        """rounds=2 (explizit) → wie bisher 7 Calls."""
+        llm = _DebateMockLLM()
+        risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=2)
+        assert len(llm.captured) == 7
+
+    def test_rounds_none_reads_config_one(self, monkeypatch):
+        """rounds=None + CONCILIUM_RISK_DEBATE_ROUNDS=1 → 4 Calls (Config-Fallback)."""
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "1")
+        llm = _DebateMockLLM()
+        risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=None)
+        assert len(llm.captured) == 4
+
+    def test_rounds_none_reads_config_two(self, monkeypatch):
+        """rounds=None + CONCILIUM_RISK_DEBATE_ROUNDS=2 → 7 Calls (Config-Fallback)."""
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "2")
+        llm = _DebateMockLLM()
+        risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=None)
+        assert len(llm.captured) == 7
+
+    def test_synthesis_header_one_round(self):
+        """rounds=1 → Synthese-Header sagt '1 Runde' statt '2 Runden'."""
+        llm = _DebateMockLLM()
+        risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=1)
+        synth = _calls_by_marker(llm, "Risk-Manager und fasst die Risiko-Debatte")
+        assert "3 Perspektiven × 1 Runde" in synth[0][1]
+        assert "2 Runden" not in synth[0][1]
+
+    def test_synthesis_header_two_rounds(self):
+        """rounds=2 → Synthese-Header sagt '2 Runden' (wie bisher)."""
+        llm = _DebateMockLLM()
+        risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=2)
+        synth = _calls_by_marker(llm, "Risk-Manager und fasst die Risiko-Debatte")
+        assert "3 Perspektiven × 2 Runden" in synth[0][1]
+
+    def test_synthesis_one_round_gets_round1_arguments(self):
+        """rounds=1 → Synthese bekommt die 3 Runde-1-Argumente, keine Runde-2-Marker."""
+        llm = _DebateMockLLM()
+        risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=1)
+        synth = _calls_by_marker(llm, "Risk-Manager und fasst die Risiko-Debatte")
+        user = synth[0][1]
+        assert "AGGRESSIV-R1" in user
+        assert "NEUTRAL-R1" in user
+        assert "KONSERVATIV-R1" in user
+        assert "AGGRESSIV-R2" not in user
+
+    def test_risk_debate_key_rounds_one_only_runde1(self):
+        """rounds=1 → _risk_debate enthält nur runde1, kein (leeres) runde2."""
+        llm = _DebateMockLLM()
+        result = risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=1)
+        assert set(result["_risk_debate"].keys()) == {"runde1"}
+        assert "AGGRESSIV-R1" in result["_risk_debate"]["runde1"]["Aggressiv"]
+
+    def test_risk_manager_passes_env_rounds(self, monkeypatch):
+        """risk_manager liest die Config und reicht rounds explizit durch."""
+        monkeypatch.setenv("CONCILIUM_RISK_DEBATE_ROUNDS", "1")
+        llm = _DebateMockLLM()
+        result = risk_manager(_TRADE, _MOCK_DATA, llm, data_text="dummy")
+        assert len(llm.captured) == 4
+        assert result["risiko_score"] == 3
+
+    def test_risk_manager_default_rounds_two(self, monkeypatch):
+        """Ohne Env: risk_manager → 7 Calls (Default bleibt 2 Runden)."""
+        monkeypatch.delenv("CONCILIUM_RISK_DEBATE_ROUNDS", raising=False)
+        llm = _DebateMockLLM()
+        risk_manager(_TRADE, _MOCK_DATA, llm, data_text="dummy")
+        assert len(llm.captured) == 7
+
+    def test_report_compatible_with_rounds_one_result(self):
+        """Integration: rounds=1-Ergebnis (ohne runde2) bleibt report-kompatibel."""
+        llm = _DebateMockLLM()
+        risk = risk_debate(_TRADE, _MOCK_DATA, llm, data_text="dummy", rounds=1)
+        report = generate_report(TestRiskDebateReport._base_result(risk))
+        assert "**Risiko-Debatte:** Aggressiv vs Neutral vs Konservativ" in report
+        assert "**Aggressiv:** AGGRESSIV-R1" in report
 
 
 # ---------------------------------------------------------------------------

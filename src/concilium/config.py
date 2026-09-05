@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 
 # ---------------------------------------------------------------------------
 # Pfad-Helper
@@ -185,3 +186,22 @@ def llm_fallback_model() -> str:
     Priorität: LLM_FALLBACK_MODEL-Env > ''.
     """
     return _env("LLM_FALLBACK_MODEL", "")
+
+
+# ---------------------------------------------------------------------------
+# Risiko-Debatte
+# ---------------------------------------------------------------------------
+
+
+def risk_debate_rounds() -> int:
+    """Anzahl der Risiko-Debatten-Runden (1 oder 2).
+
+    Priorität: CONCILIUM_RISK_DEBATE_ROUNDS-Env > 2 (Default).
+    Typ-koerziert (int) via _coerce — bei Tippfehler LAUTE ValueError
+    mit Env-Variablen-Namen (gleiche Koerzion wie in _env, nur ohne
+    den dortigen str()-Wrap, damit der Rückgabetyp int bleibt).
+    """
+    raw = os.environ.get("CONCILIUM_RISK_DEBATE_ROUNDS")
+    if raw is None:
+        return 2
+    return cast(int, _coerce(raw, 2, key="CONCILIUM_RISK_DEBATE_ROUNDS"))
