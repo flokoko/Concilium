@@ -18,12 +18,13 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import requests
 import yfinance as yf
+
+from . import config
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +53,7 @@ def _get_cache_dir() -> str | None:
 
     Default: <repo>/cache/ (Repo-Root = Eltern von src/).
     """
-    env = os.environ.get("CONCILIUM_CACHE_DIR")
-    if env is not None:
-        env = env.strip()
-        if not env:
-            return None  # leerer String → Cache deaktiviert
-        return env
-    # Default: <repo>/cache/ — Repo-Root ist Eltern von src/
-    # __file__ = .../src/concilium/data.py → Repo-Root = .../
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    return str(repo_root / "cache")
+    return config.cache_dir()
 
 
 def _get_today_key() -> str:

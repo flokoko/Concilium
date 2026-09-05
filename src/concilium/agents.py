@@ -14,6 +14,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
+from . import config
 from .factors import compute_multi_factor_score
 from .llm import LLMClient, StructuredChatResult
 from .schemas import (
@@ -1335,10 +1336,7 @@ def _ensemble_state_dir() -> str:
 
     Priorität: CONCILIUM_STATE_DIR-Env > 'state'.
     """
-    env = os.environ.get("CONCILIUM_STATE_DIR")
-    if env:
-        return env
-    return "state"
+    return config.state_dir()
 
 
 def _load_ensemble_weights() -> dict[str, float] | None:

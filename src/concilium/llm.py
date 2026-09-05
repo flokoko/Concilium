@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
-import os
 import random
 import time
 from typing import Any, NamedTuple
 
 import requests
+
+from . import config
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +76,14 @@ class LLMClient:
         model: str | None = None,
         fallback_model: str | None = None,
     ):
-        self.base_url = (base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
-        self.api_key = api_key or os.environ.get("LLM_API_KEY") or os.environ.get("OLLAMA_API_KEY", "")
-        self.model = model or os.environ.get("LLM_MODEL", DEFAULT_MODEL)
+        self.base_url = (base_url or config.llm_base_url()).rstrip("/")
+        self.api_key = api_key or config.llm_api_key()
+        self.model = model or config.llm_model()
         self.fallback_model = (
             fallback_model
             if fallback_model is not None
-            else os.environ.get("LLM_FALLBACK_MODEL", "")
-        ) or None
+            else config.llm_fallback_model() or None
+        )
         self.last_usage: dict | None = None
         self.total_usage: dict[str, int] = {
             "prompt_tokens": 0,

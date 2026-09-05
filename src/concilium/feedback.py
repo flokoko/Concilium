@@ -19,6 +19,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Any
 
+from . import config
 from .evaluate import _parse_timestamp, realised_return_for_row
 from .journal import (  # noqa: F401 — JOURNAL_HEADER: re-export für _write_resolution-Fallback
     JOURNAL_HEADER,
@@ -40,12 +41,7 @@ def _state_dir(state_dir: str | None = None) -> str:
 
     Priorität: expliziter Parameter > CONCILIUM_STATE_DIR-Env > 'state'.
     """
-    if state_dir is not None:
-        return state_dir
-    env = os.environ.get("CONCILIUM_STATE_DIR")
-    if env:
-        return env
-    return "state"
+    return config.state_dir(state_dir)
 
 
 def _load_calibration_json(state_dir: str | None = None) -> dict[str, Any] | None:

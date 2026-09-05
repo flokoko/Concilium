@@ -14,6 +14,8 @@ import os
 import re
 from typing import Any
 
+from . import config
+
 # Platform-Guard: fcntl ist Linux/Unix-only; auf anderen Plattformen None.
 try:
     import fcntl
@@ -35,12 +37,7 @@ def _state_dir(state_dir: str | None = None) -> str:
 
     Priorität: expliziter Parameter > CONCILIUM_STATE_DIR-Env > 'state'.
     """
-    if state_dir is not None:
-        return state_dir
-    env = os.environ.get("CONCILIUM_STATE_DIR")
-    if env:
-        return env
-    return "state"
+    return config.state_dir(state_dir)
 
 
 def _checkpoint_path(ticker: str, *, state_dir: str | None = None) -> str:

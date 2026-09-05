@@ -9,6 +9,7 @@ import os
 import sys
 from datetime import datetime
 
+from . import config
 from .data import _parse_as_of
 from .evaluate import evaluate_journal
 from .llm import LLMClient
@@ -40,7 +41,7 @@ def _read_watchlist(path: str | None = None) -> list[str]:
     - Pfad: expliziter Parameter > CONCILIUM_WATCHLIST-Env > Standardpfad.
     """
     if path is None:
-        path = os.environ.get("CONCILIUM_WATCHLIST") or _default_watchlist_path()
+        path = config.watchlist_path()
     try:
         with open(path, encoding="utf-8") as fh:
             lines = fh.readlines()
@@ -65,12 +66,7 @@ def _state_dir(state_dir: str | None = None) -> str:
 
     Priorität: expliziter Parameter > CONCILIUM_STATE_DIR-Env > 'state'.
     """
-    if state_dir is not None:
-        return state_dir
-    env = os.environ.get("CONCILIUM_STATE_DIR")
-    if env:
-        return env
-    return "state"
+    return config.state_dir(state_dir)
 
 
 def _reports_dir() -> str:
@@ -80,12 +76,7 @@ def _reports_dir() -> str:
     Damit lassen sich Tests vom echten reports/-Ordner isolieren
     (autouse-Fixture in tests/conftest.py).
     """
-    env = os.environ.get("CONCILIUM_REPORTS_DIR")
-    if env:
-        return env
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", "reports"
-    )
+    return config.reports_dir()
 
 
 def _write_calibration_json(eval_result: dict, *, state_dir: str | None = None) -> None:

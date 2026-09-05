@@ -16,6 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from typing import Any
 
+from . import config
 from .agents import _build_data_text, _call_agent
 from .data import _get_cache_dir, _get_today_key
 from .llm import LLMClient
@@ -550,8 +551,7 @@ def _load_action_hit_rate(action: str) -> float | None:
     try:
         # State-Dir auflösen (gleicher Mechanismus wie agents.py
         # _ensemble_state_dir): CONCILIUM_STATE_DIR-Env > 'state'.
-        env = os.environ.get("CONCILIUM_STATE_DIR")
-        state_dir = env if env else "state"
+        state_dir = config.state_dir()
         cal_path = os.path.join(state_dir, "calibration.json")
         if not os.path.isfile(cal_path):
             return None
