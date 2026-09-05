@@ -949,9 +949,15 @@ def _compute_rsi(series: pd.Series, period: int = 14) -> float | None:
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=period, min_periods=period).mean()
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    if avg_loss.iloc[-1] == 0:
+    # NaN-robust: letzten gültigen Fensterwert verwenden (letzte Zeile kann
+    # bei yfinance-Fehlern NaN sein → sonst wäre der ganze RSI None).
+    avg_gain_last = _last_valid(avg_gain)
+    avg_loss_last = _last_valid(avg_loss)
+    if avg_gain_last is None or avg_loss_last is None:
+        return None
+    if avg_loss_last == 0:
         return 100.0
-    rs = avg_gain.iloc[-1] / avg_loss.iloc[-1]
+    rs = avg_gain_last / avg_loss_last
     if pd.isna(rs):
         return None
     return float(100.0 - (100.0 / (1.0 + rs)))
@@ -981,13 +987,20 @@ def _compute_bollinger(series: pd.Series, period: int = 20) -> dict[str, float |
     std = series.rolling(window=period).std()
     upper = sma + 2 * std
     lower = sma - 2 * std
-    last_close = float(series.iloc[-1])
-    upper_val = float(upper.iloc[-1]) if not pd.isna(upper.iloc[-1]) else None
-    lower_val = float(lower.iloc[-1]) if not pd.isna(lower.iloc[-1]) else None
-    middle_val = float(sma.iloc[-1]) if not pd.isna(sma.iloc[-1]) else None
+    last_close = _safe_float(_last_valid(series))
+    # NaN-robust: rolling-Ergebnisse sind am letzten Index NaN, wenn die letzte
+    # Zeile NaN ist (NaN vergiftet das Fenster) → letzten gültigen Wert nutzen.
+    upper_val = _safe_float(_last_valid(upper))
+    lower_val = _safe_float(_last_valid(lower))
+    middle_val = _safe_float(_last_valid(sma))
 
     position = None
-    if upper_val is not None and lower_val is not None and (upper_val - lower_val) != 0:
+    if (
+        last_close is not None
+        and upper_val is not None
+        and lower_val is not None
+        and (upper_val - lower_val) != 0
+    ):
         position = (last_close - lower_val) / (upper_val - lower_val)
 
     return {"upper": upper_val, "middle": middle_val, "lower": lower_val, "position": position}
@@ -1005,6 +1018,39 @@ def _safe_float(val: Any) -> float | None:
     try:
         return float(val)
     except (TypeError, ValueError):
+        return None
+
+
+def _last_valid(series: Any) -> Any:
+    """Liefert den letzten gültigen (nicht-NaN) Wert einer pandas-Serie.
+
+    yfinance liefert intermittierend NaN für den letzten Close — der letzte
+    Wert einer Serie ist dann unbrauchbar. Diese Funktion gibt stattdessen
+    den letzten nicht-NaN-Wert zurück:
+
+      - leere Serie / None → None
+      - mind. ein gültiger Wert → letzter gültiger (nicht-NaN) Wert
+      - alle Werte NaN → letzter Wert (NaN; _safe_float macht daraus None)
+
+    Akzeptiert zusätzlich Skalare (z. B. Serie.mean()): NaN → None, sonst
+    unverändert. Crasht nie.
+    """
+    if series is None:
+        return None
+    # Skalar (kein dropna/len) — z. B. volume.tail(30).mean()
+    if not hasattr(series, "dropna"):
+        try:
+            return None if pd.isna(series) else series
+        except (TypeError, ValueError):
+            return series
+    try:
+        if len(series) == 0:
+            return None
+        valid = series.dropna()
+        if len(valid) > 0:
+            return valid.iloc[-1]
+        return series.iloc[-1]  # alle NaN → letzter (wird von _safe_float zu None)
+    except Exception:  # noqa: BLE001 — _last_valid darf nie crashen
         return None
 
 
@@ -1176,7 +1222,7 @@ def _fetch_macro_data() -> dict[str, Any]:
         tnx_hist = tnx.history(period="1mo")
         if tnx_hist is not None and not tnx_hist.empty:
             close_col = tnx_hist["Close"]
-            current_yield = _safe_float(close_col.iloc[-1])
+            current_yield = _safe_float(_last_valid(close_col))
             old_yield = _safe_float(close_col.iloc[0]) if len(close_col) >= 1 else None
             result["us_10y_yield"] = current_yield
             result["us_10y_yield_1m_ago"] = old_yield
@@ -1205,7 +1251,7 @@ def _fetch_macro_data() -> dict[str, Any]:
         if eurusd_val is None:
             eurusd_hist = eurusd_ticker.history(period="5d")
             if eurusd_hist is not None and not eurusd_hist.empty:
-                eurusd_val = _safe_float(eurusd_hist["Close"].iloc[-1])
+                eurusd_val = _safe_float(_last_valid(eurusd_hist["Close"]))
         result["eurusd"] = eurusd_val
     except Exception as exc:  # noqa: BLE001 — best effort
         logger.warning("Makrodaten EURUSD konnten nicht abgerufen werden: %s", exc)
@@ -1218,7 +1264,7 @@ def _fetch_macro_data() -> dict[str, Any]:
         if vix_val is None:
             vix_hist = vix_ticker.history(period="5d")
             if vix_hist is not None and not vix_hist.empty:
-                vix_val = _safe_float(vix_hist["Close"].iloc[-1])
+                vix_val = _safe_float(_last_valid(vix_hist["Close"]))
         result["vix"] = vix_val
     except Exception as exc:  # noqa: BLE001 — best effort
         logger.warning("Makrodaten ^VIX konnten nicht abgerufen werden: %s", exc)
@@ -1229,7 +1275,7 @@ def _fetch_macro_data() -> dict[str, Any]:
         gspc_hist = gspc.history(period="1mo")
         if gspc_hist is not None and not gspc_hist.empty:
             close_col = gspc_hist["Close"]
-            last_close = _safe_float(close_col.iloc[-1])
+            last_close = _safe_float(_last_valid(close_col))
             first_close = _safe_float(close_col.iloc[0])
             if last_close is not None and first_close is not None and first_close > 0:
                 pct_change = (last_close - first_close) / first_close
@@ -1250,7 +1296,7 @@ def _fetch_macro_data() -> dict[str, Any]:
         if cl_val is None:
             cl_hist = cl_ticker.history(period="5d")
             if cl_hist is not None and not cl_hist.empty:
-                cl_val = _safe_float(cl_hist["Close"].iloc[-1])
+                cl_val = _safe_float(_last_valid(cl_hist["Close"]))
         result["oel_preis"] = cl_val
     except Exception as exc:  # noqa: BLE001 — best effort
         logger.warning("Makrodaten Ölpreis (CL=F) konnten nicht abgerufen werden: %s", exc)
@@ -1587,16 +1633,18 @@ def collect_ticker_data(
     # --- Technische Indikatoren aus Historie ---
     close = hist["Close"]
     volume = hist["Volume"]
-    current_price = _safe_float(close.iloc[-1])
+    # NaN-robust: yfinance liefert intermittierend NaN für den letzten Close.
+    # Statt .iloc[-1] (kann NaN sein) wird der letzte gültige Wert verwendet.
+    current_price = _safe_float(_last_valid(close))
 
-    sma50 = float(close.rolling(window=50).mean().iloc[-1]) if len(close) >= 50 else None
-    sma200 = float(close.rolling(window=200).mean().iloc[-1]) if len(close) >= 200 else None
+    sma50 = float(_last_valid(close.rolling(window=50).mean())) if len(close) >= 50 else None
+    sma200 = float(_last_valid(close.rolling(window=200).mean())) if len(close) >= 200 else None
 
     rsi = _compute_rsi(close)
     macd = _compute_macd(close)
     bollinger = _compute_bollinger(close)
-    current_volume = _safe_float(volume.iloc[-1])
-    avg_volume_30d = float(volume.tail(30).mean()) if len(volume) >= 30 else None
+    current_volume = _safe_float(_last_valid(volume))
+    avg_volume_30d = float(_last_valid(volume.tail(30).mean())) if len(volume) >= 30 else None
 
     technicals = {
         "current_price": current_price,
