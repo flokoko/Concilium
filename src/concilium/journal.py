@@ -46,8 +46,9 @@ JOURNAL_HEADER = [
     # resolved_at: ISO-Timestamp der Auflösung (leer solange pending)
     "resolved_at",
     # realised_return_pct / alpha_pct: persistierter realisierter Return inkl.
-    # Alpha vs SPY (leer solange pending) — wird beim Resolving einmalig
-    # berechnet und danach von build_reflection_context wiederverwendet.
+    # Alpha vs regionalem Benchmark (leer solange pending) — wird beim
+    # Resolving einmalig berechnet und danach von build_reflection_context
+    # wiederverwendet.
     "realised_return_pct",
     "alpha_pct",
     # lesson: persistierte Lektion (LLM- oder deterministischer Satz) — wird

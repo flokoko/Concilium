@@ -203,8 +203,9 @@ Concilium ist explizit lernend über mehrere Mechanismen:
   Kalibrierung an der eigenen Historie ausrichten.
 - **Reflexion**: Vor jeder Analyse desselben Tickers holt Concilium den
   **realisierten Return** der letzten Entscheidung zu diesem Ticker (roh **und
-  Alpha vs. SPY**), generiert eine kurze deutsche **Reflexion** und injiziert sie
-  in den Trader- und Portfolio-Manager-Prompt.
+  Alpha vs. regionalem Benchmark** — abgeleitet aus dem Börsen-Suffix, z. B.
+  ^GDAXI für *.DE, ^FTSE für *.L, SPY für US), generiert eine kurze deutsche
+  **Reflexion** und injiziert sie in den Trader- und Portfolio-Manager-Prompt.
 - **Konfidenz-Kalibrierung** (seit Phase 4): `--evaluate` misst die Kalibrierung
   über den **Brier-Score**, den **Kalibrierungs-Gap** (Ø-Konfidenz vs. tatsächliche
   Hit-Rate) und **Reliability-Bänder** — und klassifiziert die Tendenz als über-/

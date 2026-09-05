@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from . import config
-from .evaluate import _parse_timestamp, realised_return_for_row
+from .evaluate import _parse_timestamp, benchmark_for_ticker, realised_return_for_row
 from .journal import (  # noqa: F401 — JOURNAL_HEADER: re-export für _write_resolution-Fallback
     JOURNAL_HEADER,
     REFLECTION_STATUS_PENDING,
@@ -702,7 +702,7 @@ def _lesson_from_returns(
             f"Ticker: {ticker}\n"
             f"Aktion: {action}\n"
             f"Realisierter Return: {raw_str}\n"
-            f"Alpha vs SPY: {alpha_str}\n\n"
+            f"Alpha vs {benchmark_for_ticker(ticker)}: {alpha_str}\n\n"
             f"Antworte mit genau einem deutschen Satz (maximal 30 Wörter)."
         )
         messages = [
@@ -741,7 +741,7 @@ def _format_reflection_text(
     return (
         f"=== DEINE LETZTE ENTSCHEIDUNG ZU {ticker.upper()} ({ts}) ===\n"
         f"Aktion: {action} | Realisierter Return: {raw_str} "
-        f"| Alpha vs SPY: {alpha_str}\n"
+        f"| Alpha vs {benchmark_for_ticker(ticker)}: {alpha_str}\n"
         f"Lerne daraus: {lesson}"
     )
 
@@ -780,7 +780,7 @@ def resolve_pending_reflections(
       2. Prüfen, ob ``decision_date + lookback_days <= today`` gilt. Wenn das
          Fenster noch läuft → "" (KEIN Look-ahead: der Ausgang existiert noch
          nicht, also gibt es auch keine Reflexion).
-      3. Realisierten Return (inkl. Alpha vs SPY) via
+      3. Realisierten Return (inkl. Alpha vs regionalem Benchmark) via
          ``evaluate.realised_return_for_row`` berechnen. None → "".
       4. Lektion generieren (LLM-Ein-Satz oder deterministischer Fallback).
       5. Auflösung atomar + lock-sicher ins Journal zurückschreiben:
@@ -1207,7 +1207,7 @@ def build_cross_ticker_context(
                 lessons.append({
                     "ticker": row.get("ticker", ""),
                     "raw_return_pct": raw,
-                    "spy_return_pct": None,
+                    "benchmark_return_pct": None,
                     "alpha_pct": alpha,
                     "timestamp": (row.get("timestamp") or "").strip(),
                     "action": (row.get("action") or "").strip().upper(),
@@ -1245,7 +1245,8 @@ def build_cross_ticker_context(
                     lehrzeilen.append(
                         f"- {rr.get('ticker', '?')} ({rr.get('timestamp', '')}): "
                         f"Aktion {rr.get('action', '')}, realisierter Return "
-                        f"{rr.get('raw_return_pct'):+.2f}%, Alpha vs SPY {alpha_str}"
+                        f"{rr.get('raw_return_pct'):+.2f}%, "
+                        f"Alpha vs {benchmark_for_ticker(rr.get('ticker'))} {alpha_str}"
                     )
                 prompt = (
                     "Du bist ein Trading-Coach. Formuliere EINEN deutschen Satz als "
@@ -1288,7 +1289,7 @@ def build_cross_ticker_context(
             lines.append(
                 f"- {str(rr.get('ticker') or '').upper()} ({rr.get('timestamp', '')}): "
                 f"Aktion {rr.get('action', '')} | Realisierter Return {raw_str} "
-                f"| Alpha vs SPY {alpha_str}"
+                f"| Alpha vs {benchmark_for_ticker(rr.get('ticker'))} {alpha_str}"
             )
         lines.append(f"Lektion: {lesson}")
         lines.append(

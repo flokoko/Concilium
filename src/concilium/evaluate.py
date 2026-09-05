@@ -38,6 +38,49 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
+# Regionale Benchmark-Map (analog TradingAgents' benchmark_map)
+# --------------------------------------------------------------------------- #
+
+# Map: Börsen-Suffix (Upper-Case, ohne führenden Punkt) → Benchmark-Ticker.
+# "" (kein Suffix) = US-Markt → SPY. Unbekannte Suffixe fallen auf SPY zurück.
+_BENCHMARK_MAP: dict[str, str] = {
+    "DE": "^GDAXI",     # DAX (Deutschland)
+    "L": "^FTSE",       # FTSE 100 (UK)
+    "T": "^N225",       # Nikkei 225 (Japan)
+    "HK": "^HSI",       # Hang Seng (Hongkong)
+    "NS": "^NSEI",      # Nifty 50 (Indien, NSE)
+    "BO": "^BSESN",     # Sensex (Indien, BSE)
+    "TO": "^GSPTSE",    # TSX Composite (Kanada)
+    "AX": "^AXJO",      # ASX 200 (Australien)
+    "SS": "000001.SS",  # SSE Composite (Shanghai)
+    "SZ": "399001.SZ",  # SZSE Component (Shenzhen)
+}
+
+
+def benchmark_for_ticker(ticker: Any) -> str:
+    """Leitet den Benchmark-Index deterministisch aus dem Börsen-Suffix ab.
+
+    Analog TradingAgents' ``benchmark_map``: "RWE.DE" → ^GDAXI (DAX),
+    "SHEL.L" → ^FTSE (FTSE 100), "7203.T" → ^N225 (Nikkei 225),
+    "AAPL" (kein Suffix, US) → SPY. Unbekannte Suffixe → SPY (Fallback).
+
+    Crasht nie — gibt immer einen String zurück.
+
+    Args:
+        ticker: Beliebiger Ticker-String (oder None/anderer Typ).
+
+    Returns:
+        Benchmark-Ticker-String ("^GDAXI", "^FTSE", "SPY", ...).
+    """
+    try:
+        ticker_str = str(ticker or "").strip().upper()
+        suffix = ticker_str.rsplit(".", 1)[-1] if "." in ticker_str else ""
+        return _BENCHMARK_MAP.get(suffix, "SPY")
+    except Exception:  # noqa: BLE001 — crasht nie
+        return "SPY"
+
+
+# --------------------------------------------------------------------------- #
 # Cache-Hilfsfunktionen (eigener Preis-Cache, nutzt Cache-Dir aus data.py)
 # --------------------------------------------------------------------------- #
 
@@ -1081,8 +1124,9 @@ def realised_return_for_row(row: dict[str, Any], lookback_days: int = 30) -> dic
 
     Nutzt die vorhandenen Helper _load_price_history / _find_price_on_or_before /
     _find_price_on_or_after. Invertiert die Rendite für VERKAUFEN/STARK VERKAUFEN
-    (analog _evaluate_single). Berechnet zusätzlich den SPY-Return über das
-    gleiche Zeitfenster und den Alpha (raw - spy).
+    (analog _evaluate_single). Berechnet zusätzlich den Return des regionalen
+    Benchmarks (via benchmark_for_ticker, z. B. ^GDAXI für *.DE) über das
+    gleiche Zeitfenster und den Alpha (raw - benchmark).
 
     Args:
         row: Journal-Zeile (dict mit mindestens 'ticker', 'timestamp', 'action').
@@ -1090,8 +1134,8 @@ def realised_return_for_row(row: dict[str, Any], lookback_days: int = 30) -> dic
 
     Returns:
         dict mit ticker, entry_price, exit_price, raw_return_pct,
-        spy_return_pct, alpha_pct, timestamp, action — oder None bei
-        irgendeinem Fehler (never raises).
+        benchmark_return_pct, alpha_pct, benchmark, timestamp, action —
+        oder None bei irgendeinem Fehler (never raises).
     """
     try:
         ticker = (row.get("ticker") or "").strip()
@@ -1139,37 +1183,43 @@ def realised_return_for_row(row: dict[str, Any], lookback_days: int = 30) -> dic
         else:
             raw_return_pct = price_change_pct
 
-        # SPY-Return über das gleiche Fenster
-        spy_return_pct: float | None = None
+        # Benchmark-Return über das gleiche Fenster (regionaler Benchmark
+        # via benchmark_for_ticker — z. B. ^GDAXI für *.DE, SPY für US)
+        benchmark = benchmark_for_ticker(ticker)
+        benchmark_return_pct: float | None = None
         alpha_pct: float | None = None
         try:
-            spy_prices = _load_price_history("SPY", lookback_days=lookback_days)
-            if spy_prices:
-                spy_entry = _find_price_on_or_before(spy_prices, decision_date)
-                if spy_entry is None:
-                    spy_entry = spy_prices[0]
-                spy_exit = _find_price_on_or_before(spy_prices, eval_end)
-                if spy_exit is None:
-                    spy_exit = spy_prices[-1]
-                spy_entry_price = _safe_float(spy_entry.get("close"))
-                spy_exit_price = _safe_float(spy_exit.get("close"))
-                if (spy_entry_price is not None and spy_exit_price is not None
-                        and math.isfinite(spy_entry_price) and math.isfinite(spy_exit_price)
-                        and spy_entry_price > 0):
-                    spy_return_pct = (spy_exit_price - spy_entry_price) / spy_entry_price * 100.0
-                    if math.isfinite(spy_return_pct):
-                        alpha_pct = raw_return_pct - spy_return_pct
+            benchmark_prices = _load_price_history(benchmark, lookback_days=lookback_days)
+            if benchmark_prices:
+                benchmark_entry = _find_price_on_or_before(benchmark_prices, decision_date)
+                if benchmark_entry is None:
+                    benchmark_entry = benchmark_prices[0]
+                benchmark_exit = _find_price_on_or_before(benchmark_prices, eval_end)
+                if benchmark_exit is None:
+                    benchmark_exit = benchmark_prices[-1]
+                benchmark_entry_price = _safe_float(benchmark_entry.get("close"))
+                benchmark_exit_price = _safe_float(benchmark_exit.get("close"))
+                if (benchmark_entry_price is not None and benchmark_exit_price is not None
+                        and math.isfinite(benchmark_entry_price) and math.isfinite(benchmark_exit_price)
+                        and benchmark_entry_price > 0):
+                    benchmark_return_pct = (
+                        (benchmark_exit_price - benchmark_entry_price)
+                        / benchmark_entry_price * 100.0
+                    )
+                    if math.isfinite(benchmark_return_pct):
+                        alpha_pct = raw_return_pct - benchmark_return_pct
                     else:
-                        spy_return_pct = None
-        except Exception as spy_exc:  # noqa: BLE001 — best effort
-            logger.debug("SPY-Return konnte nicht berechnet werden: %s", spy_exc)
+                        benchmark_return_pct = None
+        except Exception as bench_exc:  # noqa: BLE001 — best effort
+            logger.debug("Benchmark-Return konnte nicht berechnet werden: %s", bench_exc)
 
         return {
             "ticker": ticker,
             "entry_price": entry_price,
             "exit_price": exit_price,
             "raw_return_pct": raw_return_pct,
-            "spy_return_pct": spy_return_pct,
+            "benchmark": benchmark,
+            "benchmark_return_pct": benchmark_return_pct,
             "alpha_pct": alpha_pct,
             "timestamp": timestamp,
             "action": action,

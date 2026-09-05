@@ -108,9 +108,10 @@ class TestRealisedReturn:
 
         assert result is not None
         assert result["raw_return_pct"] > 0
-        assert result["spy_return_pct"] is not None
+        assert result["benchmark"] == "SPY"
+        assert result["benchmark_return_pct"] is not None
         assert result["alpha_pct"] is not None
-        assert result["alpha_pct"] == result["raw_return_pct"] - result["spy_return_pct"]
+        assert result["alpha_pct"] == result["raw_return_pct"] - result["benchmark_return_pct"]
 
     def test_verkaufen_inverted_return(self):
         """VERKAUFEN mit steigenden Kursen → negativer raw_return (invertiert)."""
@@ -137,7 +138,7 @@ class TestRealisedReturn:
         assert result["raw_return_pct"] < 0
 
     def test_spy_none_when_spy_fails(self):
-        """Wenn SPY-Daten nicht ladbar → spy_return_pct=None, alpha_pct=None."""
+        """Wenn Benchmark-Daten nicht ladbar → benchmark_return_pct=None, alpha_pct=None."""
         from concilium.evaluate import realised_return_for_row
 
         prices = _make_prices(100, 60, drift=0.01)
@@ -158,7 +159,8 @@ class TestRealisedReturn:
 
         assert result is not None
         assert result["raw_return_pct"] is not None
-        assert result["spy_return_pct"] is None
+        assert result["benchmark"] == "SPY"
+        assert result["benchmark_return_pct"] is None
         assert result["alpha_pct"] is None
 
     def test_never_raises(self):
