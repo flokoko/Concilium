@@ -222,6 +222,81 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 }
 """
 
+# Hinweis: SYSTEM_RISK wird vom Single-Pass-Risk-Manager nicht mehr verwendet
+# (ersetzt durch die 3-Perspektiven-Risiko-Debatte, siehe risk_debate), bleibt
+# aber aus Rückwärtskompatibilität erhalten.
+SYSTEM_RISK_AGGRESSIVE = """\
+Du bist der Aggressive Risk-Analyst. Du championst hohe Renditechancen, betonst \
+Wachstum und Wettbewerbsvorteile und akzeptierst höheres Risiko, wenn die Upside \
+es rechtfertigt.
+
+Schwerpunkte:
+- Wachstumschancen: Wo ist das Renditepotenzial größer als das Risiko?
+- Wettbewerbsvorteil: Warum trägt das Geschäftsmodell das höhere Risiko?
+- Chance-Risiko-Verhältnis: Upside vs. Downside in Zahlen.
+- Übermäßige Vorsicht ist auch ein Risiko: verpasste Gewinne, Verharren im Cash.
+
+Bewerte den Trade-Vorschlag positiv, wenn die Upside das Risiko rechtfertigt. \
+Antworte auf Deutsch in 3-6 Sätzen als Fließtext (kein JSON).
+"""
+
+SYSTEM_RISK_NEUTRAL = """\
+Du bist der Neutrale Risk-Analyst. Du wägst Chancen und Risiken ausgewogen ab \
+und bewertest den Trade sachlich.
+
+Schwerpunkte:
+- Volatilität: annualisierte Volatilität und implizite Schwankungsbreite.
+- Drawdown: realistisches maximales Verlustszenario für die Position.
+- Positionsgröße: Passung zum rechnerischen Volatility-Targeting \
+(Risiko-Budget 2%, Cap 10%).
+- Marktbedingungen: Trend, Bewertung, Makro-Umfeld, anstehende Katalysatoren.
+
+Nenne konkrete Auflagen, wenn der Trade nur mit Bedingungen tragbar ist. \
+Antworte auf Deutsch in 3-6 Sätzen als Fließtext (kein JSON).
+"""
+
+SYSTEM_RISK_CONSERVATIVE = """\
+Du bist der Konservative Risk-Analyst. Du priorisierst Kapitalerhalt und bist \
+skeptisch gegenüber hohen Positionsgrößen.
+
+Schwerpunkte:
+- Drawdown-Risiko: Wie tief kann die Position im schlechtesten Fall fallen?
+- Währungsrisiko: zusätzliche Schwankung bei nicht-EUR-Währung (Wechselkurs).
+- Konzentrationsrisiko: Klumpenrisiko mit bestehenden Positionen und Sektoren.
+- Position und Stops: kleine Positionen, enge Stop-Loss-Margen, Nachschieben \
+statt Alles-oder-Nichts.
+
+Verlange enge Stops und kleine Positionen, wenn die Datenlage unklar ist. \
+Antworte auf Deutsch in 3-6 Sätzen als Fließtext (kein JSON).
+"""
+
+SYSTEM_RISK_SYNTHESIS = """\
+Du bist der Risk-Manager und fasst die Risiko-Debatte zusammen. Dir liegen die \
+Argumente von drei Perspektiven (aggressiv, neutral, konservativ) über 2 Runden \
+vor. Triff eine ausgewogene finale Risiko-Bewertung.
+
+Gewichtung: Bei hohem Risiko (hohe Volatilität, großer geschätzter Drawdown, \
+Währungsrisiko, Konzentrationsrisiko) sollen die konservative und die neutrale \
+Sicht mehr Gewicht haben. Bei klarem Datengerüst und niedrigem Risiko darf die \
+aggressive Sicht die Empfehlung anheben. Berücksichtige die rechnerischen Werte \
+(Volatilität, Volatility-Targeting-Positionsgröße) — dein \
+"positionsgröße_empfohlen" sollte in der Nähe der rechnerischen Positionsgröße \
+liegen, sofern die Debatte keine begründete Abweichung ergibt.
+
+Berücksichtige bei nicht-EUR-Währung zusätzliches Währungsrisiko \
+(Wechselkursbewegung) im Risiko-Score.
+
+Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
+{
+  "risiko_score": 1-5 (1=niedrig, 5=sehr hoch),
+  "volatilität_bewertung": "Kurze Bewertung",
+  "max_drawdown_schaetzung": "Geschätzter Max-Drawdown in %",
+  "positionsgröße_empfohlen": "Empfohlene Positionsgrösse in %",
+  "auflagen": "Auflagen oder Bedingungen, oder 'keine'",
+  "empfehlung": "GENEHMIGT" | "MODIFIZIERT" | "ABGELEHNT"
+}
+"""
+
 SYSTEM_TRADE_REVISION = """\
 Du bist der Trader in der zweiten Runde. Dein ursprünglicher Trade wurde vom \
 Risk-Manager und Portfolio-Fit-Analysten bewertet. Passe deinen Trade an: Du \
@@ -1899,18 +1974,89 @@ def _normalize_pct_string(val: Any) -> float | None:
     return fval if fval == fval else None  # NaN-Check
 
 
-def risk_manager(
+def _risk_perspective_call(llm: LLMClient, system_prompt: str, user_text: str) -> str:
+    """Führt einen Perspektiven-Call der Risiko-Debatte aus (best-effort).
+
+    Analog zu Bull/Bear: DEBATE_SCHEMA für strukturierte Outputs, das
+    Fließtext-Argument via _get_debate_argument extrahieren. Bei Fehlschlag
+    wird eine Warnung geloggt und ein leerer String zurückgegeben — die
+    Debatte crasht nie.
+    """
+    try:
+        result = _call_agent(
+            llm,
+            system_prompt,
+            user_text,
+            temperature=0.5,
+            response_format=DEBATE_SCHEMA,
+            structured=True,
+        )
+        return _get_debate_argument(result)
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("Risk-Debatte: Perspektiven-Call fehlgeschlagen: %s", exc)
+        return ""
+
+
+def _run_risk_perspectives_parallel(
+    llm: LLMClient,
+    jobs: list[tuple[str, str, str]],
+) -> dict[str, str]:
+    """Führt (Name, System-Prompt, User-Text)-Jobs parallel aus (best-effort).
+
+    Gleiche Technik wie analyst_team: ThreadPoolExecutor mit _MAX_PARALLEL
+    Workern; bei einem Teilfehler wird eine Warnung geloggt und für den
+    betroffenen Key ein leerer String geliefert — die Pipeline crasht nicht.
+    """
+    results: dict[str, str] = {}
+
+    def _run_one(name: str, prompt: str, text: str) -> tuple[str, str]:
+        return name, _risk_perspective_call(llm, prompt, text)
+
+    max_workers = min(len(jobs), _MAX_PARALLEL)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_run_one, name, prompt, text): name
+            for name, prompt, text in jobs
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                _, arg = future.result()
+            except Exception as exc:  # noqa: BLE001 — nie crashen
+                logger.warning(
+                    "Risk-Debatte: Perspektive '%s' fehlgeschlagen: %s", name, exc
+                )
+                arg = ""
+            results[name] = arg
+    return results
+
+
+def risk_debate(
     trade: dict[str, Any],
     data: dict[str, Any],
     llm: LLMClient,
     data_text: str | None = None,
     feedback_context: str = "",
 ) -> dict[str, Any]:
-    """Bewertet Risiko des Trades.
+    """3-Perspektiven-Risiko-Debatte (aggressiv/neutral/konservativ, 2 Runden).
 
-    Der LLM-basierte Risk-Manager-Aufruf bleibt unverändert. Zusätzlich wird
-    eine rechnerische Positionsgröße via Volatility-Targeting ergänzt
-    (positionsgröße_rechnerisch_pct, volatilität_annualisiert_pct).
+    Ersetzt den Single-Pass-Risk-Manager-Call (Phase B):
+
+    1. Rechnerische Werte (annualisierte Volatilität, Volatility-Targeting-
+       Positionsgröße) werden wie bisher deterministisch berechnet und als
+       risk_block an alle Prompts angehängt.
+    2. Runde 1: Alle 3 Perspektiven bekommen Trade + Marktdaten + risk_block
+       (parallel, wie analyst_team) und liefern je ein Fließtext-Argument.
+    3. Runde 2: Jede Perspektive bekommt zusätzlich die Argumente der
+       anderen beiden aus Runde 1 und antwortet konkret darauf (analog zur
+       Bull/Bear-Debatte).
+    4. Synthese: Ein finaler LLM-Call (SYSTEM_RISK_SYNTHESIS) bekommt alle
+       6 Argumente + Trade + Marktdaten + risk_block und liefert das finale
+       risk-dict via RISK_SCHEMA.
+
+    Alle Calls sind best-effort: Fällt eine Perspektive aus, fährt die
+    Debatte mit den anderen fort; schlägt die Synthese fehl, greift der
+    defaults_for_schema(RISK_SCHEMA)-Fallback — das risk-dict kommt immer.
 
     Args:
         trade: Trade-Vorschlag vom Trader/Ensemble.
@@ -1919,14 +2065,24 @@ def risk_manager(
         data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
             _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
         feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
-            Feedback). Wird am Ende des User-Prompts angehängt.
+            Feedback). Wird an Perspektiven- UND Synthese-Prompt angehängt.
+
+    Returns:
+        risk-dict mit denselben Feldern wie der bisherige Single-Pass-Call
+        (risiko_score, volatilität_bewertung, max_drawdown_schaetzung,
+        positionsgröße_empfohlen, auflagen, empfehlung) plus den
+        rechnerischen Feldern (volatilität_annualisiert_pct,
+        positionsgröße_rechnerisch_pct). Zusätzlich werden die
+        Debatten-Argumente unter dem Key "_risk_debate" mitgeliefert
+        (für den Report).
     """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     if data_text is None:
         data_text = _build_data_text(data)
 
-    # --- Rechnerische Positionsgröße VOR dem LLM-Call berechnen ---
-    # Einmal berechnen, im Prompt UND im Rückgabedict verwenden (keine Doppelberechnung).
+    # --- Rechnerische Positionsgröße VOR den LLM-Calls berechnen ---
+    # Einmal berechnen, im Prompt UND im Rückgabedict verwenden (keine
+    # Doppelberechnung). Identisch zum bisherigen Single-Pass-Verhalten.
     annualized_vol = _compute_annualized_volatility(data)
     vol_pct = round(annualized_vol * 100, 2) if annualized_vol is not None else None
     pos_rechnerisch = compute_position_size(annualized_vol)
@@ -1944,10 +2100,75 @@ def risk_manager(
         "Abweichung (z.B. in den auflagen)."
     )
 
-    user_text = f"Trade-Vorschlag:\n{trade_text}\n\nMarktdaten:\n{data_text}{risk_block}"
+    base_user = f"Trade-Vorschlag:\n{trade_text}\n\nMarktdaten:\n{data_text}{risk_block}"
     if feedback_context:
-        user_text += f"\n\n{feedback_context}"
-    risk = _call_agent(llm, SYSTEM_RISK, user_text, response_format=RISK_SCHEMA, structured=True)
+        base_user += f"\n\n{feedback_context}"
+
+    perspektiven = [
+        ("Aggressiv", SYSTEM_RISK_AGGRESSIVE),
+        ("Neutral", SYSTEM_RISK_NEUTRAL),
+        ("Konservativ", SYSTEM_RISK_CONSERVATIVE),
+    ]
+
+    # --- Runde 1: alle drei Perspektiven parallel ---
+    runde1 = _run_risk_perspectives_parallel(
+        llm, [(name, prompt, base_user) for name, prompt in perspektiven]
+    )
+
+    # --- Runde 2: jede Perspektive antwortet auf die anderen beiden ---
+    jobs_runde2: list[tuple[str, str, str]] = []
+    for name, prompt in perspektiven:
+        andere_texte = "\n\n".join(
+            f"--- {anderer_name} (Runde 1) ---\n"
+            f"{runde1.get(anderer_name) or '(kein Argument geliefert)'}"
+            for anderer_name, _ in perspektiven
+            if anderer_name != name
+        )
+        user2 = (
+            f"{base_user}\n\n"
+            "=== Argumentation der anderen Risiko-Perspektiven (Runde 1) ===\n"
+            f"{andere_texte}\n\n"
+            "Gehe konkret auf diese Argumente ein: stimme zu, widersprich "
+            "mit Daten, oder ergänze. Wiederhole nicht deine vorherigen "
+            "Punkte, sondern vertiefe/verteidige sie."
+        )
+        jobs_runde2.append((name, prompt, user2))
+    runde2 = _run_risk_perspectives_parallel(llm, jobs_runde2)
+
+    # --- Synthese: finaler LLM-Call mit allen 6 Argumenten ---
+    synth_parts: list[str] = []
+    for runde_nr, runde_args in ((1, runde1), (2, runde2)):
+        for name, _ in perspektiven:
+            text = runde_args.get(name) or "(kein Argument geliefert)"
+            synth_parts.append(f"=== {name} — Runde {runde_nr} ===\n{text}")
+    synthese_args = "\n\n".join(synth_parts)
+
+    synth_user = (
+        f"Trade-Vorschlag:\n{trade_text}\n\n"
+        f"Marktdaten:\n{data_text}{risk_block}\n\n"
+        f"=== DEBATTEN-ARGUMENTE (3 Perspektiven × 2 Runden) ===\n{synthese_args}"
+    )
+    if feedback_context:
+        synth_user += f"\n\n{feedback_context}"
+
+    schema_defaults = defaults_for_schema(RISK_SCHEMA)
+    try:
+        risk = _call_agent(
+            llm,
+            SYSTEM_RISK_SYNTHESIS,
+            synth_user,
+            response_format=RISK_SCHEMA,
+            structured=True,
+        )
+        # Defensiv: sicherstellen, dass ALLE Schema-Keys vorhanden sind
+        # (setdefault überschreibt vorhandene Werte nicht).
+        for key, default in schema_defaults.items():
+            risk.setdefault(key, default)
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning(
+            "Risk-Debatte: Synthese fehlgeschlagen (%s) — Fallback-Defaults.", exc
+        )
+        risk = dict(schema_defaults)
 
     # Rechnerische Werte ins Rückgabedict übernehmen (einmal berechnet, nicht doppelt)
     risk["volatilität_annualisiert_pct"] = vol_pct
@@ -1962,7 +2183,47 @@ def risk_manager(
         risk.get("positionsgröße_empfohlen")
     )
 
+    # Debatten-Argumente für den Report (optionale Anzeige, nie crashen)
+    risk["_risk_debate"] = {
+        "runde1": dict(runde1),
+        "runde2": dict(runde2),
+    }
+
     return risk
+
+
+def risk_manager(
+    trade: dict[str, Any],
+    data: dict[str, Any],
+    llm: LLMClient,
+    data_text: str | None = None,
+    feedback_context: str = "",
+) -> dict[str, Any]:
+    """Bewertet Risiko des Trades via 3-Perspektiven-Risiko-Debatte (Phase B).
+
+    Dünne Hülle um risk_debate: Statt eines Single-Pass-Calls debattieren
+    drei Perspektiven (aggressiv/neutral/konservativ) über 2 Runden; eine
+    Synthese liefert das finale risk-dict (siehe risk_debate).
+
+    Signatur und Rückgabetyp sind identisch zur bisherigen Implementierung —
+    pipeline.py, report.py, trade_revision, portfolio_manager und die
+    Kalibrierung laufen unverändert weiter.
+
+    Zusätzlich wird eine rechnerische Positionsgröße via Volatility-Targeting
+    ergänzt (positionsgröße_rechnerisch_pct, volatilität_annualisiert_pct).
+
+    Args:
+        trade: Trade-Vorschlag vom Trader/Ensemble.
+        data: Daten-dict aus collect_ticker_data.
+        llm: LLMClient.
+        data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
+            _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
+        feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
+            Feedback). Wird am Ende der User-Prompts angehängt.
+    """
+    return risk_debate(
+        trade, data, llm, data_text=data_text, feedback_context=feedback_context
+    )
 
 
 def portfolio_manager(

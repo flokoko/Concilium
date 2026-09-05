@@ -982,6 +982,31 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             )
         lines.append(f"**Auflagen:** {risk.get('auflagen', 'N/A')}")
         lines.append(f"**Empfehlung:** {risk.get('empfehlung', 'N/A')}")
+
+        # Risiko-Debatte (Phase B): kompakte Kernargumente der drei Perspektiven
+        # (nur wenn Daten vorhanden — altes risk-dict ohne _risk_debate bleibt unverändert)
+        risk_debate_args = risk.get("_risk_debate")
+        if isinstance(risk_debate_args, dict):
+            debatte_teile: list[str] = []
+            for label in ("Aggressiv", "Neutral", "Konservativ"):
+                # Finale Position (Runde 2) bevorzugen, Fallback auf Runde 1
+                arg = ""
+                for runde_key in ("runde2", "runde1"):
+                    runde = risk_debate_args.get(runde_key)
+                    if isinstance(runde, dict):
+                        arg = str(runde.get(label) or "").strip()
+                    if arg:
+                        break
+                if arg:
+                    debatte_teile.append(f"**{label}:** {arg[:200]}")
+            if debatte_teile:
+                lines.append(
+                    "**Risiko-Debatte:** Aggressiv vs Neutral vs Konservativ"
+                )
+                lines.append("")
+                for teil in debatte_teile:
+                    lines.append(teil)
+                lines.append("")
         lines.append("")
 
         # Portfolio-Fit (nur wenn ein dict vorhanden ist)
