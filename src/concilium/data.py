@@ -928,6 +928,266 @@ def _fetch_reddit(ticker: str, limit: int = 5) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Phase A — Neue Datenquellen: Insider, Polymarket, Global-Makro-News
+# ---------------------------------------------------------------------------
+
+# Polymarket Gamma-API (öffentlich, kein API-Key nötig).
+# 1. public-search: ticker-relevante Events (bevorzugt).
+# 2. markets?search=: Fallback (globale Suche, weniger ticker-spezifisch).
+_POLYMARKET_PUBLIC_SEARCH_URL = (
+    "https://gamma-api.polymarket.com/public-search?q={query}&limit_per_type={limit}"
+)
+_POLYMARKET_MARKETS_URL = "https://gamma-api.polymarket.com/markets"
+
+
+def _polymarket_get_json(url: str) -> Any | None:
+    """GET auf die Polymarket-API mit JSON-Parsing. None bei Fehler (crasht nie)."""
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:  # noqa: BLE001 — niemals crashen
+        logger.warning("Polymarket-Anfrage fehlgeschlagen (%s): %s", url, exc)
+        return None
+
+
+def _polymarket_market_item(
+    market: Any, default_category: Any = None
+) -> dict[str, Any] | None:
+    """Extrahiert {title, probability, category} aus einem Polymarket-Markt-dict.
+
+    Robust gegen variantenreiche Strukturen: Titel über ``question`` oder
+    ``title``, Wahrscheinlichkeit über ``outcomePrices`` (JSON-String oder
+    Liste, erstes Outcome = Ja-Anteil). None bei unbrauchbarem Eintrag.
+    """
+    if not isinstance(market, dict):
+        return None
+    title = market.get("question") or market.get("title")
+    if not title or not str(title).strip():
+        return None
+
+    # outcomePrices: JSON-String "[\"0.65\", \"0.35\"]" oder Liste
+    probability: float | None = None
+    raw_prices = market.get("outcomePrices")
+    if isinstance(raw_prices, str):
+        try:
+            raw_prices = json.loads(raw_prices)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            raw_prices = None
+    if isinstance(raw_prices, list) and raw_prices:
+        price = _safe_float(raw_prices[0])
+        if price is not None and 0.0 <= price <= 1.0:
+            probability = price
+
+    category = market.get("category") or market.get("groupItemTitle") or default_category
+    return {
+        "title": str(title).strip(),
+        "probability": probability,
+        "category": str(category).strip() if category else None,
+    }
+
+
+def _fetch_polymarket(ticker: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Holt ticker-relevante Prediction-Markets von Polymarket (best effort).
+
+    Kaskade öffentlicher keyless-Endpoints:
+      1. ``public-search?q={ticker}`` — ticker-relevante Events (bevorzugt)
+      2. ``markets?search={ticker}`` — globale Markt-Suche (Fallback)
+
+    In gesperrten Umgebungen (403/blocked) → leere Liste (erwartetes
+    Verhalten, Fallback-Kaskade greift).
+
+    Args:
+        ticker: Ticker-Symbol oder Suchbegriff (z. B. "NVDA").
+        limit: Maximale Anzahl Märkte.
+
+    Returns:
+        Liste von dicts ``{title, probability, category}`` (probability als
+        float 0-1 oder None). Bei Fehler/leer → leere Liste. Crasht NIE.
+    """
+
+    def _collect(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return items[:limit]
+
+    # --- 1. public-search: Events mit verschachtelten Märkten ---
+    url = _POLYMARKET_PUBLIC_SEARCH_URL.format(query=ticker, limit=limit)
+    data = _polymarket_get_json(url)
+    if isinstance(data, dict):
+        events = data.get("events")
+        if isinstance(events, list) and events:
+            items: list[dict[str, Any]] = []
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                ev_category = ev.get("category") or ev.get("tag")
+                markets = ev.get("markets")
+                if not isinstance(markets, list):
+                    continue
+                for m in markets:
+                    item = _polymarket_market_item(m, default_category=ev_category)
+                    if item is not None:
+                        items.append(item)
+                    if len(items) >= limit:
+                        break
+                if len(items) >= limit:
+                    break
+            if items:
+                logger.info("Polymarket: %d Märkte für '%s' erhalten.", len(items), ticker)
+                return _collect(items)
+
+    # --- 2. Fallback: globale Markt-Suche ---
+    url = f"{_POLYMARKET_MARKETS_URL}?search={ticker}&limit={limit}"
+    data = _polymarket_get_json(url)
+    if data is None:
+        return []
+    # API kann Liste oder {"data": [...]} liefern
+    markets = data if isinstance(data, list) else data.get("data", [])
+    if not isinstance(markets, list):
+        markets = []
+
+    items = []
+    for m in markets:
+        item = _polymarket_market_item(m)
+        if item is not None:
+            items.append(item)
+        if len(items) >= limit:
+            break
+
+    if not items:
+        logger.info("Polymarket lieferte keine Märkte für '%s'.", ticker)
+    else:
+        logger.info("Polymarket: %d Märkte für '%s' erhalten.", len(items), ticker)
+    return items
+
+
+def _fetch_insider_transactions(ticker: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Holt Insider-Transaktionen via yfinance (best effort, crasht NIE).
+
+    Nutzt ``yf.Ticker(ticker).insider_transactions`` (DataFrame). Die Spalten
+    variieren nach yfinance-Version — fehlende Spalten → None (robuster
+    Zugriff über ``row.get()``). Neueinträge zuerst.
+
+    Args:
+        ticker: Ticker-Symbol (z. B. "AAPL").
+        limit: Maximale Anzahl Transaktionen.
+
+    Returns:
+        Liste von dicts ``{date, insider, transaction, shares, price, value}``
+        (Zahlen als float oder None). Bei Fehler/leer → leere Liste.
+    """
+    try:
+        df = yf.Ticker(ticker).insider_transactions
+    except Exception as exc:  # noqa: BLE001 — niemals crashen
+        logger.warning(
+            "Insider-Transaktionen fehlgeschlagen für '%s': %s", ticker, exc
+        )
+        return []
+
+    try:
+        if df is None or getattr(df, "empty", True):
+            logger.info("Keine Insider-Transaktionen für '%s'.", ticker)
+            return []
+        rows: list[dict[str, Any]] = []
+        for _, row in df.iterrows():
+            # Robuster Spaltenzugriff: fehlende/unbekannte Spalten → None.
+            # Spalten variieren nach yfinance-Version: ältere liefern
+            # "Insider Name", neuere nur "Insider"; die Transaktionsart
+            # steht dann im Freitext-Feld "Text" (z. B. "Sale at price
+            # 310.95 per share."). Best-effort beides abdecken.
+            get = row.get if hasattr(row, "get") else (lambda k, default=None: default)
+            insider_val = get("Insider Name") or get("Insider")
+            insider = str(insider_val).strip() if insider_val is not None else None
+            transaction_val = get("Transaction")
+            transaction = (
+                str(transaction_val).strip() if transaction_val is not None else None
+            )
+            if not transaction:
+                # Fallback: Transaktionsart aus "Text" (erstes Wort, z. B.
+                # "Sale at price …" → "Sale"); sonst voller Text gekürzt.
+                text_val = get("Text")
+                if text_val is not None and str(text_val).strip():
+                    first_word = str(text_val).strip().split(" ")[0].strip(".")
+                    transaction = first_word or str(text_val).strip()[:40]
+            entry = {
+                "date": str(get("Start Date")) if get("Start Date") is not None else None,
+                "insider": insider,
+                "transaction": transaction,
+                "shares": _safe_float(get("Shares")),
+                "price": _safe_float(get("Price")),
+                "value": _safe_float(get("Value")),
+            }
+            # Eintrag komplett leer (kein Insider + keine Transaktion) → skip
+            if not entry["insider"] and not entry["transaction"]:
+                continue
+            rows.append(entry)
+            if len(rows) >= limit:
+                break
+        logger.info("Insider-Transaktionen: %d Einträge für '%s' erhalten.", len(rows), ticker)
+        return rows
+    except Exception as exc:  # noqa: BLE001 — auch Parse-Fehler crashen nie
+        logger.warning(
+            "Insider-Transaktionen Parse-Fehler für '%s': %s", ticker, exc
+        )
+        return []
+
+
+# Feste Makro-Queries für globale Wirtschaftsnachrichten (analog
+# TradingAgents' global_news_queries)
+_GLOBAL_MACRO_QUERIES = [
+    "Federal Reserve interest rates inflation",
+    "S&P 500 earnings GDP economic outlook",
+    "geopolitical risk trade war sanctions",
+    "ECB Bank of England BOJ central bank policy",
+    "oil commodities supply chain energy",
+]
+
+
+def _fetch_global_macro_news(limit: int = 10) -> list[dict[str, Any]]:
+    """Holt globale Makro-Headlines via Google News RSS (best effort).
+
+    Führt die festen Makro-Queries aus, dedupliziert per Titel und begrenzt
+    auf ``limit``. Wiederverwendet _fetch_google_news (Query als "ticker").
+    Crasht NIE.
+
+    Args:
+        limit: Maximale Anzahl Headlines.
+
+    Returns:
+        Liste von dicts ``{title, published, source: "global_macro"}``.
+        Bei Fehler/leer → leere Liste.
+    """
+    seen_titles: set[str] = set()
+    items: list[dict[str, Any]] = []
+    # Pro Query ein kleineres Limit, damit eine Query nicht alles dominiert
+    per_query_limit = max(limit, 5)
+
+    for query in _GLOBAL_MACRO_QUERIES:
+        try:
+            query_items = _fetch_google_news(query, limit=per_query_limit)
+        except Exception as exc:  # noqa: BLE001 — defensive, nie crashen
+            logger.warning("Global-Macro-News Query '%s' fehlgeschlagen: %s", query, exc)
+            continue
+        for item in query_items:
+            title = item.get("title")
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+            items.append({
+                "title": title,
+                "published": item.get("published"),
+                "source": "global_macro",
+            })
+        if len(items) >= limit:
+            break
+
+    if not items:
+        logger.info("Global-Macro-News: keine Headlines erhalten.")
+    else:
+        logger.info("Global-Macro-News: %d Headlines erhalten.", len(items))
+    return items[:limit]
+
+
+# ---------------------------------------------------------------------------
 # Technische Indikatoren
 # ---------------------------------------------------------------------------
 
@@ -1723,6 +1983,27 @@ def collect_ticker_data(
             headlines.append(item["title"])
         active_sources.append("reddit")
 
+    # 5. Global-Makro-News (ergänzend — nur als separates Feld, NICHT in die
+    #    Ticker-Sentiment-Zählung einfließend: Makro-Headlines sind nicht
+    #    ticker-spezifisch und würden das Sentiment verzerren)
+    try:
+        global_macro_news = _fetch_global_macro_news()
+    except Exception as exc:  # noqa: BLE001 — defensive, nie crashen
+        logger.warning("Global-Macro-News-Fetch fehlerhaft: %s", exc)
+        global_macro_news = []
+
+    # --- Insider-Transaktionen + Prediction Markets (Phase A, best effort) ---
+    try:
+        insider = _fetch_insider_transactions(ticker)
+    except Exception as exc:  # noqa: BLE001 — defensive, nie crashen
+        logger.warning("Insider-Fetch fehlerhaft für '%s': %s", ticker, exc)
+        insider = []
+    try:
+        prediction_markets = _fetch_polymarket(ticker)
+    except Exception as exc:  # noqa: BLE001 — defensive, nie crashen
+        logger.warning("Polymarket-Fetch fehlerhaft für '%s': %s", ticker, exc)
+        prediction_markets = []
+
     # news_source: Fallback-Kaskade dokumentieren
     news_source = ", ".join(active_sources) if active_sources else "none"
 
@@ -1797,6 +2078,12 @@ def collect_ticker_data(
         "macro": macro,
         # Feature 3: Peer-Vergleich
         "peers": peers_data,
+        # Phase A: Insider-Transaktionen (Liste, leer wenn keine Daten)
+        "insider_transactions": insider,
+        # Phase A: Prediction Markets (Polymarket, leer wenn keine Daten)
+        "prediction_markets": prediction_markets,
+        # Phase A: Global-Makro-News (Liste, leer wenn keine Daten)
+        "global_macro_news": global_macro_news,
         # Datenqualitäts-Warnungen (immer eine Liste, auch leer)
         "data_warnings": data_warnings,
         # Gepinntes Analysedatum (None = bisheriges Verhalten, 'heute')

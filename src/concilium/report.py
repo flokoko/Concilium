@@ -712,6 +712,54 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             )
         lines.append("")
 
+    # === Insider-Transaktionen (Phase A — nur wenn Daten vorhanden) ===
+    insider_tx = data.get("insider_transactions", [])
+    if insider_tx:
+        lines.append("## Insider-Transaktionen")
+        lines.append("")
+        lines.append("| Datum | Insider | Art | Aktien | Kurs | Wert |")
+        lines.append("|---|---|---|---|---|---|")
+        for tx in insider_tx[:10]:
+            date_str = str(tx.get("date"))[:10] if tx.get("date") else "N/A"
+            lines.append(
+                f"| {date_str} | {tx.get('insider') or 'N/A'} | "
+                f"{tx.get('transaction') or 'N/A'} | {_fmt(tx.get('shares'))} | "
+                f"{_fmt(tx.get('price'))} | {_fmt(tx.get('value'))} |"
+            )
+        lines.append("")
+        lines.append(
+            "> Hinweis: Häufige Käufe (Purchase) von Insidern gelten meist als "
+            "positives Signal, Verkäufe (Sale) sind oft unbestimmt "
+            "(diversifizierung, steuerliche Gründe)."
+        )
+        lines.append("")
+
+    # === Prediction Markets (Phase A — nur wenn Daten vorhanden) ===
+    pred_markets = data.get("prediction_markets", [])
+    if pred_markets:
+        lines.append("## Prediction Markets")
+        lines.append("")
+        lines.append("| Markt | Wahrscheinlichkeit | Kategorie |")
+        lines.append("|---|---|---|")
+        for m in pred_markets[:5]:
+            m_title = m.get("title") or "N/A"
+            prob = m.get("probability")
+            prob_str = f"{prob * 100:.0f} %" if prob is not None else "N/A"
+            cat_str = m.get("category") or "N/A"
+            lines.append(f"| {m_title} | {prob_str} | {cat_str} |")
+        lines.append("")
+
+    # === Global-Makro-News (Phase A — nur wenn Daten vorhanden) ===
+    global_macro = data.get("global_macro_news", [])
+    if global_macro:
+        lines.append("## Global-Makro-News")
+        lines.append("")
+        for item in global_macro[:10]:
+            title = item.get("title") if isinstance(item, dict) else None
+            if title:
+                lines.append(f"- {title}")
+        lines.append("")
+
     # === Backtest (falls vorhanden) ===
     if result.get("backtest"):
         bt = result["backtest"]

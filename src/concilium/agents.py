@@ -347,15 +347,17 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
         role: Rollenspezifische Filterung der Daten-Sektionen.
             - ``"alle"`` (Default): alle Sektionen (rückwärtskompatibel).
             - ``"fundamental"``: Aktien-Identität, Datenqualitäts-Warnungen,
-              FUNDAMENTALS, Analysten-Erwartungen, Makro/Zinsen, Peer-Vergleich.
+              FUNDAMENTALS, Analysten-Erwartungen, Insider-Transaktionen,
+              Makro/Zinsen, Peer-Vergleich.
               Keine TECHNIK- oder SENTIMENT-Sektion.
             - ``"technik"``: Aktien-Identität, TECHNIK-Sektion, aktueller Kurs,
               Makro-Zinstrend (kurz). Keine FUNDAMENTALS- oder SENTIMENT-Sektion.
             - ``"sentiment"``: Aktien-Identität, SENTIMENT-Sektion, Headlines.
               Keine FUNDAMENTALS- oder TECHNIK-Sektion.
             - ``"macro_news"``: Aktien-Identität, MAKRO-Sektion (vollständig),
-              SENTIMENT-Sektion und Headlines. Keine FUNDAMENTALS- oder
-              TECHNIK-Sektion, kein Währungsrisiko-Block.
+              Global-Makro-News, Prediction Markets, SENTIMENT-Sektion und
+              Headlines. Keine FUNDAMENTALS- oder TECHNIK-Sektion, kein
+              Währungsrisiko-Block.
 
     Der Prolog (Aktien-Identität + INSTRUMENT-KONTEXT) ist rollenunabhängig
     immer enthalten. Im TECHNIK-Block sind die Werte als verbindlicher
@@ -570,6 +572,56 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
                 )
             if macro:
                 lines.append(f"  S&P 500 KGV (Benchmark): {_fmt_num(macro.get('sp500_pe'))}")
+
+    # Insider-Transaktionen — für fundamental und alle (Phase A)
+    insider_tx = data.get("insider_transactions", [])
+    if role in ("alle", "fundamental") and insider_tx:
+        lines.append("")
+        lines.append("=== INSIDER-TRANSAKTIONEN ===")
+        lines.append("  (Neueste Transaktionen — Käufe/Verkäufe von Insidern, best-effort)")
+        for tx in insider_tx[:8]:
+            parts: list[str] = []
+            if tx.get("date"):
+                parts.append(str(tx["date"])[:10])
+            if tx.get("insider"):
+                parts.append(str(tx["insider"]))
+            if tx.get("transaction"):
+                parts.append(str(tx["transaction"]))
+            if tx.get("shares") is not None:
+                parts.append(f"{_fmt_num(tx['shares'], ' ')} Aktien")
+            if tx.get("price") is not None:
+                parts.append(f"Kurs {_fmt_num(tx['price'])}")
+            if tx.get("value") is not None:
+                parts.append(f"Wert {_fmt_num(tx['value'], ' ')}")
+            if parts:
+                lines.append(f"  - {' | '.join(parts)}")
+
+    # Global-Makro-News — für macro_news und alle (Phase A)
+    global_macro = data.get("global_macro_news", [])
+    if role in ("alle", "macro_news") and global_macro:
+        lines.append("")
+        lines.append("=== GLOBAL-MAKRO-NEWS ===")
+        lines.append("  (Globale Konjunktur-/Zins-/Geopolitik-Headlines, nicht ticker-spezifisch)")
+        for item in global_macro[:10]:
+            title = item.get("title") if isinstance(item, dict) else None
+            if title:
+                lines.append(f"    - {title}")
+
+    # Prediction Markets — für macro_news und alle (Phase A)
+    pred_markets = data.get("prediction_markets", [])
+    if role in ("alle", "macro_news") and pred_markets:
+        lines.append("")
+        lines.append("=== PREDICTION MARKETS ===")
+        lines.append("  (Polymarket-Wahrscheinlichkeiten, best-effort — falls Daten verfügbar)")
+        for m in pred_markets[:5]:
+            m_title = m.get("title")
+            if not m_title:
+                continue
+            prob = m.get("probability")
+            prob_str = f"{prob * 100:.0f} %" if prob is not None else "N/A"
+            m_category = m.get("category")
+            cat_str = f" [{m_category}]" if m_category else ""
+            lines.append(f"    - {m_title}{cat_str}: {prob_str}")
 
     # SENTIMENT — für sentiment, macro_news und alle
     if role in ("alle", "sentiment", "macro_news"):

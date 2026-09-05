@@ -273,13 +273,23 @@ class TestCollectTickerDataCache:
                 "sp500_source": "none",
             }):
                 with patch("concilium.data._fetch_google_news", return_value=[]):
-                    # Erster Aufruf → yfinance wird geladen
-                    data1 = collect_ticker_data("TEST")
-                    assert call_count[0] == 1
+                    # Phase-A-Fetches mocken: Insider nutzt eigenen yf.Ticker-Aufruf
+                    # (soll hier nicht in die yfinance-Zählung eingehen — der
+                    # Test prüft die Cache-Semantik für history/info).
+                    with patch(
+                        "concilium.data._fetch_insider_transactions", return_value=[]
+                    ), patch(
+                        "concilium.data._fetch_polymarket", return_value=[]
+                    ), patch(
+                        "concilium.data._fetch_global_macro_news", return_value=[]
+                    ):
+                        # Erster Aufruf → yfinance wird geladen
+                        data1 = collect_ticker_data("TEST")
+                        assert call_count[0] == 1
 
-                    # Zweiter Aufruf → Cache-Treffer, yfinance NICHT erneut aufgerufen
-                    data2 = collect_ticker_data("TEST")
-                    assert call_count[0] == 1, "yfinance sollte beim 2. Aufruf nicht erneut aufgerufen werden"
+                        # Zweiter Aufruf → Cache-Treffer, yfinance NICHT erneut aufgerufen
+                        data2 = collect_ticker_data("TEST")
+                        assert call_count[0] == 1, "yfinance sollte beim 2. Aufruf nicht erneut aufgerufen werden"
 
         # Beide liefern dieselben Daten
         assert data1["ticker"] == data2["ticker"]
