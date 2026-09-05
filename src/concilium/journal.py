@@ -14,6 +14,8 @@ import re
 from datetime import datetime
 from typing import Any
 
+from . import config
+
 # Platform-Guard: fcntl ist Linux/Unix-only; auf anderen Plattformen None.
 try:
     import fcntl
@@ -150,6 +152,95 @@ def _rewrite_journal_with_header(journal_file: str, existing_fields: list[str]) 
         logger.warning("Journal-Header-Erweiterung fehlgeschlagen: %s", exc)
 
 
+def _resolve_sort_key(row: dict[str, str]) -> str:
+    """Sortier-Schlüssel für resolved-Zeilen (älteste zuerst prunen).
+
+    Primär ``resolved_at`` (ISO-Format "%Y-%m-%d %H:%M:%S", lexikografisch
+    sortierbar — analog feedback.py::_write_resolution). Leer oder
+    unparseable → Fallback auf ``timestamp`` (dasselbe Format). Beide leer →
+    leere String (sortiert als älteste Zeile, wird zuerst geprunt).
+    """
+    resolved_at = str(row.get("resolved_at") or "").strip()
+    ts = str(row.get("timestamp") or "").strip()
+    return resolved_at or ts
+
+
+def _prune_resolved(journal_file: str, max_resolved: int) -> None:
+    """Prunt die ältesten resolved-Einträge bis höchstens max_resolved übrig sind.
+
+    Journal-Hygiene analog TradingAgents' TradingMemoryLog: Optionaler Cap
+    auf aufgelöste (resolved) Einträge — die ältesten resolved-Zeilen (nach
+    ``resolved_at``, Fallback ``timestamp``) werden entfernt, bis der Cap
+    eingehalten wird. Pending- und Legacy-Zeilen (reflection_status "" oder
+    "pending") werden NIE geprunt.
+
+    Atomar + lock-sicher (tmpfile + os.replace, fcntl-Lock auf der
+    Zieldatei — analog feedback.py::_write_resolution). Crasht nie: Bei
+    Fehlern wird nur eine Warnung geloggt, das Journal bleibt unverändert.
+    """
+    if max_resolved <= 0:
+        return  # Rotation deaktiviert
+    tmp_path = ""
+    try:
+        # 1. Zeilen lesen + resolved-Zeilen mit Datei-Position sammeln
+        with open(journal_file, encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            fieldnames = list(reader.fieldnames or JOURNAL_HEADER)
+            rows = list(reader)
+
+        resolved_indexed = [
+            (idx, row)
+            for idx, row in enumerate(rows)
+            if str(row.get("reflection_status") or "").strip()
+            == REFLECTION_STATUS_RESOLVED
+        ]
+        excess = len(resolved_indexed) - max_resolved
+        if excess <= 0:
+            return  # Cap eingehalten — nichts zu prunen
+
+        # 2. Die excess ältesten resolved-Zeilen (nach resolved_at, Fallback
+        #    timestamp) über ihre Datei-Position markieren — positions-basiert
+        #    ist exakt auch bei Zeilen mit identischem (ticker, timestamp).
+        resolved_indexed.sort(key=lambda item: _resolve_sort_key(item[1]))
+        doomed_positions = {idx for idx, _ in resolved_indexed[:excess]}
+
+        # 3. Restliche Zeilen atomar zurückschreiben (tmpfile + os.replace)
+        tmp_path = f"{journal_file}.tmp"
+        with open(tmp_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            for idx, row in enumerate(rows):
+                if idx in doomed_positions:
+                    continue  # geprunt
+                for field in fieldnames:
+                    if field not in row:
+                        row[field] = ""
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+        try:
+            with open(journal_file, encoding="utf-8") as lock_fh:
+                _acquire_lock(lock_fh)
+                try:
+                    os.replace(tmp_path, journal_file)
+                finally:
+                    _release_lock(lock_fh)
+        except OSError:
+            # Lock auf der Zieldatei nicht möglich → replace ohne Lock (best effort)
+            os.replace(tmp_path, journal_file)
+        logger.info(
+            "Journal-Rotation: %d resolved Einträge geprunt (Cap %d): %s",
+            excess,
+            max_resolved,
+            journal_file,
+        )
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.warning("Journal-Rotation fehlgeschlagen: %s", exc)
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def append_decision(
     result: dict[str, Any],
     *,
@@ -243,6 +334,32 @@ def append_decision(
             except Exception as exc:  # noqa: BLE001 — best effort
                 logger.warning("Journal-Header-Check fehlgeschlagen: %s", exc)
 
+        # --- Idempotenz-Guard (Journal-Hygiene analog TradingAgents) -------
+        # Vor dem Append prüfen, ob bereits eine Zeile mit demselben
+        # (ticker, timestamp) existiert. Ein Checkpoint-Resume innerhalb
+        # derselben Sekunde erzeugt denselben Timestamp — ohne Guard würde
+        # doppelt geloggt. Best effort: Kann die Datei nicht gelesen werden,
+        # schreiben wir normal (lieber ein Duplikat als ein verlorener Eintrag).
+        try:
+            if os.path.isfile(journal_file):
+                with open(journal_file, encoding="utf-8") as fh_check:
+                    for existing_row in csv.DictReader(fh_check):
+                        existing_ticker = str(existing_row.get("ticker") or "").strip().lower()
+                        existing_ts = str(existing_row.get("timestamp") or "").strip()
+                        if (
+                            existing_ticker == str(ticker).strip().lower()
+                            and existing_ts == timestamp
+                        ):
+                            logger.warning(
+                                "Journal-Duplikat verhindert: Eintrag (ticker=%s, timestamp=%s) "
+                                "existiert bereits — kein Append",
+                                ticker,
+                                timestamp,
+                            )
+                            return
+        except Exception as exc:  # noqa: BLE001 — best effort, Guard nicht kritisch
+            logger.warning("Journal-Idempotenz-Check fehlgeschlagen — schreibe normal: %s", exc)
+
         with open(journal_file, "a", newline="", encoding="utf-8") as fh:
             _acquire_lock(fh)
             try:
@@ -254,5 +371,15 @@ def append_decision(
                 _release_lock(fh)
 
         logger.info("Entscheidung ins Journal geschrieben: %s", journal_file)
+
+        # --- Journal-Hygiene: Rotation aufgelöster Einträge ----------------
+        # Optionaler Cap (CONCILIUM_JOURNAL_MAX_RESOLVED, Default 0 = aus):
+        # Älteste resolved-Zeilen prunen, bis der Cap eingehalten ist.
+        # _prune_resolved crasht nie; auch die Config-Lesung (kann bei
+        # Tippfehlern laut ValueError werfen) ist best effort.
+        try:
+            _prune_resolved(journal_file, config.journal_max_resolved())
+        except Exception as exc:  # noqa: BLE001 — nie crashen
+            logger.warning("Journal-Rotation konnte nicht ausgeführt werden: %s", exc)
     except Exception as exc:  # noqa: BLE001 — nie crashen
         logger.warning("Journal-Eintrag konnte nicht geschrieben werden: %s", exc)

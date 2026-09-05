@@ -225,3 +225,25 @@ def risk_debate_rounds() -> int:
     if raw is None:
         return 2
     return cast(int, _coerce(raw, 2, key="CONCILIUM_RISK_DEBATE_ROUNDS"))
+
+
+# ---------------------------------------------------------------------------
+# Journal-Hygiene (Idempotenz-Guard + Rotation aufgelöster Einträge)
+# ---------------------------------------------------------------------------
+
+
+def journal_max_resolved() -> int:
+    """Cap auf aufgelöste (resolved) Journal-Einträge (0 = Rotation aus).
+
+    Priorität: CONCILIUM_JOURNAL_MAX_RESOLVED-Env > 0 (Default).
+    Default 0 = Rotation DEAKTIVIERT (Rückwärtskompatibilität: exakt
+    bisheriges Verhalten, das Journal wächst unbegrenzt).
+    Wert > 0 = nach jedem Append werden die ältesten resolved-Einträge
+    (nach resolved_at, Fallback timestamp) geprunt, bis höchstens N
+    resolved-Einträge übrig sind. Pending- und Legacy-Einträge werden NIE
+    geprunt (Journal-Hygiene analog TradingAgents' TradingMemoryLog).
+    """
+    raw = os.environ.get("CONCILIUM_JOURNAL_MAX_RESOLVED")
+    if raw is None:
+        return 0
+    return cast(int, _coerce(raw, 0, key="CONCILIUM_JOURNAL_MAX_RESOLVED"))
