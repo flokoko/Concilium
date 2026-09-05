@@ -92,14 +92,14 @@ class TestAnalystTeamUsesDataText:
 
         with patch("concilium.agents._build_data_text", return_value="computed text") as mock_build:
             analyst_team(_MOCK_DATA, llm, data_text=None)
-            # Wird 4x aufgerufen (einmal pro Analyst) mit jeweiliger role
-            assert mock_build.call_count == 4
+            # Wird 5x aufgerufen (einmal pro Analyst) mit jeweiliger role
+            assert mock_build.call_count == 5
             # Jeder Call bekommt data als erstes Argument
             for call in mock_build.call_args_list:
                 assert call.args[0] is _MOCK_DATA
-            # Die vier Rollen müssen verteilt sein
+            # Die fünf Rollen müssen verteilt sein
             roles = {call.kwargs["role"] for call in mock_build.call_args_list}
-            assert roles == {"fundamental", "technik", "sentiment", "macro_news"}
+            assert roles == {"fundamental", "technik", "sentiment", "macro_news", "social"}
 
 
 class TestAnalystTeamRoleSpecificFilter:
@@ -135,8 +135,8 @@ class TestAnalystTeamRoleSpecificFilter:
         # analyst_team mit data_text=None → rollenspezifische Filter greifen
         analyst_team(data, llm, data_text=None)
 
-        # Es sollten 4 Calls gemacht worden sein
-        assert len(llm.all_messages) == 4
+        # Es sollten 5 Calls gemacht worden sein (4 bestehende + social)
+        assert len(llm.all_messages) == 5
 
         # Sammle alle user-texte
         user_texts = [msgs[1]["content"] for msgs in llm.all_messages]

@@ -240,7 +240,7 @@ def _management_summary(
     # Analysten-Konsistenz-Warnungen
     analysts = result.get("analysts") or {}
     if isinstance(analysts, dict):
-        for key in ("fundamental", "technical", "sentiment", "macro_news"):
+        for key in ("fundamental", "technical", "sentiment", "macro_news", "social"):
             a = analysts.get(key)
             if isinstance(a, dict):
                 warn = a.get("konsistenz_warnung")
@@ -511,7 +511,10 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
     lines.append("")
 
     # --- Datenqualitäts-Hinweise (nur bei Warnungen) ---
-    data_warnings = data.get("data_warnings", [])
+    data_warnings = list(data.get("data_warnings", []))
+    # Stale-OHLCV (veraltete Kursdaten) als zusätzliche Datenqualitäts-Warnung
+    if data.get("stale_ohlcv") and data.get("stale_ohlcv_hinweis"):
+        data_warnings.append(str(data["stale_ohlcv_hinweis"]))
     if data_warnings:
         lines.append("## ⚠️ Datenqualitäts-Hinweise")
         lines.append("")
@@ -819,6 +822,7 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             ("technical", "Technik"),
             ("sentiment", "Sentiment"),
             ("macro_news", "Makro/News"),
+            ("social", "Social-Media"),
         ]:
             a = analysts.get(key, {})
             lines.append(
@@ -841,6 +845,21 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             headlines = macro_news.get("relevante_headlines")
             if headlines and str(headlines).strip():
                 lines.append(f"**Relevante Headlines:** {headlines}")
+            lines.append("")
+
+        # Social-Media-Einschätzung (nur wenn der 5. Analyst Daten geliefert hat)
+        social = analysts.get("social")
+        if isinstance(social, dict) and (
+            social.get("zusammenfassung") or social.get("_raw")
+        ):
+            lines.append("### Social-Media-Einschätzung")
+            lines.append("")
+            community = social.get("community_stimmung")
+            if community and str(community).strip():
+                lines.append(f"**Dominante Community-Stimmung:** {community}")
+            dominant = social.get("dominant")
+            if dominant and str(dominant).strip():
+                lines.append(f"**Dominante Stimmung (Posts):** {dominant}")
             lines.append("")
 
         # Debatte

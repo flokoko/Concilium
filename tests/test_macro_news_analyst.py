@@ -1,8 +1,8 @@
 """Tests für den Makro/News-Analysten (Phase 3, 4. Analysten-Rolle).
 
 Testet:
-- analyst_team liefert 4 Analysten-Keys (fundamental, technical, sentiment,
-  macro_news) + technicals.
+- analyst_team liefert 5 Analysten-Keys (fundamental, technical, sentiment,
+  macro_news, social) + technicals.
 - Der macro_news-Analyst bekommt die MAKRO-Sektion (vollständig) und die
   SENTIMENT-Sektion/Headlines, aber KEINE FUNDAMENTALS- oder TECHNIK-Sektion
   und keinen Währungsrisiko-Block.
@@ -120,6 +120,18 @@ class _MacroNewsLLM:
                 "makro_einschaetzung": "Zinsen stabil, VIX niedrig",
                 "relevante_headlines": "Headline 1 ist material",
             })
+        elif "Social-Media-Analyst" in system:
+            # VOR dem Sentiment-Check: Der Social-Prompt enthält das Wort
+            # "Sentiment" (Konträr-Indikator-Absatz) und würde sonst fälschlich
+            # in den Sentiment-Branch laufen.
+            text = json.dumps({
+                "rolle": "Social-Media-Analyst",
+                "stimmung": "bullish",
+                "score": 4,
+                "zusammenfassung": "Community euphorisch",
+                "dominant": "positiv",
+                "community_stimmung": "retail-bullish",
+            })
         elif "Sentiment" in system:
             text = json.dumps({
                 "rolle": "Sentiment-Analyst",
@@ -137,20 +149,21 @@ class _MacroNewsLLM:
 
 
 # ===========================================================================
-# (a) analyst_team liefert 4 Analysten-Keys
+# (a) analyst_team liefert 5 Analysten-Keys (inkl. 5. Rolle social)
 # ===========================================================================
 
 
 class TestAnalystTeamFourKeys:
-    """(a) analyst_team liefert 4 Analysten-Keys + technicals."""
+    """(a) analyst_team liefert 5 Analysten-Keys + technicals."""
 
     def test_four_analyst_keys_present(self):
-        """fundamental, technical, sentiment, macro_news, technicals vorhanden."""
+        """fundamental, technical, sentiment, macro_news, social, technicals."""
         result = analyst_team(_MACRO_NEWS_DATA, _MacroNewsLLM())
         assert "fundamental" in result
         assert "technical" in result
         assert "sentiment" in result
         assert "macro_news" in result
+        assert "social" in result
         assert "technicals" in result
 
     def test_macro_news_has_structured_keys(self):
@@ -171,10 +184,10 @@ class TestAnalystTeamFourKeys:
         assert "Makro ruhig" in summary
 
     def test_four_calls_made(self):
-        """4 LLM-Calls (einer pro Analyst)."""
+        """5 LLM-Calls (einer pro Analyst: 4 bestehende + social)."""
         llm = _MacroNewsLLM()
         analyst_team(_MACRO_NEWS_DATA, llm)
-        assert len(llm.all_messages) == 4
+        assert len(llm.all_messages) == 5
 
 
 # ===========================================================================
@@ -322,14 +335,14 @@ class TestMacroNewsFailureResilience:
         assert "N/A" in summary
 
     def test_all_fail_no_crash(self):
-        """Alle Analysten (inkl. macro_news) werfen → kein Crash, alle Keys vorhanden."""
+        """Alle Analysten (inkl. social) werfen → kein Crash, alle Keys vorhanden."""
 
         class _AlwaysFailLLM:
             def chat(self, messages, temperature=0.3, **kwargs):
                 raise RuntimeError("LLM komplett down")
 
         result = analyst_team(_MACRO_NEWS_DATA, _AlwaysFailLLM())
-        for key in ("fundamental", "technical", "sentiment", "macro_news"):
+        for key in ("fundamental", "technical", "sentiment", "macro_news", "social"):
             assert "fehler" in result[key]
             assert "LLM komplett down" in result[key]["fehler"]
         assert result["technicals"]["current_price"] == 50.0
@@ -441,7 +454,7 @@ class TestMacroNewsSchema:
         errors = validate_structured(invalid, ANALYST_MACRO_NEWS_SCHEMA)
         assert errors, "Ungültige Stimmung sollte gemeldet werden"
 
-    def test_max_parallel_is_4(self):
-        """Die 4 Analysten laufen parallel: _MAX_PARALLEL >= 4."""
+    def test_max_parallel_is_5(self):
+        """Die 5 Analysten laufen parallel: _MAX_PARALLEL >= 5."""
         from concilium.agents import _MAX_PARALLEL
-        assert _MAX_PARALLEL >= 4
+        assert _MAX_PARALLEL >= 5

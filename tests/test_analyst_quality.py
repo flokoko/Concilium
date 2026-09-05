@@ -96,9 +96,10 @@ class TestBuildDataTextRoleFundamental:
         text = _build_data_text(_FULL_DATA, role="fundamental")
         assert "=== TECHNIK ===" not in text
 
-    def test_no_sentiment_section(self):
+    def test_no_social_section(self):
+        """Der Social-Media-Block ist der social-Rolle (und 'alle') vorbehalten."""
         text = _build_data_text(_FULL_DATA, role="fundamental")
-        assert "=== SENTIMENT ===" not in text
+        assert "=== SOCIAL MEDIA" not in text
 
     def test_contains_datenqualitaet(self):
         text = _build_data_text(_FULL_DATA, role="fundamental")
@@ -129,9 +130,10 @@ class TestBuildDataTextRoleTechnik:
         text = _build_data_text(_FULL_DATA, role="technik")
         assert "=== FUNDAMENTALS ===" not in text
 
-    def test_no_sentiment_section(self):
+    def test_no_social_section(self):
+        """Der Social-Media-Block ist der social-Rolle (und 'alle') vorbehalten."""
         text = _build_data_text(_FULL_DATA, role="technik")
-        assert "=== SENTIMENT ===" not in text
+        assert "=== SOCIAL MEDIA" not in text
 
     def test_contains_current_price(self):
         text = _build_data_text(_FULL_DATA, role="technik")
@@ -184,6 +186,77 @@ class TestBuildDataTextRoleSentiment:
     def test_no_peer_vergleich(self):
         text = _build_data_text(_FULL_DATA, role="sentiment")
         assert "=== PEER-VERGLEICH ===" not in text
+
+    def test_no_social_section(self):
+        """Der Social-Media-Block ist der social-Rolle (und 'alle') vorbehalten."""
+        text = _build_data_text(_FULL_DATA, role="sentiment")
+        assert "=== SOCIAL MEDIA" not in text
+
+
+class TestBuildDataTextRoleSocial:
+    """role='social': SOCIAL-MEDIA-Block ja, FUNDAMENTALS/TECHNIK/MAKRO nein."""
+
+    def test_contains_social_block(self):
+        text = _build_data_text(_FULL_DATA, role="social")
+        assert "=== SOCIAL MEDIA (StockTwits/Reddit) ===" in text
+
+    def test_no_fundamentals_section(self):
+        text = _build_data_text(_FULL_DATA, role="social")
+        assert "=== FUNDAMENTALS ===" not in text
+
+    def test_no_technik_section(self):
+        text = _build_data_text(_FULL_DATA, role="social")
+        assert "=== TECHNIK ===" not in text
+
+    def test_no_makro(self):
+        text = _build_data_text(_FULL_DATA, role="social")
+        assert "=== MAKRO" not in text
+
+    def test_no_peer_vergleich(self):
+        text = _build_data_text(_FULL_DATA, role="social")
+        assert "=== PEER-VERGLEICH ===" not in text
+
+    def test_contains_stock_identity(self):
+        text = _build_data_text(_FULL_DATA, role="social")
+        assert "Aktie: TEST" in text
+
+    def test_social_posts_from_items(self):
+        """StockTwits-/Reddit-Items erscheinen im SOCIAL-MEDIA-Block."""
+        data = {
+            **_FULL_DATA,
+            "stocktwits_items": [
+                {"title": "$TEST to the moon!", "published": None, "source": "web"},
+                {"title": "TEST bagholder here", "published": None, "source": "web"},
+            ],
+            "reddit_items": [
+                {"title": "Why I like TEST", "published": None, "source": "reddit"},
+            ],
+        }
+        text = _build_data_text(data, role="social")
+        assert "Anzahl StockTwits-Posts: 2" in text
+        assert "Anzahl Reddit-Posts: 1" in text
+        assert "$TEST to the moon!" in text
+        assert "Why I like TEST" in text
+        # Headlines (Nachrichten) dürfen NICHT im social-Kontext landen
+        assert "Test headline 1" not in text
+
+    def test_no_social_data_explicit_hint(self):
+        """Ohne Social-Daten: expliziter Hinweis (kein Crash, keine Stimmung erfinden)."""
+        text = _build_data_text(_FULL_DATA, role="social")
+        assert "Keine StockTwits- oder Reddit-Posts verfügbar" in text
+
+    def test_alle_contains_social_block(self):
+        """role='alle' zeigt den Social-Block weiterhin (Rückwärtskompatibilität)."""
+        data = {
+            **_FULL_DATA,
+            "stocktwits_items": [
+                {"title": "$TEST hype", "published": None, "source": "web"},
+            ],
+            "reddit_items": [],
+        }
+        text = _build_data_text(data, role="alle")
+        assert "=== SOCIAL MEDIA (StockTwits/Reddit) ===" in text
+        assert "$TEST hype" in text
 
 
 class TestBuildDataTextDefault:
@@ -518,10 +591,11 @@ class TestAnalystTeamConsistencyWarning:
         assert result["sentiment"]["konsistenz_warnung"] != ""
 
     def test_all_four_analysts_present(self):
-        """Alle 4 Analysten-Keys sind vorhanden."""
+        """Alle 5 Analysten-Keys sind vorhanden (inkl. 5. Rolle social)."""
         result = analyst_team(_MINIMAL_DATA, _FakeLLM())
         assert "fundamental" in result
         assert "technical" in result
         assert "sentiment" in result
         assert "macro_news" in result
+        assert "social" in result
         assert "technicals" in result

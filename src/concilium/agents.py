@@ -21,6 +21,7 @@ from .schemas import (
     ANALYST_FUNDAMENTAL_SCHEMA,
     ANALYST_MACRO_NEWS_SCHEMA,
     ANALYST_SENTIMENT_SCHEMA,
+    ANALYST_SOCIAL_SCHEMA,
     ANALYST_TECHNICAL_SCHEMA,
     DEBATE_SCHEMA,
     FINAL_SCHEMA,
@@ -32,7 +33,7 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 # Maximale Anzahl paralleler Threads für unabhängige LLM-Calls
-_MAX_PARALLEL = 4
+_MAX_PARALLEL = 5
 
 # ---------------------------------------------------------------------------
 # Prompt-Templates (alle auf Deutsch)
@@ -83,6 +84,34 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
   "score": 1-5,
   "zusammenfassung": "2-4 Sätze Zusammenfassung auf Deutsch",
   "dominant": "positiv" | "negativ" | "neutral"
+}
+"""
+
+SYSTEM_SOCIAL = """\
+Du bist ein Social-Media-Analyst. Du bewertest die Stimmung der RETAIL-COMMUNITY \
+aus StockTwits- und Reddit-Posts zu einer Aktie (NICHT Nachrichten-Headlines).
+
+Dein Fokus:
+- Crowd-Stimmung: Wie ist die Gesamtstimmung der Retail-Anleger (bullish/bearish/\
+neutral)? Beachte die Anzahl und das Verhältnis der Posts.
+- Konträr-Indikator: Extreme Retail-Euphorie (jeder ist bullish, Hype-Wörter wie \
+"to the moon", "rocket") kann ein KONTRÄRES Warnsignal sein (euphorische Massen \
+sitzen bereits im Trade). Extreme Retail-Panik kann ein Boden-Signal sein. \
+Einseitige Euphorie → nüchtern-konträres Sentiment, nicht blind nachlaufen.
+- Meme-/Retail-Dynamik: Erwähne wenn Posts meme-getrieben sind, Hype-Phasen \
+erkennbar sind oder die Diskussion wenig Substanz enthält.
+
+Wenn keine oder sehr wenige Posts vorliegen, sage das explizit und liefere eine \
+vorsichtig-neutrale Einschätzung (keine Stimmung aus dünnen Daten ableiten).
+
+Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
+{
+  "rolle": "Social-Media-Analyst",
+  "stimmung": "bullish" | "neutral" | "bearish",
+  "score": 1-5,
+  "zusammenfassung": "2-4 Sätze Zusammenfassung auf Deutsch",
+  "dominant": "positiv" | "negativ" | "neutral",
+  "community_stimmung": "retail-bullish" | "retail-bearish" | "retail-neutral"
 }
 """
 
@@ -433,6 +462,9 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
               Global-Makro-News, Prediction Markets, SENTIMENT-Sektion und
               Headlines. Keine FUNDAMENTALS- oder TECHNIK-Sektion, kein
               Währungsrisiko-Block.
+            - ``"social"``: Aktien-Identität und SOCIAL-MEDIA-Sektion
+              (StockTwits-/Reddit-Posts). Keine Headlines, FUNDAMENTALS-,
+              TECHNIK- oder MAKRO-Sektion.
 
     Der Prolog (Aktien-Identität + INSTRUMENT-KONTEXT) ist rollenunabhängig
     immer enthalten. Im TECHNIK-Block sind die Werte als verbindlicher
@@ -722,6 +754,32 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
             for h in news[:10]:
                 lines.append(f"    - {h}")
 
+    # SOCIAL MEDIA (StockTwits/Reddit) — für social und alle
+    # Rückwärtskompatibel: Die Posts fließen weiterhin über news_with_dates in
+    # die SENTIMENT-Zählung ein; dieser Block reicht sie zusätzlich separat
+    # durch (ohne Nachrichten-Headlines), damit der Social-Media-Analyst nur
+    # die Retail-Community-Stimmung bewertet.
+    social_items = data.get("stocktwits_items", []) + data.get("reddit_items", [])
+    if role in ("alle", "social") and social_items:
+        lines.append("")
+        lines.append("=== SOCIAL MEDIA (StockTwits/Reddit) ===")
+        lines.append(f"  Anzahl StockTwits-Posts: {len(data.get('stocktwits_items', []))}")
+        lines.append(f"  Anzahl Reddit-Posts: {len(data.get('reddit_items', []))}")
+        lines.append("  Posts (neueste, gekürzt):")
+        for item in social_items[:10]:
+            title = item.get("title") if isinstance(item, dict) else None
+            if not title:
+                continue
+            source = item.get("source", "?") if isinstance(item, dict) else "?"
+            lines.append(f"    - [{source}] {str(title)[:300]}")
+    elif role == "social":
+        # Keine Social-Daten → explizit melden (best effort, kein Crash):
+        # Der Social-Media-Analyst soll transparent neutral bleiben, statt
+        # eine Stimmung aus fehlenden Daten zu erfinden.
+        lines.append("")
+        lines.append("=== SOCIAL MEDIA (StockTwits/Reddit) ===")
+        lines.append("  Keine StockTwits- oder Reddit-Posts verfügbar.")
+
     return "\n".join(lines)
 
 
@@ -781,6 +839,7 @@ def _call_agent(
     structured: bool = False,
     max_tokens: int = 4000,
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Führt einen einzelnen Agenten-Call aus und parst das Ergebnis.
 
@@ -807,6 +866,10 @@ def _call_agent(
     ``model``: Optionales Modell-Override (Deep-Think/Quick-Think-Split),
     wird an ``llm.chat(model=...)`` durchgereicht. None (Default) = primäres
     Modell des Clients (bisheriges Verhalten).
+
+    ``reasoning_effort``: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+    wird an ``llm.chat(reasoning_effort=...)`` durchgereicht. None/''
+    (Default) = kein reasoning_effort im Payload (bisheriges Verhalten).
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -821,6 +884,7 @@ def _call_agent(
             as_structured=True,
             max_tokens=max_tokens,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
         if isinstance(result_obj, StructuredChatResult):
             raw = result_obj.text
@@ -839,7 +903,11 @@ def _call_agent(
             parsed = parse_json(raw)
     else:
         raw = llm.chat(
-            messages, temperature=temperature, max_tokens=max_tokens, model=model
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
         parsed = parse_json(raw)
 
@@ -864,12 +932,14 @@ def analyst_team(
     llm: LLMClient,
     data_text: str | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
-    """Ruft 4 Analysten-Rollen auf (Fundamental, Technical, Sentiment, Macro/News).
+    """Ruft 5 Analysten-Rollen auf (Fundamental, Technical, Sentiment,
+    Macro/News, Social-Media).
 
-    Returns dict mit 'fundamental', 'technical', 'sentiment', 'macro_news' und
-    'technicals' Schlüsseln.
-    Die 4 Analysten-Calls werden PARALLEL über ThreadPoolExecutor ausgeführt.
+    Returns dict mit 'fundamental', 'technical', 'sentiment', 'macro_news',
+    'social' und 'technicals' Schlüsseln.
+    Die 5 Analysten-Calls werden PARALLEL über ThreadPoolExecutor ausgeführt.
     Bei einem Teilfehler wird eine Warnung geloggt und für den betroffenen key
     ein Fehlereintrag geliefert — die Pipeline crasht nicht.
 
@@ -888,6 +958,9 @@ def analyst_team(
             rollenspezifischer Text gebaut.
         model: Optionales Modell-Override (Quick-Think-Split), wird an alle
             Analysten-Calls durchgereicht. None = primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an alle Analysten-Calls durchgereicht. None/'' (Default) =
+            kein reasoning_effort im Payload (bisheriges Verhalten).
     """
     # Rollen-Mapping: analyst_team key → _build_data_text role
     role_map = {
@@ -895,6 +968,7 @@ def analyst_team(
         "technical": "technik",
         "sentiment": "sentiment",
         "macro_news": "macro_news",
+        "social": "social",
     }
 
     # (key, system_prompt, response_format) — strukturierte Schemas pro Rolle
@@ -903,6 +977,7 @@ def analyst_team(
         ("technical", SYSTEM_TECHNICAL, ANALYST_TECHNICAL_SCHEMA),
         ("sentiment", SYSTEM_SENTIMENT, ANALYST_SENTIMENT_SCHEMA),
         ("macro_news", SYSTEM_MACRO_NEWS, ANALYST_MACRO_NEWS_SCHEMA),
+        ("social", SYSTEM_SOCIAL, ANALYST_SOCIAL_SCHEMA),
     ]
 
     results: dict[str, Any] = {}
@@ -919,6 +994,7 @@ def analyst_team(
             response_format=resp_format,
             structured=True,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
 
     max_workers = min(len(analyst_specs), _MAX_PARALLEL)
@@ -933,7 +1009,7 @@ def analyst_team(
                 logger.warning("Analyst '%s' fehlgeschlagen: %s", key, exc)
                 results[key] = {"_raw": "", "fehler": str(exc)}
 
-    # Sicherstellen, dass alle 4 Keys vorhanden sind (defensiv)
+    # Sicherstellen, dass alle 5 Keys vorhanden sind (defensiv)
     for key, _, _ in analyst_specs:
         results.setdefault(key, {"_raw": "", "fehler": "nicht ausgeführt"})
 
@@ -1030,6 +1106,7 @@ def _analyst_summary_text(analysts: dict[str, Any]) -> str:
         ("technical", "Technik"),
         ("sentiment", "Sentiment"),
         ("macro_news", "Makro/News"),
+        ("social", "Social-Media"),
     ]:
         a = analysts.get(role_key, {})
         parts.append(
@@ -1045,6 +1122,7 @@ def debate(
     llm: LLMClient,
     rounds: int = 1,
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Führt Bull/Bear-Debatte durch (2 LLM-Calls pro Runde).
 
@@ -1058,6 +1136,9 @@ def debate(
             einzugehen.
         model: Optionales Modell-Override (Quick-Think-Split), wird an beide
             Bull/Bear-Calls durchgereicht. None = primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an beide Bull/Bear-Calls durchgereicht. None/'' (Default) =
+            kein reasoning_effort im Payload (bisheriges Verhalten).
 
     Returns dict mit 'bull', 'bear', 'bull_confidence', 'bear_confidence'
     und 'rounds' Schlüsseln. Die finalen bull/bear-Dicts stammen aus der
@@ -1091,6 +1172,7 @@ def debate(
             response_format=DEBATE_SCHEMA,
             structured=True,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
         bull_text = _get_debate_argument(bull)
 
@@ -1110,6 +1192,7 @@ def debate(
             response_format=DEBATE_SCHEMA,
             structured=True,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
         bear_text = _get_debate_argument(bear)
 
@@ -1267,6 +1350,7 @@ def trader(
     feedback_context: str = "",
     reflection_context: str = "",
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Erstellt Trade-Vorschlag aus Analysten + Debatte.
 
@@ -1286,6 +1370,9 @@ def trader(
             angehängt.
         model: Optionales Modell-Override (Quick-Think-Split). None =
             primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an den Trader-Call durchgereicht. None/'' (Default) = kein
+            reasoning_effort im Payload (bisheriges Verhalten).
     """
     summary = _analyst_summary_text(analysts)
     # debate_result bull/bear kann "argumente" (strukturierter Pfad) oder
@@ -1319,6 +1406,7 @@ def trader(
         response_format=TRADE_SCHEMA,
         structured=True,
         model=model,
+        reasoning_effort=reasoning_effort,
     )
     # 5-stufige Rating normalisieren: rohes Rating in 'rating', 3-stufige Aktion in 'aktion'
     raw_rating = str(result.get("aktion", "")).strip().upper()
@@ -1689,6 +1777,7 @@ def ensemble_trader(
     feedback_context: str = "",
     reflection_context: str = "",
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Führt den Trader mehrfach aus (Ensemble) und aggregiert per Mehrheitsentscheid.
 
@@ -1705,6 +1794,9 @@ def ensemble_trader(
             Reflexion). Wird an jeden trader()-Aufruf durchgereicht.
         model: Optionales Modell-Override (Quick-Think-Split), wird an jeden
             trader()-Run durchgereicht. None = primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an jeden trader()-Run durchgereicht. None/'' (Default) = kein
+            reasoning_effort im Payload (bisheriges Verhalten).
 
     Returns:
         dict mit dem gewählten Trade plus _ensemble-Metadaten:
@@ -1730,6 +1822,7 @@ def ensemble_trader(
             feedback_context=feedback_context,
             reflection_context=reflection_context,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
 
     max_workers = min(len(temps), _MAX_PARALLEL)
@@ -2014,6 +2107,7 @@ def _risk_perspective_call(
     system_prompt: str,
     user_text: str,
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> str:
     """Führt einen Perspektiven-Call der Risiko-Debatte aus (best-effort).
 
@@ -2031,6 +2125,7 @@ def _risk_perspective_call(
             response_format=DEBATE_SCHEMA,
             structured=True,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
         return _get_debate_argument(result)
     except Exception as exc:  # noqa: BLE001 — nie crashen
@@ -2042,6 +2137,7 @@ def _run_risk_perspectives_parallel(
     llm: LLMClient,
     jobs: list[tuple[str, str, str]],
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, str]:
     """Führt (Name, System-Prompt, User-Text)-Jobs parallel aus (best-effort).
 
@@ -2052,7 +2148,9 @@ def _run_risk_perspectives_parallel(
     results: dict[str, str] = {}
 
     def _run_one(name: str, prompt: str, text: str) -> tuple[str, str]:
-        return name, _risk_perspective_call(llm, prompt, text, model=model)
+        return name, _risk_perspective_call(
+            llm, prompt, text, model=model, reasoning_effort=reasoning_effort,
+        )
 
     max_workers = min(len(jobs), _MAX_PARALLEL)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -2081,6 +2179,7 @@ def risk_debate(
     feedback_context: str = "",
     rounds: int | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """3-Perspektiven-Risiko-Debatte (aggressiv/neutral/konservativ, 2 Runden).
 
@@ -2116,6 +2215,9 @@ def risk_debate(
         model: Optionales Modell-Override (Deep-Think-Split), wird an ALLE
             Calls durchgereicht (3 Perspektiven × Runden + Synthese). None =
             primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an ALLE Calls durchgereicht. None/'' (Default) = kein
+            reasoning_effort im Payload (bisheriges Verhalten).
 
     Returns:
         risk-dict mit denselben Feldern wie der bisherige Single-Pass-Call
@@ -2167,7 +2269,10 @@ def risk_debate(
 
     # --- Runde 1: alle drei Perspektiven parallel ---
     runde1 = _run_risk_perspectives_parallel(
-        llm, [(name, prompt, base_user) for name, prompt in perspektiven], model=model
+        llm,
+        [(name, prompt, base_user) for name, prompt in perspektiven],
+        model=model,
+        reasoning_effort=reasoning_effort,
     )
 
     # --- Runde 2 (nur wenn >= 2 Runden): Reaktion auf die anderen beiden ---
@@ -2190,7 +2295,9 @@ def risk_debate(
                 "Punkte, sondern vertiefe/verteidige sie."
             )
             jobs_runde2.append((name, prompt, user2))
-        runde2 = _run_risk_perspectives_parallel(llm, jobs_runde2, model=model)
+        runde2 = _run_risk_perspectives_parallel(
+            llm, jobs_runde2, model=model, reasoning_effort=reasoning_effort,
+        )
 
     # --- Synthese: finaler LLM-Call mit den Argumenten der gelaufenen Runden ---
     gelaufene_runden: list[tuple[int, dict[str, str]]] = [(1, runde1)]
@@ -2224,6 +2331,7 @@ def risk_debate(
             response_format=RISK_SCHEMA,
             structured=True,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
         # Defensiv: sicherstellen, dass ALLE Schema-Keys vorhanden sind
         # (setdefault überschreibt vorhandene Werte nicht).
@@ -2264,6 +2372,7 @@ def risk_manager(
     data_text: str | None = None,
     feedback_context: str = "",
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Bewertet Risiko des Trades via 3-Perspektiven-Risiko-Debatte (Phase B).
 
@@ -2289,6 +2398,9 @@ def risk_manager(
             Feedback). Wird am Ende der User-Prompts angehängt.
         model: Optionales Modell-Override (Deep-Think-Split), wird an
             risk_debate durchgereicht. None = primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an risk_debate durchgereicht. None/'' (Default) = kein
+            reasoning_effort im Payload (bisheriges Verhalten).
     """
     # Config hier lesen (pipeline.py bleibt unverändert) und explizit
     # durchreichen; risk_debate selbst hätte bei rounds=None denselben
@@ -2302,6 +2414,7 @@ def risk_manager(
         feedback_context=feedback_context,
         rounds=rounds,
         model=model,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -2314,6 +2427,7 @@ def portfolio_manager(
     reflection_context: str = "",
     portfolio_context: dict[str, Any] | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Trifft finale Entscheidung.
 
@@ -2334,6 +2448,9 @@ def portfolio_manager(
             wird er als „Gesamt-Exposure“-Block in den User-Prompt injiziert.
         model: Optionales Modell-Override (Deep-Think-Split). None =
             primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an den PM-Call durchgereicht. None/'' (Default) = kein
+            reasoning_effort im Payload (bisheriges Verhalten).
     """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     risk_text = json.dumps(risk, ensure_ascii=False, indent=2, default=str)
@@ -2361,6 +2478,7 @@ def portfolio_manager(
         response_format=FINAL_SCHEMA,
         structured=True,
         model=model,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -2373,6 +2491,7 @@ def trade_revision(
     reflection_context: str = "",
     current_price: float | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Trade-Revision (2nd Pass) — der Trader überarbeitet seinen Trade.
 
@@ -2394,6 +2513,9 @@ def trade_revision(
             Bei None wird der Fallback übersprungen (kein Crash).
         model: Optionales Modell-Override (Deep-Think-Split). None =
             primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an den Revision-Call durchgereicht. None/'' (Default) = kein
+            reasoning_effort im Payload (bisheriges Verhalten).
 
     Returns:
         dict mit dem revidierten Trade (gleiche Felder wie trader(),
@@ -2421,6 +2543,7 @@ def trade_revision(
         response_format=TRADE_SCHEMA,
         structured=True,
         model=model,
+        reasoning_effort=reasoning_effort,
     )
     # 5-stufige Rating normalisieren (wie bei trader())
     raw_rating = str(result.get("aktion", "")).strip().upper()

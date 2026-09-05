@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -30,6 +31,14 @@ logger = logging.getLogger(__name__)
 
 # Google News RSS — Fallback-Quelle für Headlines
 _GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search?q={query}&hl=de&gl=DE&ceid=DE:de"
+
+# FRED-API (Federal Reserve Economic Data) — primäre Quelle für 10y US Treasury
+# Yield (Serie DGS10), nur aktiv wenn FRED_API_KEY gesetzt ist (config.fred_api_key()).
+_FRED_10Y_URL = (
+    "https://api.stlouisfed.org/fred/series/observations"
+    "?series_id=DGS10&api_key={api_key}&file_type=json&sort_order=desc&limit=2"
+)
+
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -1447,12 +1456,71 @@ def _validate_fundamentals(fundamentals: dict[str, Any]) -> list[str]:
     return warnings
 
 
+def _fetch_fred_10y_yield() -> dict[str, Any] | None:
+    """Holt die 10y US Treasury Yield aus der FRED-API (Serie DGS10).
+
+    Nur aktiv, wenn FRED_API_KEY gesetzt ist (config.fred_api_key());
+    sonst None → _fetch_macro_data() nutzt den yfinance-^TNX-Fallback.
+
+    Returns:
+        dict mit us_10y_yield (neuester gültiger Wert), us_10y_yield_1m_ago
+        (vorheriger gültiger Wert) und us_10y_trend ("steigend"/"fallend"/
+        "flach") — oder None bei fehlendem Key/Fehler (best effort, nie
+        crashen). Einheit: Prozent (konsistent zu yfinance ^TNX).
+    """
+    api_key = config.fred_api_key().strip()
+    if not api_key:
+        return None
+
+    values: list[float] = []
+    try:
+        url = _FRED_10Y_URL.format(api_key=api_key)
+        req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+        for obs in payload.get("observations", []):
+            raw = obs.get("value")
+            # "." = kein Wert (z. B. Wochenenden/Feiertage) — überspringen
+            if raw is None or raw == ".":
+                continue
+            val = _safe_float(raw)
+            if val is not None:
+                values.append(val)
+    except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+        logger.warning("FRED 10y Yield konnte nicht abgerufen werden: %s", exc)
+        return None
+
+    if len(values) < 2:
+        logger.warning(
+            "FRED 10y Yield: weniger als 2 gültige Beobachtungen (%d) — überspringe FRED.",
+            len(values),
+        )
+        return None
+
+    # FRED liefert absteigend sortiert (sort_order=desc): Werte[0] = neuester.
+    # Einheit konsistent zu yfinance ^TNX: Prozent (z. B. 4.64).
+    current_yield = values[0]
+    old_yield = values[1]
+    diff = current_yield - old_yield
+    if abs(diff) < 0.05:
+        trend = "flach"
+    elif diff > 0:
+        trend = "steigend"
+    else:
+        trend = "fallend"
+    return {
+        "us_10y_yield": current_yield,
+        "us_10y_yield_1m_ago": old_yield,
+        "us_10y_trend": trend,
+    }
+
+
 def _fetch_macro_data() -> dict[str, Any]:
     """Holt Makro/Zins-Daten (10y US Treasury, S&P 500) — best effort, nie crashen.
 
     Returns:
         dict mit us_10y_yield, us_10y_yield_1m_ago, us_10y_trend,
-        sp500_pe, sp500_market_cap (alle None bei Fehler).
+        us_10y_source, sp500_pe, sp500_market_cap (Werte None bei Fehler).
     """
     result: dict[str, Any] = {
         "us_10y_yield": None,
@@ -1468,26 +1536,42 @@ def _fetch_macro_data() -> dict[str, Any]:
         "oel_name": "WTI",
     }
 
-    # --- 10y US Treasury Yield (^TNX) ---
+    # --- 10y US Treasury Yield: FRED primär (wenn FRED_API_KEY gesetzt),
+    # sonst yfinance ^TNX als Fallback (bisheriges Verhalten) ---
+    fred = None
     try:
-        tnx = yf.Ticker("^TNX")
-        tnx_hist = tnx.history(period="1mo")
-        if tnx_hist is not None and not tnx_hist.empty:
-            close_col = tnx_hist["Close"]
-            current_yield = _safe_float(_last_valid(close_col))
-            old_yield = _safe_float(close_col.iloc[0]) if len(close_col) >= 1 else None
-            result["us_10y_yield"] = current_yield
-            result["us_10y_yield_1m_ago"] = old_yield
-            if current_yield is not None and old_yield is not None:
-                diff = current_yield - old_yield
-                if abs(diff) < 0.05:
-                    result["us_10y_trend"] = "flach"
-                elif diff > 0:
-                    result["us_10y_trend"] = "steigend"
-                else:
-                    result["us_10y_trend"] = "fallend"
-    except Exception as exc:  # noqa: BLE001 — best effort
-        logger.warning("Makrodaten ^TNX konnten nicht abgerufen werden: %s", exc)
+        fred = _fetch_fred_10y_yield()
+    except Exception as exc:  # noqa: BLE001 — defensiv, nie crashen
+        logger.warning("FRED 10y Yield unerwarteter Fehler: %s", exc)
+        fred = None
+    if fred is not None and fred.get("us_10y_yield") is not None:
+        result["us_10y_yield"] = fred["us_10y_yield"]
+        result["us_10y_yield_1m_ago"] = fred["us_10y_yield_1m_ago"]
+        result["us_10y_trend"] = fred["us_10y_trend"]
+        result["us_10y_source"] = "fred"
+    else:
+        result["us_10y_source"] = "yfinance"
+        try:
+            tnx = yf.Ticker("^TNX")
+            tnx_hist = tnx.history(period="1mo")
+            if tnx_hist is not None and not tnx_hist.empty:
+                close_col = tnx_hist["Close"]
+                current_yield = _safe_float(_last_valid(close_col))
+                old_yield = _safe_float(close_col.iloc[0]) if len(close_col) >= 1 else None
+                result["us_10y_yield"] = current_yield
+                result["us_10y_yield_1m_ago"] = old_yield
+                if current_yield is not None and old_yield is not None:
+                    diff = current_yield - old_yield
+                    if abs(diff) < 0.05:
+                        result["us_10y_trend"] = "flach"
+                    elif diff > 0:
+                        result["us_10y_trend"] = "steigend"
+                    else:
+                        result["us_10y_trend"] = "fallend"
+        except Exception as exc:  # noqa: BLE001 — best effort
+            logger.warning("Makrodaten ^TNX konnten nicht abgerufen werden: %s", exc)
+    if result.get("us_10y_yield") is None:
+        result["us_10y_source"] = "none"
 
     # --- S&P 500 Benchmark (^GSPC mit SPY-Fallback) ---
     sp500 = _get_sp500_benchmark()
@@ -1909,6 +1993,31 @@ def collect_ticker_data(
         "avg_volume_30d": avg_volume_30d,
     }
 
+    # --- Stale-OHLCV-Erkennung ---
+    # Wenn der letzte verfügbare Close deutlich älter ist als heute (bzw. das
+    # gepinnte as_of), dürfen die Kursdaten nicht stillschweigend als aktuell
+    # gelten — Warnung ins result-dict. Bei as_of (gepinntes Datum) ist der
+    # letzte Close per Definition <= as_of, also wird gegen as_of verglichen.
+    # Best effort: crasht nie (bei Fehlern stale_ohlcv=False).
+    stale_ohlcv = False
+    stale_ohlcv_days: int | None = None
+    stale_ohlcv_hinweis: str | None = None
+    try:
+        # Referenzdatum: gepinntes as_of, sonst heute (UTC)
+        ref_day = pd.Timestamp(as_of).date() if as_of is not None else pd.Timestamp.now(tz="UTC").date()
+        last_close_day = hist.index.max().date()
+        days = (ref_day - last_close_day).days
+        if days > 7:
+            stale_ohlcv = True
+            stale_ohlcv_days = days
+            stale_ohlcv_hinweis = (
+                f"⚠️ Kursdaten veraltet: letzter Close vom {last_close_day.isoformat()}, "
+                f"vor {days} Tagen. Technische Indikatoren können veraltet sein."
+            )
+    except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+        logger.warning("Stale-OHLCV-Prüfung fehlgeschlagen: %s", exc)
+        stale_ohlcv = False
+
     # --- Feature 2: Makro/Zins-Daten ---
     macro = _fetch_macro_data()
 
@@ -2084,8 +2193,18 @@ def collect_ticker_data(
         "prediction_markets": prediction_markets,
         # Phase A: Global-Makro-News (Liste, leer wenn keine Daten)
         "global_macro_news": global_macro_news,
+        # Phase B: Social-Media-Items (StockTwits/Reddit) separat — zusätzlich
+        # zur bisherigen Vermischung in news_with_dates (Rückwärtskompatibilität).
+        # Leere Liste, wenn keine Daten (best effort, nie crashen).
+        "stocktwits_items": stocktwits_items,
+        "reddit_items": reddit_items,
         # Datenqualitäts-Warnungen (immer eine Liste, auch leer)
         "data_warnings": data_warnings,
+        # Stale-OHLCV-Erkennung: True + Tage + Hinweis, wenn der letzte
+        # verfügbare Close > 7 Kalendertage vor heute/as_of liegt
+        "stale_ohlcv": stale_ohlcv,
+        "stale_ohlcv_days": stale_ohlcv_days,
+        "stale_ohlcv_hinweis": stale_ohlcv_hinweis,
         # Gepinntes Analysedatum (None = bisheriges Verhalten, 'heute')
         "as_of": as_of,
         # Identifier-Metadaten (ISIN/WKN falls als Eingabe verwendet)

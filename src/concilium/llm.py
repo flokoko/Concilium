@@ -99,6 +99,7 @@ class LLMClient:
         model: str | None = None,
         response_format: dict[str, Any] | None = None,
         as_structured: bool = False,
+        reasoning_effort: str | None = None,
     ) -> str | StructuredChatResult:
         """Sendet Messages an /chat/completions und gibt den Text zurück.
 
@@ -112,6 +113,13 @@ class LLMClient:
             Override ersetzt NUR das ``model``-Feld im Payload — der
             429/5xx-Fallback greift unverändert (das Fallback-Modell bleibt
             das konfigurierte Fallback-Modell, unabhängig vom Override).
+
+        ``reasoning_effort``: Optionale Reasoning-Tiefe ('low'/'medium'/'high').
+            Wenn gesetzt (nicht None und nicht leer), landet der Wert als
+            Top-Level-Feld ``reasoning_effort`` im Payload (OpenAI-kompatibel,
+            z. B. ollama.com/v1). None/'' (Default) = kein Feld im Payload
+            (bisheriges Verhalten). Das Fallback-Modell übernimmt das Feld
+            automatisch (dict-Kopie des Payloads).
 
         Wenn ``response_format`` gesetzt ist, wird es in den Payload als
         ``"response_format"`` aufgenommen (OpenAI-kompatibel). Antwortet die
@@ -136,6 +144,8 @@ class LLMClient:
             payload["max_tokens"] = max_tokens
         if response_format is not None:
             payload["response_format"] = response_format
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
 
         self.last_usage = None
 

@@ -194,6 +194,21 @@ ANALYST_SENTIMENT_SCHEMA: dict[str, Any] = {
     },
 }
 
+ANALYST_SOCIAL_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "analyst_social",
+        "schema": {
+            **_ANALYST_BASE,
+            "properties": {
+                **_ANALYST_BASE["properties"],
+                "dominant": {"type": "string"},
+                "community_stimmung": {"type": "string"},
+            },
+        },
+    },
+}
+
 ANALYST_MACRO_NEWS_SCHEMA: dict[str, Any] = {
     "type": "json_schema",
     "json_schema": {

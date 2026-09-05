@@ -208,6 +208,38 @@ def llm_quick_think_model() -> str:
     return _env("LLM_QUICK_THINK_MODEL", "")
 
 
+# Gültige Werte für LLM_REASONING_EFFORT (OpenAI-kompatible Reasoning-Effort-Stufen).
+_REASONING_EFFORT_LEVELS = ("low", "medium", "high")
+
+
+def llm_reasoning_effort() -> str:
+    """Reasoning-Effort für alle LLM-Calls ('' = deaktiviert, bisheriges Verhalten).
+
+    Der Wert wird als Top-Level-Feld ``reasoning_effort`` im Request-Payload
+    an den OpenAI-kompatiblen Endpunkt gesendet (bei ollama.com/v1 steuert
+    er die Reasoning-Tiefe: 'low' liefert keinen Thinking-Trace,
+    'medium'/'high' schon).
+
+    Priorität: LLM_REASONING_EFFORT-Env > '' (leer = kein reasoning_effort
+    im Payload). Gültige Werte: 'low', 'medium', 'high' (Groß-/Kleinschreibung
+    wird normalisiert). Bei jedem anderen nicht-leeren Wert LAUTE ValueError
+    mit Env-Variablen-Namen (analog _coerce-Stil) statt stiller Fallback.
+    """
+    raw = os.environ.get("LLM_REASONING_EFFORT")
+    if raw is None:
+        return ""
+    value = raw.strip().lower()
+    if not value:
+        return ""
+    if value not in _REASONING_EFFORT_LEVELS:
+        raise ValueError(
+            f"Invalid value for LLM_REASONING_EFFORT: expected one of "
+            f"{', '.join(_REASONING_EFFORT_LEVELS)} (oder leer = deaktiviert), "
+            f"got {raw!r}"
+        )
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Risiko-Debatte
 # ---------------------------------------------------------------------------
@@ -247,3 +279,20 @@ def journal_max_resolved() -> int:
     if raw is None:
         return 0
     return cast(int, _coerce(raw, 0, key="CONCILIUM_JOURNAL_MAX_RESOLVED"))
+
+
+# ---------------------------------------------------------------------------
+# Makro-Datenquellen
+# ---------------------------------------------------------------------------
+
+
+def fred_api_key() -> str:
+    """API-Key für die FRED-API (Federal Reserve Economic Data).
+
+    Wenn gesetzt, holt data._fetch_fred_10y_yield() die 10y US Treasury
+    Yield primär aus der FRED-API (Serie DGS10); sonst dient yfinance
+    ^TNX als Fallback (bisheriges Verhalten).
+
+    Priorität: FRED_API_KEY-Env > '' (leer = FRED deaktiviert).
+    """
+    return os.environ.get("FRED_API_KEY", "")

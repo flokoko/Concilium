@@ -354,15 +354,15 @@ class TestAnalystTeamParallel:
         assert result["technicals"] == {"current_price": 123.45, "rsi14": 55.0}
 
     def test_analysts_run_in_parallel(self):
-        """Verifiziert, dass die 4 Analysten-Calls gleichzeitig starten.
+        """Verifiziert, dass die 5 Analysten-Calls gleichzeitig starten.
 
-        Nutzt eine threading.Barrier(4): jeder Analysten-Call betritt die
-        Barrier. Wenn alle 4 Calls gestartet sind (bevor einer returned),
+        Nutzt eine threading.Barrier(5): jeder Analysten-Call betritt die
+        Barrier. Wenn alle 5 Calls gestartet sind (bevor einer returned),
         wird die Barrier freigegeben. Dies ist die zuverlässigste Verifikation
         echter Parallelität — bei sequentieller Ausführung würde die Barrier
         timeouten.
         """
-        barrier = threading.Barrier(4, timeout=5.0)
+        barrier = threading.Barrier(5, timeout=5.0)
         call_threads: list[int] = []
         lock = threading.Lock()
 
@@ -371,7 +371,7 @@ class TestAnalystTeamParallel:
                 tid = threading.get_ident()
                 with lock:
                     call_threads.append(tid)
-                # Warten bis alle 4 Threads hier sind — nur bei echter
+                # Warten bis alle 5 Threads hier sind — nur bei echter
                 # Parallelität kommt die Barrier jemals frei
                 barrier.wait()
                 # Jeder Thread gibt eine andere Antwort
@@ -382,6 +382,8 @@ class TestAnalystTeamParallel:
                     text = json.dumps({"rolle": "Technik-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Ok"})
                 elif "Makro" in role:
                     text = json.dumps({"rolle": "Makro/News-Analyst", "stimmung": "neutral", "score": 3, "zusammenfassung": "Makro ok"})
+                elif "Social-Media-Analyst" in role:
+                    text = json.dumps({"rolle": "Social-Media-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Community ok"})
                 else:
                     text = json.dumps({"rolle": "Sentiment-Analyst", "stimmung": "bullish", "score": 4, "zusammenfassung": "Positiv"})
                 if kwargs.get("as_structured") and kwargs.get("response_format"):
@@ -397,10 +399,10 @@ class TestAnalystTeamParallel:
         }
         result = analyst_team(data, _BarrierLLM())
 
-        # Wenn wir hier ankommen, haben alle 4 Threads die Barrier erreicht
+        # Wenn wir hier ankommen, haben alle 5 Threads die Barrier erreicht
         # → sie liefen parallel.
-        assert len(call_threads) == 4, f"4 Threads sollten starten, war: {call_threads}"
-        assert len(set(call_threads)) == 4, "4 verschiedene Thread-IDs"
+        assert len(call_threads) == 5, f"5 Threads sollten starten, war: {call_threads}"
+        assert len(set(call_threads)) == 5, "5 verschiedene Thread-IDs"
         assert result["fundamental"]["stimmung"] == "bullish"
         assert result["technical"]["stimmung"] == "neutral"
         assert result["sentiment"]["stimmung"] == "bullish"

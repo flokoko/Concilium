@@ -283,3 +283,49 @@ class TestMaxTokensInPayload:
         payload = call_kwargs[1].get("json", {})
 
         assert "max_tokens" not in payload
+
+
+class TestReasoningEffortInPayload:
+    """llm.chat schreibt reasoning_effort (wenn gesetzt) als Top-Level-Feld in den Payload."""
+
+    def _make_client(self) -> LLMClient:
+        return LLMClient(base_url="http://fake:8080/v1", api_key="test-key", model="test-model")
+
+    def test_reasoning_effort_in_payload(self):
+        """Gesetzter Effort landet als Top-Level-Feld im Request-Payload."""
+        client = self._make_client()
+        mock_resp = _MockResponse(200, "Hallo")
+        with patch("concilium.llm.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                [{"role": "user", "content": "Hallo"}],
+                reasoning_effort="medium",
+            )
+
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs[1].get("json", {})
+        assert payload["reasoning_effort"] == "medium"
+
+    def test_no_reasoning_effort_in_payload_when_none(self):
+        """None (Default) → kein reasoning_effort-Feld im Payload (bisheriges Verhalten)."""
+        client = self._make_client()
+        mock_resp = _MockResponse(200, "Hallo")
+        with patch("concilium.llm.requests.post", return_value=mock_resp) as mock_post:
+            client.chat([{"role": "user", "content": "Hallo"}])
+
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs[1].get("json", {})
+        assert "reasoning_effort" not in payload
+
+    def test_no_reasoning_effort_in_payload_when_empty(self):
+        """Leerer String (z. B. deaktivierte Env-Var) → kein reasoning_effort-Feld."""
+        client = self._make_client()
+        mock_resp = _MockResponse(200, "Hallo")
+        with patch("concilium.llm.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                [{"role": "user", "content": "Hallo"}],
+                reasoning_effort="",
+            )
+
+        call_kwargs = mock_post.call_args
+        payload = call_kwargs[1].get("json", {})
+        assert "reasoning_effort" not in payload

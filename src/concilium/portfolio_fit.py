@@ -458,6 +458,7 @@ def portfolio_fit_agent(
     llm: LLMClient,
     positions: list[dict[str, Any]],
     data_text: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Ruft den Portfolio-Fit-Analysten auf.
 
@@ -472,6 +473,9 @@ def portfolio_fit_agent(
             Kann leer sein — dann nur Sektor-Bewertung.
         data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
             _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an den LLM-Call durchgereicht. None/'' (Default) = kein
+            reasoning_effort im Payload (bisheriges Verhalten).
 
     Returns:
         dict mit den Feldern aus SYSTEM_PORTFOLIO_FIT (plus _raw).
@@ -516,7 +520,9 @@ def portfolio_fit_agent(
 
     user_text = "\n".join(user_text_parts)
 
-    result = _call_agent(llm, SYSTEM_PORTFOLIO_FIT, user_text)
+    result = _call_agent(
+        llm, SYSTEM_PORTFOLIO_FIT, user_text, reasoning_effort=reasoning_effort
+    )
     result["portfolio_daten_verfuegbar"] = portfolio_daten_verfuegbar
     result["waehrungsrisiko_score"] = waehrungs_score
     return result

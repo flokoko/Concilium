@@ -146,6 +146,7 @@ def run_pipeline(
     journal: bool = True,
     deep_think_model: str | None = None,
     quick_think_model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -200,6 +201,12 @@ def run_pipeline(
             (Analysten, Bull/Bear-Debatte, Trader). None liest
             LLM_QUICK_THINK_MODEL aus der Env (leer = kein Split, primäres
             Modell).
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high')
+            für ALLE Agenten-Calls. None liest LLM_REASONING_EFFORT aus der
+            Env (leer = deaktiviert, kein reasoning_effort im Payload —
+            bisheriges Verhalten). Bewusst NICHT Teil des Konfigurations-
+            Fingerprints: Env-Konfiguration, kein Pipeline-Parameter wie der
+            Deep-/Quick-Think-Split.
 
     Resume-Kompatibilität:
         Ein Checkpoint wird nur wiederverwendet, wenn (a) das gepinnte
@@ -222,6 +229,13 @@ def run_pipeline(
         deep_think_model = config.llm_deep_think_model() or None
     if quick_think_model is None:
         quick_think_model = config.llm_quick_think_model() or None
+    # --- Reasoning-Effort (Reasoning-Tiefe, analog zum Modell-Split) ---------
+    # None → aus der Env lesen (leer/ungesetzt = deaktiviert → None). Explizit
+    # gesetzte Werte haben Vorrang (param > env). Bewusst KEIN Fingerprint-
+    # Bestandteil (Umgebungs-Konfiguration, kein Pipeline-Parameter) —
+    # der Fingerprint bleibt unverändert.
+    if reasoning_effort is None:
+        reasoning_effort = config.llm_reasoning_effort() or None
 
     result: dict[str, Any] = {}
 
@@ -400,7 +414,9 @@ def run_pipeline(
     # --- 2. Analysten-Team ---
     if not _is_completed(result, "analysts"):
         logger.info("Schritt 2: Analysten-Team wird aufgerufen")
-        analysts = analyst_team(data, llm, model=quick_think_model)  # data_text=None → rollenspezifische Filter greifen
+        analysts = analyst_team(
+            data, llm, model=quick_think_model, reasoning_effort=reasoning_effort,
+        )  # data_text=None → rollenspezifische Filter greifen
         result["analysts"] = analysts
         _save_step(result, ticker, "analysts")
     else:
@@ -409,7 +425,10 @@ def run_pipeline(
     # --- 3. Debatte ---
     if not _is_completed(result, "debate"):
         logger.info("Schritt 3: Bull/Bear-Debatte")
-        debate_result = debate(analysts, llm, rounds=debate_rounds, model=quick_think_model)
+        debate_result = debate(
+            analysts, llm, rounds=debate_rounds, model=quick_think_model,
+            reasoning_effort=reasoning_effort,
+        )
         result["debate"] = debate_result
         _save_step(result, ticker, "debate")
     else:
@@ -430,6 +449,7 @@ def run_pipeline(
                 feedback_context=feedback_context,
                 reflection_context=reflection_context,
                 model=quick_think_model,
+                reasoning_effort=reasoning_effort,
             )
         else:
             logger.info("Schritt 4: Trader erstellt Trade-Vorschlag (Single-Run)")
@@ -440,6 +460,7 @@ def run_pipeline(
                 feedback_context=feedback_context,
                 reflection_context=reflection_context,
                 model=quick_think_model,
+                reasoning_effort=reasoning_effort,
             )
         result["trade"] = trade
         _save_step(result, ticker, "trade")
@@ -451,7 +472,7 @@ def run_pipeline(
         logger.info("Schritt 5: Risk-Manager bewertet Risiko")
         risk = risk_manager(
             trade, data, llm, data_text=data_text, feedback_context=feedback_context,
-            model=deep_think_model,
+            model=deep_think_model, reasoning_effort=reasoning_effort,
         )
         result["risk"] = risk
         _save_step(result, ticker, "risk")
@@ -464,7 +485,10 @@ def run_pipeline(
         try:
             logger.info("Schritt 5b: Portfolio-Fit-Analyst bewertet Depot-Fit")
             positions = fetch_portfolio_positions()
-            portfolio_fit = portfolio_fit_agent(data, llm, positions, data_text=data_text)
+            portfolio_fit = portfolio_fit_agent(
+                data, llm, positions, data_text=data_text,
+                reasoning_effort=reasoning_effort,
+            )
             result["portfolio_fit"] = portfolio_fit
         except Exception as exc:  # noqa: BLE001 — nie crashen
             logger.warning("Portfolio-Fit fehlgeschlagen: %s", exc)
@@ -489,6 +513,7 @@ def run_pipeline(
                 reflection_context=reflection_context,
                 current_price=rev_current_price,
                 model=deep_think_model,
+                reasoning_effort=reasoning_effort,
             )
             result["trade_original"] = original_trade
             result["trade"] = revised
@@ -574,6 +599,7 @@ def run_pipeline(
             reflection_context=reflection_context,
             portfolio_context=portfolio_context,
             model=deep_think_model,
+            reasoning_effort=reasoning_effort,
         )
         result["final"] = final
         _save_step(result, ticker, "final")
@@ -633,6 +659,7 @@ def run_portfolio(
     as_of: str | None = None,
     deep_think_model: str | None = None,
     quick_think_model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Portfolio-Modus: analysiert mehrere Ticker als Depot-Ganzheit.
 
@@ -670,6 +697,10 @@ def run_portfolio(
         quick_think_model: Optionales Quick-Think-Modell — wird an jede
             Einzel-Pipeline durchgereicht. None liest LLM_QUICK_THINK_MODEL
             aus der Env (leer = kein Split).
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high')
+            für alle Agenten-Calls — wird an jede Einzel-Pipeline UND den
+            Phase-2-PM-Call durchgereicht. None liest LLM_REASONING_EFFORT
+            aus der Env (leer = deaktiviert, bisheriges Verhalten).
 
     Returns:
         dict mit:
@@ -688,6 +719,10 @@ def run_portfolio(
         deep_think_model = config.llm_deep_think_model() or None
     if quick_think_model is None:
         quick_think_model = config.llm_quick_think_model() or None
+    # Reasoning-Effort ebenfalls EINMAL zentral auflösen (param > env), damit
+    # der Phase-2-PM-Call denselben Effort bekommt wie die Einzel-Pipelines.
+    if reasoning_effort is None:
+        reasoning_effort = config.llm_reasoning_effort() or None
 
     # --- Phase 1: Einzel-Pipelines für jeden Ticker (ohne PM) ---
     # skip_final=True hält den PM+Journal zurück, bis der Portfolio-Kontext
@@ -711,6 +746,7 @@ def run_portfolio(
                 as_of=as_of,
                 deep_think_model=deep_think_model,
                 quick_think_model=quick_think_model,
+                reasoning_effort=reasoning_effort,
             )
             results[ticker] = result
         except Exception as exc:  # noqa: BLE001 — nie crashen
@@ -761,6 +797,7 @@ def run_portfolio(
                     reflection_context=reflection_context,
                     portfolio_context=portfolio_analysis,
                     model=deep_think_model,
+                    reasoning_effort=reasoning_effort,
                 )
                 result["final"] = final
                 result["portfolio_context"] = portfolio_analysis

@@ -155,14 +155,16 @@ class TestCallAgentModelPassthrough:
 class TestAgentFunctionsModelPassthrough:
     """Jede Agenten-Funktion reicht model an ALLE ihre LLM-Calls durch."""
 
-    def test_analyst_team_passes_model_to_all_four(self):
+    def test_analyst_team_passes_model_to_all_five(self):
         llm = _CapturingChatLLM(raw='{"stimmung": "bullish", "score": 4}')
         result = analyst_team(
             {"technicals": {}}, llm, data_text="DATEN", model="quick-x",
         )
-        assert len(llm.calls) == 4
+        assert len(llm.calls) == 5
         _assert_all_calls_have_model(llm, "quick-x")
-        assert set(result.keys()) >= {"fundamental", "technical", "sentiment", "macro_news"}
+        assert set(result.keys()) >= {
+            "fundamental", "technical", "sentiment", "macro_news", "social",
+        }
 
     def test_analyst_team_default_none(self):
         llm = _CapturingChatLLM(raw='{"stimmung": "bullish", "score": 4}')
