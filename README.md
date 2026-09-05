@@ -80,12 +80,24 @@ Scores, Kernrisiken, Kurz-Begründung) gefolgt von den Detail-Abschnitten.
 
 ## Makro-Daten
 
-Concilium bezieht kontextuelle Makro-Kennzahlen via yfinance (best effort, kein
-zusätzlicher API-Key): **10Y US-Treasury-Yield** (aktueller Zins + Wert vor einem
-Monat → Zinstrend), **EUR/USD**, **VIX**, **S&P-500-Trend** (1-Monats-Richtung)
-sowie **Ölpreis (WTI)**. Diese Werte fließen in den Risiko-Off-Regime-Hinweis, den
+Concilium bezieht kontextuelle Makro-Kennzahlen (best effort, kein zusätzlicher
+API-Key): **10Y US-Treasury-Yield** (aktueller Zins + Wert vor einem Monat →
+Zinstrend), **EUR/USD**, **VIX**, **S&P-500-Trend** (1-Monats-Richtung) sowie
+**Ölpreis (WTI)**. Diese Werte fließen in den Risiko-Off-Regime-Hinweis, den
 Analysten-/Risk-Kontext und den Report ein und geben den Agenten einen
 Markt-Breit-Kontext.
+
+**FRED-Fallback (optional):** Die 10Y US-Treasury-Yield wird **primär aus der
+FRED-API** (St. Louis Fed, Serie DGS10) bezogen, wenn `FRED_API_KEY` gesetzt ist
+— verlässlicher als yfinance, das in manchen Umgebungen NaN liefert. Ohne Key
+greift der yfinance-`^TNX`-Fallback. Der Report zeigt die Quelle
+(`us_10y_source`: `fred` / `yfinance`).
+
+**Stale-OHLCV-Rejection:** Concilium erkennt veraltete Kurs-Historie (letzter
+Close älter als 7 Kalendertage) und zeigt eine Warnung in der
+Datenqualitäts-Sektion des Reports, statt veraltete technische Indikatoren
+stillschweigend als aktuell zu verwenden. Bei gepinnten Analysedaten
+(`--date`) wird gegen das Analysedatum verglichen, nicht gegen heute.
 
 ## Zusätzliche Datenquellen (Phase A)
 
@@ -118,13 +130,14 @@ mitgegeben.
 Die Pipeline simuliert ein Team von Agenten, die nacheinander arbeiten — inspiriert
 von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
 
-1. **Analysten-Team** — vier Rollen, die **parallel** laufen und jeweils einen
+1. **Analysten-Team** — fünf Rollen, die **parallel** laufen und jeweils einen
    **rollenspezifischen Datenkontext** erhalten (nur die für ihre Rolle
    relevanten Kennzahlen, kein Rauschen):
    - **Fundamental-Analyst**: Fundamentals (MarketCap, KGV, EPS, Revenue, Margen, Wachstum) + Analysten-Erwartungen + **quantitativer Multi-Faktor-Score** (deterministischer Value/Momentum/Qualität-Anker, den der LLM kritisch einordnet) + **Insider-Transaktionen** (Käufe/Verkäufe von Insidern via yfinance)
    - **Technik-Analyst**: Technische Indikatoren (SMA50/200, RSI14, MACD, Bollinger)
-   - **Sentiment-Analyst**: News-Headlines (yfinance, Fallback auf Google-News-RSS, **ergänzt durch StockTwits + Reddit**), Positiv/Negativ/Neutral-Zählung (zeitgewichtet wenn Zeitstempel verfügbar), **mit Quellen-Kennzeichnung je Headline**
+   - **Sentiment-Analyst**: News-Headlines (yfinance, Fallback auf Google-News-RSS), Positiv/Negativ/Neutral-Zählung (zeitgewichtet wenn Zeitstempel verfügbar), **mit Quellen-Kennzeichnung je Headline**
    - **Makro/News-Analyst**: Global-Makro-News (Google-News-RSS) + **Prediction Markets** (Polymarket) + Makro-Kennzahlen (Zinsen, VIX, EURUSD, Öl, S&P-Trend) — bewertet das Marktumfeld und die Relevanz der Headlines für den Ticker
+   - **Social-Media-Analyst**: StockTwits + Reddit-Posts — bewertet die **Retail-Community-Stimmung** getrennt von den Nachrichten-Headlines, inkl. **Konträr-Indikator** (extreme Retail-Euphorie kann Warnsignal sein)
 
    Jeder Analyst liefert eine Stimmung (`bullish`/`neutral`/`bearish`) und einen
    Score (1-5). Ein **Konsistenz-Wächter** erkennt Stimmungs-/Score-Widersprüche
@@ -274,6 +287,8 @@ Die Agenten verwenden eine OpenAI-kompatible Schnittstelle, konfiguriert über U
 | `LLM_FALLBACK_MODEL` | – | Fallback-Modell nach erschöpften Retries bei 429/5xx |
 | `LLM_DEEP_THINK_MODEL` | – | Stärkeres Modell für komplexe Reasoning-Agenten (Risiko-Debatte, Trade-Revision, Portfolio-Manager); leer = primäres Modell |
 | `LLM_QUICK_THINK_MODEL` | – | Schnelleres Modell für schnelle Agenten (Analysten, Bull/Bear-Debatte, Trader); leer = primäres Modell |
+| `LLM_REASONING_EFFORT` | – | Reasoning-Tiefe (`low`/`medium`/`high`) für alle Agenten; leer = deaktiviert (kein `reasoning_effort` im Payload) |
+| `FRED_API_KEY` | – | API-Key der St. Louis Fed (api.stlouisfed.org); wenn gesetzt, kommt die 10Y US-Treasury-Yield primär aus FRED statt yfinance |
 | `CONCILIUM_RISK_DEBATE_ROUNDS` | `2` | Runden der 3-Perspektiven-Risiko-Debatte (1 = nur Runde 1, spart 3 LLM-Calls) |
 | `CONCILIUM_JOURNAL_MAX_RESOLVED` | `0` | Cap auf aufgelöste (resolved) Journal-Einträge; `0` = Rotation deaktiviert (Journal wächst unbegrenzt), `>0` = älteste resolved-Einträge werden geprunt |
 | `CONCILIUM_CACHE_DIR` | `<repo>/cache` | Tages-Cache für Marktdaten; leer = deaktiviert |
@@ -304,6 +319,22 @@ zwei verschiedene Modelle aufteilen (analog TradingAgents):
 Beide sind optional (leer = primäres `LLM_MODEL`). So kann z. B. ein schnelles,
 günstiges Modell für die Massen-Schritte und ein stärkeres für die
 Entscheidungs-Schritte verwendet werden.
+
+## Reasoning-Effort-Control
+
+Über `LLM_REASONING_EFFORT` (`low`/`medium`/`high`) lässt sich die **Reasoning-Tiefe**
+aller Agenten steuern. Der Wert wird als Top-Level-Feld `reasoning_effort` in den
+OpenAI-kompatiblen Request-Payload geschrieben (empirisch verifiziert gegen
+`https://ollama.com/v1`): Bei `medium`/`high` liefert das Modell einen
+Thinking-Trace (`reasoning`-Feld), bei `low` nicht.
+
+```bash
+export LLM_REASONING_EFFORT="high"   # oder low/medium; leer = deaktiviert
+```
+
+⚠️ **Wichtig:** Bei hohem Effort verbraucht das Modell Tokens fürs Reasoning —
+der `max_tokens`-Default (4000) bleibt kritisch und sollte nicht verringert
+werden, sonst bleibt der eigentliche `content` leer (nur Thinking).
 
 ## Token-Usage-Logging
 
