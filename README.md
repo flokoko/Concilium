@@ -87,6 +87,22 @@ sowie **Ölpreis (WTI)**. Diese Werte fließen in den Risiko-Off-Regime-Hinweis,
 Analysten-/Risk-Kontext und den Report ein und geben den Agenten einen
 Markt-Breit-Kontext.
 
+## Zusätzliche Datenquellen (Phase A)
+
+Seit Phase A bezieht Concilium drei weitere Datenquellen (best effort, kein
+zusätzlicher API-Key), die als eigene Report-Sektionen erscheinen:
+
+- **Insider-Transaktionen** — Käufe/Verkäufe von Insidern via
+  `yf.Ticker(ticker).insider_transactions` (Datum, Insider, Art, Aktien, Kurs,
+  Wert). Häufige Käufe (Purchase) gelten meist als positives Signal.
+- **Prediction Markets** — Wahrscheinlichkeiten aus **Polymarket** (öffentliche
+  Gamma-API) für ticker-relevante Ereignisse (z. B. Kursziel, Quartalsergebnis).
+- **Global-Makro-News** — aktuelle Makro-Schlagzeilen (Google-News-RSS) als
+  Markt-Breit-Kontext für den Makro/News-Analysten.
+
+Alle drei sind optional: Liefert eine Quelle keine Daten, wird die zugehörige
+Report-Sektion einfach weggelassen — der Report bricht nie.
+
 ## Währungsrisiko (EUR-basiert)
 
 Concilium ist auf einen EUR-basierten Fondsmanager ausgerichtet. USD-Ticker
@@ -102,12 +118,13 @@ mitgegeben.
 Die Pipeline simuliert ein Team von Agenten, die nacheinander arbeiten — inspiriert
 von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
 
-1. **Analysten-Team** — drei Rollen, die **parallel** laufen und jeweils einen
+1. **Analysten-Team** — vier Rollen, die **parallel** laufen und jeweils einen
    **rollenspezifischen Datenkontext** erhalten (nur die für ihre Rolle
    relevanten Kennzahlen, kein Rauschen):
-   - **Fundamental-Analyst**: Fundamentals (MarketCap, KGV, EPS, Revenue, Margen, Wachstum) + Analysten-Erwartungen + **quantitativer Multi-Faktor-Score** (deterministischer Value/Momentum/Qualität-Anker, den der LLM kritisch einordnet)
+   - **Fundamental-Analyst**: Fundamentals (MarketCap, KGV, EPS, Revenue, Margen, Wachstum) + Analysten-Erwartungen + **quantitativer Multi-Faktor-Score** (deterministischer Value/Momentum/Qualität-Anker, den der LLM kritisch einordnet) + **Insider-Transaktionen** (Käufe/Verkäufe von Insidern via yfinance)
    - **Technik-Analyst**: Technische Indikatoren (SMA50/200, RSI14, MACD, Bollinger)
    - **Sentiment-Analyst**: News-Headlines (yfinance, Fallback auf Google-News-RSS, **ergänzt durch StockTwits + Reddit**), Positiv/Negativ/Neutral-Zählung (zeitgewichtet wenn Zeitstempel verfügbar), **mit Quellen-Kennzeichnung je Headline**
+   - **Makro/News-Analyst**: Global-Makro-News (Google-News-RSS) + **Prediction Markets** (Polymarket) + Makro-Kennzahlen (Zinsen, VIX, EURUSD, Öl, S&P-Trend) — bewertet das Marktumfeld und die Relevanz der Headlines für den Ticker
 
    Jeder Analyst liefert eine Stimmung (`bullish`/`neutral`/`bearish`) und einen
    Score (1-5). Ein **Konsistenz-Wächter** erkennt Stimmungs-/Score-Widersprüche
@@ -135,7 +152,13 @@ von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
 4. **Risk-Manager** — bewertet Volatilität, Drawdown-Risiko und Positionsgröße.
    Ein **rechnerisches Volatility-Targeting-Modell** (Risiko-Budget 2 %, Cap 10 %)
    wird dem LLM als deterministischer Anker in den Prompt gegeben, damit die
-   LLM-Positionsgröße konsistent bleibt.
+   LLM-Positionsgröße konsistent bleibt. Seit Phase B läuft der Risk-Manager als
+   **3-Perspektiven-Risiko-Debatte** (aggressiv / neutral / konservativ): Die drei
+   Perspektiven argumentieren parallel (Runde 1), bei `CONCILIUM_RISK_DEBATE_ROUNDS=2`
+   (Default) reagieren sie in Runde 2 konkret auf die Argumente der jeweils anderen
+   beiden, und ein finaler Synthese-Call liefert das Risk-Urteil. Die Debatten-Argumente
+   werden im Report sichtbar. Fällt eine Perspektive aus, fährt die Debatte mit den
+   übrigen fort; schlägt die Synthese fehl, greift ein sicherer Schema-Fallback.
 
 5. **Portfolio-Fit-Analyst** — bewertet die Aktie als Baustein im realen Depot
    (lädt Florians Depot aus einer Google-Sheet-Tabelle):
@@ -232,6 +255,13 @@ granularer: zusätzlich zur Hit-Rate wird die **durchschnittliche Rating-Distanz
 (Anzahl Stufen, um die die Einschätzung neben dem tatsächlichen Verlauf lag)
 ausgewiesen.
 
+**Journal-Hygiene (Idempotenz-Guard + Rotation):** Das Entscheidungs-Journal
+(`journal/decisions.csv`) wird idempotent geschrieben — ein bereits aufgelöster
+Eintrag wird nicht doppelt angelegt. Über `CONCILIUM_JOURNAL_MAX_RESOLVED` (Default
+`0` = aus) lässt sich die Anzahl der aufgelösten (resolved) Einträge begrenzen:
+Werte `>0` prunen nach jedem Append die ältesten resolved-Einträge, sodass das
+Journal nicht unbegrenzt wächst. Pending- und Legacy-Einträge werden nie geprunt.
+
 ## LLM-Umgebungsvariablen
 
 Die Agenten verwenden eine OpenAI-kompatible Schnittstelle, konfiguriert über Umgebungsvariablen:
@@ -242,8 +272,14 @@ Die Agenten verwenden eine OpenAI-kompatible Schnittstelle, konfiguriert über U
 | `LLM_API_KEY` | aus `OLLAMA_API_KEY` | API-Key für Authentifizierung |
 | `LLM_MODEL` | `glm-5.3-flash` | Modellname (ohne `:cloud`-Suffix — das Suffix verursacht HTTP 400) |
 | `LLM_FALLBACK_MODEL` | – | Fallback-Modell nach erschöpften Retries bei 429/5xx |
+| `LLM_DEEP_THINK_MODEL` | – | Stärkeres Modell für komplexe Reasoning-Agenten (Risiko-Debatte, Trade-Revision, Portfolio-Manager); leer = primäres Modell |
+| `LLM_QUICK_THINK_MODEL` | – | Schnelleres Modell für schnelle Agenten (Analysten, Bull/Bear-Debatte, Trader); leer = primäres Modell |
+| `CONCILIUM_RISK_DEBATE_ROUNDS` | `2` | Runden der 3-Perspektiven-Risiko-Debatte (1 = nur Runde 1, spart 3 LLM-Calls) |
+| `CONCILIUM_JOURNAL_MAX_RESOLVED` | `0` | Cap auf aufgelöste (resolved) Journal-Einträge; `0` = Rotation deaktiviert (Journal wächst unbegrenzt), `>0` = älteste resolved-Einträge werden geprunt |
 | `CONCILIUM_CACHE_DIR` | `<repo>/cache` | Tages-Cache für Marktdaten; leer = deaktiviert |
 | `CONCILIUM_STATE_DIR` | `<repo>/state` | Checkpoint-Verzeichnis für `--resume`; leer = deaktiviert |
+| `CONCILIUM_REPORTS_DIR` | `<repo>/reports` | Ausgabe-Verzeichnis für Reports |
+| `CONCILIUM_WATCHLIST` | `<repo>/watchlist.txt` | Pfad zur Watchlist-Datei |
 
 Beispiel:
 
@@ -253,6 +289,21 @@ export LLM_API_KEY="sk-..."
 export LLM_MODEL="gpt-4o"
 python main.py --ticker AAPL
 ```
+
+## Deep-Think / Quick-Think Modell-Split
+
+Über `LLM_DEEP_THINK_MODEL` und `LLM_QUICK_THINK_MODEL` lassen sich die Agenten auf
+zwei verschiedene Modelle aufteilen (analog TradingAgents):
+
+- **Quick-Think** (`LLM_QUICK_THINK_MODEL`): Analysten, Bull/Bear-Debatte und Trader
+  — die schnellen, datengetriebenen Schritte.
+- **Deep-Think** (`LLM_DEEP_THINK_MODEL`): Risiko-Debatte, Trade-Revision und
+  Portfolio-Manager — die komplexen Reasoning-Schritte, die von einem stärkeren
+  Modell profitieren.
+
+Beide sind optional (leer = primäres `LLM_MODEL`). So kann z. B. ein schnelles,
+günstiges Modell für die Massen-Schritte und ein stärkeres für die
+Entscheidungs-Schritte verwendet werden.
 
 ## Token-Usage-Logging
 
