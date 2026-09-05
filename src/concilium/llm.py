@@ -96,6 +96,7 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float = 0.3,
         max_tokens: int | None = None,
+        model: str | None = None,
         response_format: dict[str, Any] | None = None,
         as_structured: bool = False,
     ) -> str | StructuredChatResult:
@@ -105,6 +106,12 @@ class LLMClient:
         Wenn ein Fallback-Modell konfiguriert ist und der primäre Request nach
         allen Retries mit 429/5xx fehlschlägt, wird ein Versuch mit dem
         Fallback-Modell unternommen.
+
+        ``model``: Optionales Modell-Override (Deep-Think/Quick-Think-Split).
+            None (Default) nutzt das primäre Modell ``self.model``. Ein
+            Override ersetzt NUR das ``model``-Feld im Payload — der
+            429/5xx-Fallback greift unverändert (das Fallback-Modell bleibt
+            das konfigurierte Fallback-Modell, unabhängig vom Override).
 
         Wenn ``response_format`` gesetzt ist, wird es in den Payload als
         ``"response_format"`` aufgenommen (OpenAI-kompatibel). Antwortet die
@@ -121,7 +128,7 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "temperature": temperature,
         }

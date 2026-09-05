@@ -780,6 +780,7 @@ def _call_agent(
     response_format: dict[str, Any] | None = None,
     structured: bool = False,
     max_tokens: int = 4000,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Führt einen einzelnen Agenten-Call aus und parst das Ergebnis.
 
@@ -802,6 +803,10 @@ def _call_agent(
     Trader/Risk/PM ~200) und nötig, weil die Reasoning-Modelle (glm-5.x)
     einen Teil der Tokens fürs Reasoning verbrauchen — bei 1000 blieb der
     eigentliche Content leer (finish_reason=length).
+
+    ``model``: Optionales Modell-Override (Deep-Think/Quick-Think-Split),
+    wird an ``llm.chat(model=...)`` durchgereicht. None (Default) = primäres
+    Modell des Clients (bisheriges Verhalten).
     """
     messages = [
         {"role": "system", "content": system_prompt},
@@ -815,6 +820,7 @@ def _call_agent(
             response_format=response_format,
             as_structured=True,
             max_tokens=max_tokens,
+            model=model,
         )
         if isinstance(result_obj, StructuredChatResult):
             raw = result_obj.text
@@ -832,7 +838,9 @@ def _call_agent(
             raw = str(result_obj)
             parsed = parse_json(raw)
     else:
-        raw = llm.chat(messages, temperature=temperature, max_tokens=max_tokens)
+        raw = llm.chat(
+            messages, temperature=temperature, max_tokens=max_tokens, model=model
+        )
         parsed = parse_json(raw)
 
     if not isinstance(parsed, dict):
@@ -855,6 +863,7 @@ def analyst_team(
     data: dict[str, Any],
     llm: LLMClient,
     data_text: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Ruft 4 Analysten-Rollen auf (Fundamental, Technical, Sentiment, Macro/News).
 
@@ -877,6 +886,8 @@ def analyst_team(
         data_text: Optional vorberechneter Daten-Text (vermeidet mehrfache
             _build_data_text-Berechnung). Wenn None, wird pro Analyst ein
             rollenspezifischer Text gebaut.
+        model: Optionales Modell-Override (Quick-Think-Split), wird an alle
+            Analysten-Calls durchgereicht. None = primäres Modell.
     """
     # Rollen-Mapping: analyst_team key → _build_data_text role
     role_map = {
@@ -901,7 +912,14 @@ def analyst_team(
             text = data_text
         else:
             text = _build_data_text(data, role=role_map[key])
-        return key, _call_agent(llm, system_prompt, text, response_format=resp_format, structured=True)
+        return key, _call_agent(
+            llm,
+            system_prompt,
+            text,
+            response_format=resp_format,
+            structured=True,
+            model=model,
+        )
 
     max_workers = min(len(analyst_specs), _MAX_PARALLEL)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -1022,7 +1040,12 @@ def _analyst_summary_text(analysts: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def debate(analysts: dict[str, Any], llm: LLMClient, rounds: int = 1) -> dict[str, Any]:
+def debate(
+    analysts: dict[str, Any],
+    llm: LLMClient,
+    rounds: int = 1,
+    model: str | None = None,
+) -> dict[str, Any]:
     """Führt Bull/Bear-Debatte durch (2 LLM-Calls pro Runde).
 
     Args:
@@ -1033,6 +1056,8 @@ def debate(analysts: dict[str, Any], llm: LLMClient, rounds: int = 1) -> dict[st
             Seite ab Runde 2 die Argumentation der Gegenseite aus der
             vorherigen Runde als Kontext, mit der Anweisung, konkret darauf
             einzugehen.
+        model: Optionales Modell-Override (Quick-Think-Split), wird an beide
+            Bull/Bear-Calls durchgereicht. None = primäres Modell.
 
     Returns dict mit 'bull', 'bear', 'bull_confidence', 'bear_confidence'
     und 'rounds' Schlüsseln. Die finalen bull/bear-Dicts stammen aus der
@@ -1065,6 +1090,7 @@ def debate(analysts: dict[str, Any], llm: LLMClient, rounds: int = 1) -> dict[st
             temperature=0.5,
             response_format=DEBATE_SCHEMA,
             structured=True,
+            model=model,
         )
         bull_text = _get_debate_argument(bull)
 
@@ -1083,6 +1109,7 @@ def debate(analysts: dict[str, Any], llm: LLMClient, rounds: int = 1) -> dict[st
             temperature=0.5,
             response_format=DEBATE_SCHEMA,
             structured=True,
+            model=model,
         )
         bear_text = _get_debate_argument(bear)
 
@@ -1239,6 +1266,7 @@ def trader(
     temperature: float = 0.3,
     feedback_context: str = "",
     reflection_context: str = "",
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Erstellt Trade-Vorschlag aus Analysten + Debatte.
 
@@ -1256,6 +1284,8 @@ def trader(
         reflection_context: Optionaler Reflexions-Block (leer = keine
             Reflexion). Wird nach feedback_context am Ende des User-Prompts
             angehängt.
+        model: Optionales Modell-Override (Quick-Think-Split). None =
+            primäres Modell.
     """
     summary = _analyst_summary_text(analysts)
     # debate_result bull/bear kann "argumente" (strukturierter Pfad) oder
@@ -1288,6 +1318,7 @@ def trader(
         temperature=temperature,
         response_format=TRADE_SCHEMA,
         structured=True,
+        model=model,
     )
     # 5-stufige Rating normalisieren: rohes Rating in 'rating', 3-stufige Aktion in 'aktion'
     raw_rating = str(result.get("aktion", "")).strip().upper()
@@ -1657,6 +1688,7 @@ def ensemble_trader(
     temperature_range: list[float] | None = None,
     feedback_context: str = "",
     reflection_context: str = "",
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Führt den Trader mehrfach aus (Ensemble) und aggregiert per Mehrheitsentscheid.
 
@@ -1671,6 +1703,8 @@ def ensemble_trader(
             Feedback). Wird an jeden trader()-Aufruf durchgereicht.
         reflection_context: Optionaler Reflexions-Block (leer = keine
             Reflexion). Wird an jeden trader()-Aufruf durchgereicht.
+        model: Optionales Modell-Override (Quick-Think-Split), wird an jeden
+            trader()-Run durchgereicht. None = primäres Modell.
 
     Returns:
         dict mit dem gewählten Trade plus _ensemble-Metadaten:
@@ -1695,6 +1729,7 @@ def ensemble_trader(
             temperature=temp,
             feedback_context=feedback_context,
             reflection_context=reflection_context,
+            model=model,
         )
 
     max_workers = min(len(temps), _MAX_PARALLEL)
@@ -1974,7 +2009,12 @@ def _normalize_pct_string(val: Any) -> float | None:
     return fval if fval == fval else None  # NaN-Check
 
 
-def _risk_perspective_call(llm: LLMClient, system_prompt: str, user_text: str) -> str:
+def _risk_perspective_call(
+    llm: LLMClient,
+    system_prompt: str,
+    user_text: str,
+    model: str | None = None,
+) -> str:
     """Führt einen Perspektiven-Call der Risiko-Debatte aus (best-effort).
 
     Analog zu Bull/Bear: DEBATE_SCHEMA für strukturierte Outputs, das
@@ -1990,6 +2030,7 @@ def _risk_perspective_call(llm: LLMClient, system_prompt: str, user_text: str) -
             temperature=0.5,
             response_format=DEBATE_SCHEMA,
             structured=True,
+            model=model,
         )
         return _get_debate_argument(result)
     except Exception as exc:  # noqa: BLE001 — nie crashen
@@ -2000,6 +2041,7 @@ def _risk_perspective_call(llm: LLMClient, system_prompt: str, user_text: str) -
 def _run_risk_perspectives_parallel(
     llm: LLMClient,
     jobs: list[tuple[str, str, str]],
+    model: str | None = None,
 ) -> dict[str, str]:
     """Führt (Name, System-Prompt, User-Text)-Jobs parallel aus (best-effort).
 
@@ -2010,7 +2052,7 @@ def _run_risk_perspectives_parallel(
     results: dict[str, str] = {}
 
     def _run_one(name: str, prompt: str, text: str) -> tuple[str, str]:
-        return name, _risk_perspective_call(llm, prompt, text)
+        return name, _risk_perspective_call(llm, prompt, text, model=model)
 
     max_workers = min(len(jobs), _MAX_PARALLEL)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -2038,6 +2080,7 @@ def risk_debate(
     data_text: str | None = None,
     feedback_context: str = "",
     rounds: int | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """3-Perspektiven-Risiko-Debatte (aggressiv/neutral/konservativ, 2 Runden).
 
@@ -2070,6 +2113,9 @@ def risk_debate(
         rounds: Anzahl der Debatten-Runden (1 = nur Runde 1, spart 3 LLM-Calls;
             2 = Runde 1 + Runde 2). None liest CONCILIUM_RISK_DEBATE_ROUNDS
             (Default 2). Werte < 2 überspringen Runde 2.
+        model: Optionales Modell-Override (Deep-Think-Split), wird an ALLE
+            Calls durchgereicht (3 Perspektiven × Runden + Synthese). None =
+            primäres Modell.
 
     Returns:
         risk-dict mit denselben Feldern wie der bisherige Single-Pass-Call
@@ -2121,7 +2167,7 @@ def risk_debate(
 
     # --- Runde 1: alle drei Perspektiven parallel ---
     runde1 = _run_risk_perspectives_parallel(
-        llm, [(name, prompt, base_user) for name, prompt in perspektiven]
+        llm, [(name, prompt, base_user) for name, prompt in perspektiven], model=model
     )
 
     # --- Runde 2 (nur wenn >= 2 Runden): Reaktion auf die anderen beiden ---
@@ -2144,7 +2190,7 @@ def risk_debate(
                 "Punkte, sondern vertiefe/verteidige sie."
             )
             jobs_runde2.append((name, prompt, user2))
-        runde2 = _run_risk_perspectives_parallel(llm, jobs_runde2)
+        runde2 = _run_risk_perspectives_parallel(llm, jobs_runde2, model=model)
 
     # --- Synthese: finaler LLM-Call mit den Argumenten der gelaufenen Runden ---
     gelaufene_runden: list[tuple[int, dict[str, str]]] = [(1, runde1)]
@@ -2177,6 +2223,7 @@ def risk_debate(
             synth_user,
             response_format=RISK_SCHEMA,
             structured=True,
+            model=model,
         )
         # Defensiv: sicherstellen, dass ALLE Schema-Keys vorhanden sind
         # (setdefault überschreibt vorhandene Werte nicht).
@@ -2216,6 +2263,7 @@ def risk_manager(
     llm: LLMClient,
     data_text: str | None = None,
     feedback_context: str = "",
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Bewertet Risiko des Trades via 3-Perspektiven-Risiko-Debatte (Phase B).
 
@@ -2239,6 +2287,8 @@ def risk_manager(
             _build_data_text-Berechnung). Wenn None, wird er intern berechnet.
         feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
             Feedback). Wird am Ende der User-Prompts angehängt.
+        model: Optionales Modell-Override (Deep-Think-Split), wird an
+            risk_debate durchgereicht. None = primäres Modell.
     """
     # Config hier lesen (pipeline.py bleibt unverändert) und explizit
     # durchreichen; risk_debate selbst hätte bei rounds=None denselben
@@ -2251,6 +2301,7 @@ def risk_manager(
         data_text=data_text,
         feedback_context=feedback_context,
         rounds=rounds,
+        model=model,
     )
 
 
@@ -2262,6 +2313,7 @@ def portfolio_manager(
     feedback_context: str = "",
     reflection_context: str = "",
     portfolio_context: dict[str, Any] | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Trifft finale Entscheidung.
 
@@ -2279,7 +2331,9 @@ def portfolio_manager(
             angehängt.
         portfolio_context: Optionaler Gesamt-Portfolio-Kontext (Korrelation,
             Overlap, Konzentration über alle analysierten Titel). Wenn gesetzt,
-            wird er als „Gesamt-Exposure"-Block in den User-Prompt injiziert.
+            wird er als „Gesamt-Exposure“-Block in den User-Prompt injiziert.
+        model: Optionales Modell-Override (Deep-Think-Split). None =
+            primäres Modell.
     """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     risk_text = json.dumps(risk, ensure_ascii=False, indent=2, default=str)
@@ -2302,7 +2356,12 @@ def portfolio_manager(
     if reflection_context:
         user_text += f"\n\n{reflection_context}"
 
-    return _call_agent(llm, SYSTEM_PM, user_text, response_format=FINAL_SCHEMA, structured=True)
+    return _call_agent(
+        llm, SYSTEM_PM, user_text,
+        response_format=FINAL_SCHEMA,
+        structured=True,
+        model=model,
+    )
 
 
 def trade_revision(
@@ -2313,6 +2372,7 @@ def trade_revision(
     feedback_context: str = "",
     reflection_context: str = "",
     current_price: float | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Trade-Revision (2nd Pass) — der Trader überarbeitet seinen Trade.
 
@@ -2332,6 +2392,8 @@ def trade_revision(
         reflection_context: Optionaler Reflexions-Block.
         current_price: Aktueller Kurs — für deterministischen Ziel-/Stop-Fallback.
             Bei None wird der Fallback übersprungen (kein Crash).
+        model: Optionales Modell-Override (Deep-Think-Split). None =
+            primäres Modell.
 
     Returns:
         dict mit dem revidierten Trade (gleiche Felder wie trader(),
@@ -2358,6 +2420,7 @@ def trade_revision(
         temperature=0.3,
         response_format=TRADE_SCHEMA,
         structured=True,
+        model=model,
     )
     # 5-stufige Rating normalisieren (wie bei trader())
     raw_rating = str(result.get("aktion", "")).strip().upper()

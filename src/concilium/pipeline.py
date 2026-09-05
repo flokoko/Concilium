@@ -11,6 +11,7 @@ from typing import Any
 # heißt "ungepatcht" → Cross-Ticker-Teil (C4) wird ergänzt).
 import concilium.feedback as _feedback_module
 
+from . import config
 from .agents import (
     _apply_technik_veto,
     _build_data_text,
@@ -81,6 +82,8 @@ def _pipeline_fingerprint(
     peers: list[str] | None,
     debate_rounds: int,
     backtest: bool,
+    deep_think_model: str | None = None,
+    quick_think_model: str | None = None,
 ) -> str:
     """Erzeugt einen deterministischen Fingerprint der Pipeline-Konfiguration.
 
@@ -90,6 +93,13 @@ def _pipeline_fingerprint(
     as_of-Check geprüft). Bei Resume stellen Checkpoint-Fingerprint und
     aktueller Fingerprint sicher, dass nur bei identischer Konfiguration
     fortgeschrieben wird.
+
+    Die Deep-/Quick-Think-Split-Modelle sind Teil des Fingerprints, weil sie
+    die LLM-Antworten der Agenten direkt beeinflussen — ein Resume mit
+    anderem Split würde inkonsistente Zwischenergebnisse mischen. Bewusst
+    nur aufgenommen, WENN gesetzt (None/'' → gleiche Konfiguration wie vor
+    dem Split): Vor dem Split erstellte Checkpoints (ohne Modell-Keys im
+    Fingerprint-JSON) bleiben damit kompatibel, solange kein Split aktiv ist.
 
     Deterministisch: identische Eingaben → identischer String. Peers werden
     sortiert normalisiert (None und [] sind äquivalent), damit die Listen-
@@ -102,6 +112,12 @@ def _pipeline_fingerprint(
         "debate_rounds": int(debate_rounds),
         "backtest": bool(backtest),
     }
+    # Split-Modelle nur bei aktivem Split aufnehmen (Rückwärtskompatibilität
+    # mit Altdaten-Checkpoints, deren Fingerprint diese Keys nicht enthält).
+    if deep_think_model:
+        config["deep_think_model"] = str(deep_think_model)
+    if quick_think_model:
+        config["quick_think_model"] = str(quick_think_model)
     return json.dumps(config, sort_keys=True, separators=(",", ":"))
 
 
@@ -128,6 +144,8 @@ def run_pipeline(
     debate_rounds: int = 1,
     as_of: str | None = None,
     journal: bool = True,
+    deep_think_model: str | None = None,
+    quick_think_model: str | None = None,
 ) -> dict[str, Any]:
     """Führt die komplette Trading-Analysis-Pipeline aus.
 
@@ -174,6 +192,14 @@ def run_pipeline(
             Der Exit-Review-Modus (``--review``) nutzt journal=False, damit
             die Depot-Review-Läufe (Verkauf-Fragestellung) die Kalibrierung/
             den Track-Record der Neukauf-Analysen nicht verunreinigen.
+        deep_think_model: Optionales stärkeres Modell für komplexe
+            Reasoning-Agenten (Risiko-Debatte, Trade-Revision, Portfolio-
+            Manager). None liest LLM_DEEP_THINK_MODEL aus der Env (leer =
+            kein Split, primäres Modell).
+        quick_think_model: Optionales schnelles Modell für schnelle Agenten
+            (Analysten, Bull/Bear-Debatte, Trader). None liest
+            LLM_QUICK_THINK_MODEL aus der Env (leer = kein Split, primäres
+            Modell).
 
     Resume-Kompatibilität:
         Ein Checkpoint wird nur wiederverwendet, wenn (a) das gepinnte
@@ -188,6 +214,15 @@ def run_pipeline(
     Returns:
         dict mit allen Zwischenergebnissen.
     """
+    # --- Deep-Think/Quick-Think Modell-Split --------------------------------
+    # None → aus der Env lesen (leer = kein Split → None = primäres Modell).
+    # Explizit gesetzte Werte haben Vorrang (param > env), "" wird wie
+    # "nicht gesetzt" behandelt.
+    if deep_think_model is None:
+        deep_think_model = config.llm_deep_think_model() or None
+    if quick_think_model is None:
+        quick_think_model = config.llm_quick_think_model() or None
+
     result: dict[str, Any] = {}
 
     # --- Konfigurations-Fingerprint (Roadmap C5) -------------------------------
@@ -201,6 +236,8 @@ def run_pipeline(
         peers=peers,
         debate_rounds=debate_rounds,
         backtest=backtest,
+        deep_think_model=deep_think_model,
+        quick_think_model=quick_think_model,
     )
 
     # --- Resume: Checkpoint laden, falls vorhanden und gewünscht ---
@@ -363,7 +400,7 @@ def run_pipeline(
     # --- 2. Analysten-Team ---
     if not _is_completed(result, "analysts"):
         logger.info("Schritt 2: Analysten-Team wird aufgerufen")
-        analysts = analyst_team(data, llm)  # data_text=None → rollenspezifische Filter greifen
+        analysts = analyst_team(data, llm, model=quick_think_model)  # data_text=None → rollenspezifische Filter greifen
         result["analysts"] = analysts
         _save_step(result, ticker, "analysts")
     else:
@@ -372,7 +409,7 @@ def run_pipeline(
     # --- 3. Debatte ---
     if not _is_completed(result, "debate"):
         logger.info("Schritt 3: Bull/Bear-Debatte")
-        debate_result = debate(analysts, llm, rounds=debate_rounds)
+        debate_result = debate(analysts, llm, rounds=debate_rounds, model=quick_think_model)
         result["debate"] = debate_result
         _save_step(result, ticker, "debate")
     else:
@@ -392,6 +429,7 @@ def run_pipeline(
                 runs=ensemble_runs,
                 feedback_context=feedback_context,
                 reflection_context=reflection_context,
+                model=quick_think_model,
             )
         else:
             logger.info("Schritt 4: Trader erstellt Trade-Vorschlag (Single-Run)")
@@ -401,6 +439,7 @@ def run_pipeline(
                 llm,
                 feedback_context=feedback_context,
                 reflection_context=reflection_context,
+                model=quick_think_model,
             )
         result["trade"] = trade
         _save_step(result, ticker, "trade")
@@ -411,7 +450,8 @@ def run_pipeline(
     if not _is_completed(result, "risk"):
         logger.info("Schritt 5: Risk-Manager bewertet Risiko")
         risk = risk_manager(
-            trade, data, llm, data_text=data_text, feedback_context=feedback_context
+            trade, data, llm, data_text=data_text, feedback_context=feedback_context,
+            model=deep_think_model,
         )
         result["risk"] = risk
         _save_step(result, ticker, "risk")
@@ -448,6 +488,7 @@ def run_pipeline(
                 feedback_context=feedback_context,
                 reflection_context=reflection_context,
                 current_price=rev_current_price,
+                model=deep_think_model,
             )
             result["trade_original"] = original_trade
             result["trade"] = revised
@@ -532,6 +573,7 @@ def run_pipeline(
             feedback_context=feedback_context,
             reflection_context=reflection_context,
             portfolio_context=portfolio_context,
+            model=deep_think_model,
         )
         result["final"] = final
         _save_step(result, ticker, "final")
@@ -589,6 +631,8 @@ def run_portfolio(
     peers: list[str] | None = None,
     debate_rounds: int = 1,
     as_of: str | None = None,
+    deep_think_model: str | None = None,
+    quick_think_model: str | None = None,
 ) -> dict[str, Any]:
     """Portfolio-Modus: analysiert mehrere Ticker als Depot-Ganzheit.
 
@@ -620,6 +664,12 @@ def run_portfolio(
         resume: Resume-Modus für Einzel-Pipelines.
         as_of: Optionales gepinntes Analysedatum (YYYY-MM-DD) — wird an jede
             Einzel-Pipeline (run_pipeline) durchgereicht.
+        deep_think_model: Optionales Deep-Think-Modell — wird an jede
+            Einzel-Pipeline UND den Phase-2-PM-Call durchgereicht. None liest
+            LLM_DEEP_THINK_MODEL aus der Env (leer = kein Split).
+        quick_think_model: Optionales Quick-Think-Modell — wird an jede
+            Einzel-Pipeline durchgereicht. None liest LLM_QUICK_THINK_MODEL
+            aus der Env (leer = kein Split).
 
     Returns:
         dict mit:
@@ -628,6 +678,16 @@ def run_portfolio(
           - tickers: Liste der analysierten Ticker
     """
     from .portfolio_analysis import run_portfolio_analysis
+
+    # --- Deep-Think/Quick-Think Split auflösen (param > env, leer = None) ---
+    # run_portfolio ruft run_pipeline rekursiv auf — dort würde None erneut
+    # aus der Env gelesen; hier lösen wir trotzdem EINMAL zentral, damit der
+    # Phase-2-PM-Call (direkter portfolio_manager-Aufruf!) dasselbe Deep-Think-
+    # Modell bekommt wie die Einzel-Pipelines.
+    if deep_think_model is None:
+        deep_think_model = config.llm_deep_think_model() or None
+    if quick_think_model is None:
+        quick_think_model = config.llm_quick_think_model() or None
 
     # --- Phase 1: Einzel-Pipelines für jeden Ticker (ohne PM) ---
     # skip_final=True hält den PM+Journal zurück, bis der Portfolio-Kontext
@@ -649,6 +709,8 @@ def run_portfolio(
                 skip_final=llm is not None,
                 debate_rounds=debate_rounds,
                 as_of=as_of,
+                deep_think_model=deep_think_model,
+                quick_think_model=quick_think_model,
             )
             results[ticker] = result
         except Exception as exc:  # noqa: BLE001 — nie crashen
@@ -698,6 +760,7 @@ def run_portfolio(
                     feedback_context=feedback_context,
                     reflection_context=reflection_context,
                     portfolio_context=portfolio_analysis,
+                    model=deep_think_model,
                 )
                 result["final"] = final
                 result["portfolio_context"] = portfolio_analysis

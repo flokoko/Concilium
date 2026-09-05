@@ -188,6 +188,26 @@ def llm_fallback_model() -> str:
     return _env("LLM_FALLBACK_MODEL", "")
 
 
+def llm_deep_think_model() -> str:
+    """Deep-Think-Modell für komplexe Reasoning-Agenten ('' = kein Split).
+
+    Wird von Risiko-Debatte, Trade-Revision und Portfolio-Manager genutzt.
+    Priorität: LLM_DEEP_THINK_MODEL-Env > '' (leer = primäres Modell,
+    bisheriges Verhalten).
+    """
+    return _env("LLM_DEEP_THINK_MODEL", "")
+
+
+def llm_quick_think_model() -> str:
+    """Quick-Think-Modell für schnelle Agenten ('' = kein Split).
+
+    Wird von Analysten, Bull/Bear-Debatte und Trader genutzt.
+    Priorität: LLM_QUICK_THINK_MODEL-Env > '' (leer = primäres Modell,
+    bisheriges Verhalten).
+    """
+    return _env("LLM_QUICK_THINK_MODEL", "")
+
+
 # ---------------------------------------------------------------------------
 # Risiko-Debatte
 # ---------------------------------------------------------------------------

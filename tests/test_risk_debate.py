@@ -331,7 +331,7 @@ class TestRiskManagerThinWrapper:
             )
         mock_rd.assert_called_once_with(
             _TRADE, _MOCK_DATA, "llm", data_text="dt", feedback_context="fb",
-            rounds=2,
+            rounds=2, model=None,
         )
         assert result == {"risiko_score": 2}
 
