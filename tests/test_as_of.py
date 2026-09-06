@@ -7,6 +7,7 @@ Abgedeckte Verhaltensweisen:
   (c) Cache-Key berücksichtigt as_of (kein falscher Cache-Treffer)
   (d) ungültiges as_of → ValueError mit deutscher Meldung, kein Crash
   (e) ohne as_of → bisheriges Verhalten (volle Historie, as_of=None)
+  (f) Cache-Key berücksichtigt Peers (Lauf mit/ohne --peers getrennt)
 
 Alle Tests laufen offline: yfinance + Social-Quellen + Makro werden gemockt.
 """
@@ -14,6 +15,7 @@ Alle Tests laufen offline: yfinance + Social-Quellen + Makro werden gemockt.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import sys
 from contextlib import ExitStack
@@ -30,6 +32,7 @@ sys.path.insert(
 )
 
 from concilium.data import (  # noqa: E402
+    _cache_file_path,
     _load_cache,
     _save_cache,
     collect_ticker_data,
@@ -166,6 +169,80 @@ class TestAsOfCache:
         # Ohne as_of → KEIN Treffer (gepinnter Stand darf nicht als
         # "heute"-Stand durchgehen)
         assert _load_cache("TEST", today_key="2026-01-01", as_of=None) is None
+
+    def test_cache_file_path_differs_with_peers(self):
+        """(f) _cache_file_path mit peers → eigener Pfad; ohne peers → alter Name."""
+        no_peers = _cache_file_path("/tmp/cache", "2026-01-01", "AAPL")
+        with_peers = _cache_file_path(
+            "/tmp/cache", "2026-01-01", "AAPL", peers=["vst", "NEE"]
+        )
+        assert no_peers != with_peers
+        # Rückwärtskompatibilität: ohne peers bleibt der Name EXAKT wie bisher
+        assert os.path.basename(no_peers) == "market_2026-01-01_AAPL.json"
+        # Mit peers: normalisiert (strip+upper), sortiert, mit _ verbunden
+        assert os.path.basename(with_peers) == (
+            "market_2026-01-01_AAPL_peers_NEE_VST.json"
+        )
+        # as_of-Variante analog (mit Peers-Suffix NACH dem Ticker)
+        asof_no_peers = _cache_file_path("/tmp/cache", "2026-01-01", "AAPL", as_of=_AS_OF)
+        asof_with_peers = _cache_file_path(
+            "/tmp/cache", "2026-01-01", "AAPL", as_of=_AS_OF, peers=["NEE", "vst"]
+        )
+        assert os.path.basename(asof_with_peers) == (
+            f"market_2026-01-01_asof_{_AS_OF}_AAPL_peers_NEE_VST.json"
+        )
+        assert asof_no_peers != asof_with_peers
+
+    def test_load_cache_peers_mismatch_is_miss(self, tmp_path, monkeypatch):
+        """(f) Cache ohne peers → Miss für Peer-Lauf; mit peers → Miss für Peer-losen Lauf."""
+        data = {"ticker": "TEST", "technicals": {"current_price": 100.0}, "history": []}
+
+        # Ohne Peers gespeichert
+        monkeypatch.setenv("CONCILIUM_CACHE_DIR", str(tmp_path))
+        _save_cache("TEST", data, today_key="2026-01-01")
+        # Lauf OHNE Peers → Treffer, Lauf MIT Peers → Cache-Miss
+        assert _load_cache("TEST", today_key="2026-01-01") is not None
+        assert _load_cache("TEST", today_key="2026-01-01", peers=["VST", "NEE"]) is None
+
+        # Mit Peers gespeichert (Reihenfolge/Schreibweise egal → normalisiert)
+        monkeypatch.setenv("CONCILIUM_CACHE_DIR", str(tmp_path / "with_peers"))
+        _save_cache("TEST", data, today_key="2026-01-01", peers=["nee", "VST"])
+        # Gleiche Peers (anders sortiert/geschrieben) → Treffer
+        assert _load_cache(
+            "TEST", today_key="2026-01-01", peers=["VST", "NEE"]
+        ) is not None
+        # Lauf OHNE Peers → Cache-Miss; andersartige Peers → ebenfalls Miss
+        assert _load_cache("TEST", today_key="2026-01-01") is None
+        assert _load_cache("TEST", today_key="2026-01-01", peers=["NEE"]) is None
+
+        # Sicherheitsnetz (Gültigkeitsprüfung, nicht nur Dateiname): Datei am
+        # Peers-Pfad, aber Peer-Liste im Eintrag passt nicht → Cache-Miss
+        net_dir = tmp_path / "net"
+        monkeypatch.setenv("CONCILIUM_CACHE_DIR", str(net_dir))
+        os.makedirs(net_dir, exist_ok=True)
+        stale_entry = {
+            "cache_date": "2026-01-01",
+            "ticker": "TEST",
+            "as_of": None,
+            "peers": ["EEE"],
+            "data": data,
+        }
+        with open(
+            _cache_file_path(str(net_dir), "2026-01-01", "TEST", peers=["VST"]),
+            "w",
+            encoding="utf-8",
+        ) as fh:
+            json.dump(stale_entry, fh)
+        assert _load_cache("TEST", today_key="2026-01-01", peers=["VST"]) is None
+        # Umgekehrt: Eintrag MIT Peers am No-Peers-Pfad → Miss ohne Peers
+        stale_entry["peers"] = ["VST"]
+        with open(
+            _cache_file_path(str(net_dir), "2026-01-01", "TEST"),
+            "w",
+            encoding="utf-8",
+        ) as fh:
+            json.dump(stale_entry, fh)
+        assert _load_cache("TEST", today_key="2026-01-01") is None
 
     def test_collect_with_as_of_does_not_reuse_today_cache(self, tmp_path, monkeypatch):
         """End-to-End: Cache-Miss bei as_of-Wechsel, Treffer bei gleichem as_of."""

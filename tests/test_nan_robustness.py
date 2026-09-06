@@ -205,7 +205,10 @@ class TestCollectTickerDataNaNLastClose:
 class TestMacroDataTrailingNaN:
     """_fetch_macro_data: NaN-Lastzeile in ^TNX-Historie → Yield aus gültigem Close."""
 
-    def test_tnx_yield_from_last_valid_close(self):
+    def test_tnx_yield_from_last_valid_close(self, monkeypatch):
+        # Hermetisch: aktiver FRED-Fallback (FRED_API_KEY in der Umgebung)
+        # holt echte Daten und würde das ^TNX-Mock-Ergebnis überschreiben.
+        monkeypatch.delenv("FRED_API_KEY", raising=False)
         n = 20
         dates = pd.date_range(end="2026-01-01", periods=n, tz="UTC")
         closes = [4.0 + i * 0.01 for i in range(n)]

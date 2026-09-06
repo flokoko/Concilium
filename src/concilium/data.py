@@ -50,7 +50,9 @@ _USER_AGENT = (
 # Vermeidet wiederholte yfinance-Aufrufe innerhalb desselben Kalendertags.
 # Cache-Ort übersteuerbar via Env CONCILIUM_CACHE_DIR (Default: <repo>/cache/).
 # Cache DEAKTIVIERBAR via CONCILIUM_CACHE_DIR="" (leerer String).
-# Datei pro Ticker+Datum: market_{YYYY-MM-DD}_{ticker}.json.
+# Datei pro Ticker+Datum: market_{YYYY-MM-DD}_{ticker}.json — optional mit
+# as_of-/Peers-Suffix: market_{...}_asof_{DATE}_{ticker}.json bzw.
+# market_{...}_{ticker}_peers_{PEER1_PEER2}.json (Lauf mit --peers).
 
 
 def _get_cache_dir() -> str | None:
@@ -109,23 +111,36 @@ def _parse_as_of(as_of: str | None) -> str | None:
     return parsed.strftime("%Y-%m-%d")
 
 
-def _normalize_peers(peers: list[str] | str | None) -> str:
+def _normalized_peer_list(peers: list[str] | str | None) -> list[str]:
+    """Normalisiert jeden Peer-Ticker (strip + upper + re.sub) und sortiert dedupliziert.
+
+    Reihenfolge, Duplikate und Groß-/Kleinschreibung dürfen den Cache-Key
+    nicht beeinflussen — `peers=['vst','NEE']` und `peers=['NEE','VST']`
+    sind derselbe Lauf. Ein einzelner String (z. B. opaque Wert aus einem
+    alten Cache-Eintrag) wird als ein deterministisches Element behandelt.
+    """
+    if not peers:
+        return []
+    if isinstance(peers, str):
+        return [peers] if peers.strip() else []
+    return sorted(
+        {
+            re.sub(r"[^A-Za-z0-9._-]", "_", p.strip().upper())
+            for p in peers
+            if p and p.strip()
+        }
+    )
+
+
+def _normalize_peers(peers: list[str] | None) -> str:
     """Normalisiert die Peer-Liste zu einem stabilen, sortierten String.
 
-    Reihenfolge und Duplikate dürfen den Cache-Key nicht beeinflussen —
-    `peers=['VST','NEE']` und `peers=['NEE','VST']` sind derselbe Lauf.
+    Reihenfolge, Duplikate und Groß-/Kleinschreibung dürfen den Cache-Key
+    nicht beeinflussen — `peers=['VST','NEE']` und `peers=['NEE','VST']`
+    sind derselbe Lauf.
     Leere/None → leerer String (kein Peers-Segment im Dateinamen).
-    Idempotent: ein bereits normalisierter String (z.B. aus dem Cache-Eintrag)
-    wird unverändert zurückgegeben.
     """
-    if isinstance(peers, str):
-        return peers  # bereits normalisiert (aus Cache-Eintrag)
-    if not peers:
-        return ""
-    cleaned = sorted({p.strip() for p in peers if p and p.strip()})
-    if not cleaned:
-        return ""
-    return "_".join(re.sub(r"[^A-Za-z0-9._-]", "_", p) for p in cleaned)
+    return "_".join(_normalized_peer_list(peers))
 
 
 def _cache_file_path(
@@ -145,7 +160,10 @@ def _cache_file_path(
     """
     # Ticker kann / enthalten (z.B. nicht bereinigt) → sicher machen
     safe_ticker = re.sub(r"[^A-Za-z0-9._-]", "_", ticker)
-    peers_seg = _normalize_peers(peers)
+    try:
+        peers_seg = _normalize_peers(peers)
+    except Exception:  # noqa: BLE001 — best effort: Suffix-Bau crasht nie
+        peers_seg = ""
     if as_of is not None:
         safe_as_of = re.sub(r"[^A-Za-z0-9._-]", "_", as_of)
         base = f"market_{today_key}_asof_{safe_as_of}_{safe_ticker}"
@@ -195,8 +213,11 @@ def _load_cache(
         # Gültigkeit: as_of muss exakt übereinstimmen (None != gepinnt)
         if cached.get("as_of") != as_of:
             return None
-        # Gültigkeit: peers müssen exakt übereinstimmen (normalisiert)
-        if _normalize_peers(cached.get("peers")) != _normalize_peers(peers):
+        # Gültigkeit: peers müssen exakt übereinstimmen (normalisiert) —
+        # Sicherheitsnetz zusätzlich zum Peers-Suffix im Dateinamen. Ein
+        # Cache ohne Peers wird nie für einen Lauf mit Peers geliefert
+        # (leere Peer-Tabelle im Report) und umgekehrt.
+        if _normalized_peer_list(cached.get("peers")) != _normalized_peer_list(peers):
             return None
         # data-dict extrahieren
         data = cached.get("data")
@@ -239,11 +260,18 @@ def _save_cache(
 
     # Kopie ohne Identifier-Metadaten (isin/wkn gehören nicht in den Cache)
     cache_data = {k: v for k, v in data.items() if k not in ("isin", "wkn")}
+    # Sortierte/normalisierte Peer-Liste (None = Lauf ohne Peers) — die
+    # Gültigkeitsprüfung in _load_cache gleicht dagegen exakt ab (Sicherheitsnetz
+    # zusätzlich zum Peers-Suffix im Dateinamen).
+    try:
+        peers_norm = _normalized_peer_list(peers)
+    except Exception:  # noqa: BLE001 — best effort: Peer-Normalisierung crasht nie
+        peers_norm = []
     cache_entry = {
         "cache_date": today_key,
         "ticker": ticker,
         "as_of": as_of,
-        "peers": _normalize_peers(peers),
+        "peers": peers_norm or None,
         "data": cache_data,
     }
     file_path = _cache_file_path(cache_dir, today_key, ticker, as_of, peers)
