@@ -167,19 +167,25 @@ def _management_summary(
                 f"wegen überkonfidenter Historie_"
             )
 
-        # Technik-Veto / Technik-Ausnahme (SMA200)
-        _technik_veto_info = trade.get("_technik_veto")
-        if isinstance(_technik_veto_info, dict):
-            if _technik_veto_info.get("vetoed"):
-                lines.append(
-                    "> ⚠️ **Technik-Veto:** Kurs unter SMA200 — "
-                    "KAUFEN auf HALTEN reduziert."
-                )
-            elif _technik_veto_info.get("ausnahme"):
-                lines.append(
-                    "> ⚠️ **Technik-Ausnahme:** RSI < 30 bei intaktem SMA200 — "
-                    "kleine Position (max 1.5%) mit strengem Stop erlaubt."
-                )
+        # Technik-Signal / Technik-Ausnahme (SMA200, graduelle Skalierung)
+        _technik_signal_info = trade.get("_technik_signal")
+        if isinstance(_technik_signal_info, dict):
+            try:
+                _signal_faktor = float(_technik_signal_info.get("faktor", 1.0))
+            except (TypeError, ValueError):
+                _signal_faktor = 1.0
+            if _signal_faktor < 1.0:
+                if _technik_signal_info.get("ausnahme"):
+                    lines.append(
+                        "> ⚠️ **Technik-Ausnahme:** RSI < 30 bei intaktem SMA50 — "
+                        "kleine Position (Faktor 0.5) mit strengem Stop."
+                    )
+                else:
+                    lines.append(
+                        f"> ⚠️ **Technik-Signal:** Kurs unter SMA200 — "
+                        f"Positionsgröße um Faktor {_signal_faktor:g} reduziert "
+                        f"(fallendes Messer)."
+                    )
 
     # --- 2. Score-Zeile ---
     score_parts: list[str] = []
@@ -920,20 +926,25 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
                     f" → revidiert: {trade.get('aktion', 'N/A')}_"
                 )
                 lines.append("")
-        # Technik-Veto / Technik-Ausnahme (SMA200)
-        veto_info = trade.get("_technik_veto")
-        if isinstance(veto_info, dict):
-            if veto_info.get("vetoed"):
-                lines.append(
-                    "> ⚠️ **Technik-Veto:** Kurs unter SMA200 — "
-                    "KAUFEN auf HALTEN reduziert."
-                )
-                lines.append("")
-            elif veto_info.get("ausnahme"):
-                lines.append(
-                    "> ⚠️ **Technik-Ausnahme:** RSI < 30 bei intaktem SMA200 — "
-                    "kleine Position (max 1.5%) mit strengem Stop erlaubt."
-                )
+        # Technik-Signal / Technik-Ausnahme (SMA200, graduelle Skalierung)
+        signal_info = trade.get("_technik_signal")
+        if isinstance(signal_info, dict):
+            try:
+                _signal_faktor = float(signal_info.get("faktor", 1.0))
+            except (TypeError, ValueError):
+                _signal_faktor = 1.0
+            if _signal_faktor < 1.0:
+                if signal_info.get("ausnahme"):
+                    lines.append(
+                        "> ⚠️ **Technik-Ausnahme:** RSI < 30 bei intaktem SMA50 — "
+                        "kleine Position (Faktor 0.5) mit strengem Stop."
+                    )
+                else:
+                    lines.append(
+                        f"> ⚠️ **Technik-Signal:** Kurs unter SMA200 — "
+                        f"Positionsgröße um Faktor {_signal_faktor:g} reduziert "
+                        f"(fallendes Messer)."
+                    )
                 lines.append("")
         lines.append(f"**Aktion:** {trade.get('aktion', 'N/A')}")
         if trade.get("rating"):

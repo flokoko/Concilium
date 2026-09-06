@@ -1223,15 +1223,6 @@ def _get_debate_argument(agent: dict[str, Any]) -> str:
     return str(agent.get("_raw", ""))
 
 
-# ---------------------------------------------------------------------------
-# Technik-Veto (SMA200) — fallendes Messer blockt KAUFEN
-# ---------------------------------------------------------------------------
-
-_TECHNIK_VETO_GRUND = (
-    "Kurs unter SMA200 — fallendes Messer, kein KAUFEN (Technik-Veto)."
-)
-
-
 def _safe_float_or_none(val: Any) -> float | None:
     """Konvertiert einen Wert tolerant zu float (None/NaN/ungültig → None)."""
     if val is None:
@@ -1245,100 +1236,140 @@ def _safe_float_or_none(val: Any) -> float | None:
     return f if f == f else None  # NaN-Check (NaN != NaN)
 
 
-def _technik_veto(analysts: dict[str, Any]) -> dict[str, Any]:
-    """Prüft das Technik-Veto: Kurs unter SMA200 blockt KAUFEN.
+# ---------------------------------------------------------------------------
+# Technik-Signal (SMA200) — fallendes Messer skaliert Positionen graduell
+# ---------------------------------------------------------------------------
+
+def _technik_signal(analysts: dict[str, Any]) -> dict[str, Any]:
+    """Prüft das graduelle Technik-Signal (SMA200) — skaliert Positionen statt zu blocken.
 
     Returns dict mit:
-      - vetoed: bool (True wenn KAUFEN blockiert)
-      - grund: str (deutscher Grund)
+      - faktor: float 0.0–1.0 (Positions-Skalierungsfaktor)
+      - grund: str (deutscher Grund, leer wenn kein Abschlag)
       - ausnahme: bool (True wenn RSI-Ausnahme greift)
 
     Konservativ: Wenn current_price oder sma200 fehlen/None/NaN sind, wird
-    KEIN Veto ausgesprochen (nicht blocken, wenn Daten fehlen).
-    Ausnahme (RSI < 30 bei intaktem SMA50-übergeordnetem Trend): kleine
-    Position erlaubt, vetoed=False, ausnahme=True.
+    NICHT abgeschlagen (kein Skalieren, wenn Daten fehlen).
+    Kurs >= SMA200 → faktor 1.0 (kein Abschlag).
+    Kurs < SMA200:
+      - RSI-Ausnahme (RSI < 30 bei intaktem SMA50-Umfeld): faktor 0.5,
+        ausnahme=True (kleine Position mit strengem Stop).
+      - Sonst: gradueller Faktor nach Abstand unter SMA200 —
+        max(0.3, 1.0 - abstand_pct / 10.0) (bei 7%+ unter SMA200 → Untergrenze 0.3).
     """
-    empty = {"vetoed": False, "grund": "", "ausnahme": False}
+    no_discount = {"faktor": 1.0, "grund": "", "ausnahme": False}
     t = analysts.get("technicals") if isinstance(analysts, dict) else None
     if not isinstance(t, dict):
-        return empty
+        return no_discount
 
     price = _safe_float_or_none(t.get("current_price"))
     sma200 = _safe_float_or_none(t.get("sma200"))
-    if price is None or sma200 is None:
-        return empty
+    if price is None or sma200 is None or sma200 <= 0:
+        return no_discount
 
     if price >= sma200:
-        return empty  # kein Veto — Kurs auf oder über SMA200
+        return no_discount  # kein Abschlag — Kurs auf oder über SMA200
 
-    # Kurs unter SMA200 → Veto, außer RSI-Ausnahme greift
+    # Kurs unter SMA200 → RSI-Ausnahme (fester Faktor 0.5) oder gradueller Faktor
     rsi = _safe_float_or_none(t.get("rsi14", t.get("rsi")))
     sma50 = _safe_float_or_none(t.get("sma50"))
     if rsi is not None and rsi < 30 and sma50 is not None and price > sma50:
         return {
-            "vetoed": False,
+            "faktor": 0.5,
             "grund": (
-                "RSI < 30 bei intaktem SMA200-Umfeld — kleine Position "
-                "(max 1.5%) mit strengem Stop erlaubt (Technik-Ausnahme)."
+                "RSI < 30 bei intaktem SMA50-Umfeld — kleine Position "
+                "erlaubt (Technik-Ausnahme)."
             ),
             "ausnahme": True,
         }
-    return {"vetoed": True, "grund": _TECHNIK_VETO_GRUND, "ausnahme": False}
+
+    abstand_pct = (sma200 - price) / sma200 * 100.0
+    faktor = max(0.3, 1.0 - abstand_pct / 10.0)
+    grund = (
+        f"Kurs {abstand_pct:.1f}% unter SMA200 — Positionsgröße um Faktor "
+        f"{faktor:.2f} reduziert (fallendes Messer)."
+    )
+    return {"faktor": faktor, "grund": grund, "ausnahme": False}
 
 
-def _apply_technik_veto(trade: dict[str, Any], analysts: dict[str, Any]) -> dict[str, Any]:
-    """Wendet das Technik-Veto auf ein Trade-dict an (in-place, gibt trade zurück).
+def _technik_signal_basis(trade: dict[str, Any]) -> float:
+    """Basis-Positionsgröße für die Signal-Skalierung (idempotenter Re-Apply).
 
-    - KAUFEN/STARK KAUFEN + Veto → Aktion/Rating auf HALTEN, Positionsanteil 0,
-      Ziel-/Stop-Werte entfernt, Metadaten result["_technik_veto"] gesetzt.
-    - RSI-Ausnahme (vetoed=False, ausnahme=True) → Position auf max 1.5%
-      gekappt, Stop deterministisch auf 5% unter Kurs gesetzt (strenger Stop).
-    - Kein KAUFEN / kein Veto → unverändert, kein _technik_veto-Key gesetzt.
+    Liest die beim ersten Apply gespeicherte Original-Größe
+    (``_technik_signal_basis``) und fällt sonst auf ``positionsanteil``
+    (Default 3.0) zurück. Ohne gespeicherte Basis bleibt eine erneute
+    Anwendung des Signals wirkungslos-idempotent statt kumulativ zu skalieren.
+    """
+    stored = _safe_float_or_none(trade.get("_technik_signal_basis"))
+    if stored is not None:
+        return stored
+    current = _safe_float_or_none(trade.get("positionsanteil"))
+    if current is not None:
+        return current
+    return 3.0
+
+
+def _apply_technik_signal(trade: dict[str, Any], analysts: dict[str, Any]) -> dict[str, Any]:
+    """Wendet das graduelle Technik-Signal auf ein Trade-dict an (in-place, gibt trade zurück).
+
+    - Nur für KAUFEN/STARK KAUFEN (sonst unverändert) — KAUFEN bleibt KAUFEN.
+    - faktor >= 1.0 → unverändert, kein _technik_signal-Key.
+    - faktor < 1.0 → Positionsgröße mit dem Faktor skaliert (Basis: beim ersten
+      Apply gespeicherte Original-Größe, sonst aktueller Wert, Default 3.0;
+      Untergrenze 0.5; idempotent). Ziel-/Stop-Werte bleiben unangetastet.
+    - RSI-Ausnahme (ausnahme=True) → zusätzlich Stop deterministisch auf 5%
+      unter Kurs gesetzt (falls fehlend oder zu locker).
+    - Metadaten trade["_technik_signal"] gesetzt (faktor/grund/ausnahme).
+    - Crasht nie (try/except um die Skalierung; bei Fehler Trade unverändert).
     """
     action = str(trade.get("aktion", "")).strip().upper()
     if action not in ("KAUFEN", "STARK KAUFEN"):
         return trade
 
-    veto = _technik_veto(analysts)
-    if veto["ausnahme"]:
-        # RSI-Ausnahme: KAUFEN bleibt, aber kleine Position + strenger Stop.
-        # Nur anwenden, wenn das Veto-Umfeld tatsächlich aktiv ist (Kurs < SMA200).
-        price = _safe_float_or_none(
-            (analysts.get("technicals") or {}).get("current_price")
-        )
-        if price is not None:
-            if trade.get("positionsanteil") is not None:
-                try:
-                    pa = float(trade["positionsanteil"])
-                    if pa > 1.5:
-                        trade["positionsanteil"] = 1.5
-                except (TypeError, ValueError):
-                    pass
-            # Strenger Stop: 5% unter Kurs, falls fehlend oder zu locker
-            try:
-                stop = trade.get("stop_loss")
-                if stop is None or float(stop) > price * 0.95:
-                    trade["stop_loss"] = round(price * 0.95, 2)
-            except (TypeError, ValueError):
-                trade["stop_loss"] = round(price * 0.95, 2)
-        trade["_technik_veto"] = {
-            "vetoed": False,
-            "grund": veto["grund"],
-            "ausnahme": True,
-        }
-        return trade
+    try:
+        signal = _technik_signal(analysts)
+        faktor = float(signal.get("faktor", 1.0))
+        if faktor >= 1.0:
+            return trade
 
-    if veto["vetoed"]:
-        trade["aktion"] = "HALTEN"
-        trade["rating"] = "HALTEN"
-        trade["zielkurs"] = None
-        trade["stop_loss"] = None
-        trade["positionsanteil"] = 0
-        trade["_technik_veto"] = {
-            "vetoed": True,
-            "grund": veto["grund"],
-            "ausnahme": False,
+        # Unpassender positionsanteil-Typ (nicht None, nicht konvertierbar) →
+        # Abbruch, Trade bleibt unverändert (keine Datenverfälschung).
+        raw_pa = trade.get("positionsanteil")
+        if raw_pa is not None and _safe_float_or_none(raw_pa) is None:
+            return trade
+
+        original = _technik_signal_basis(trade)
+        neuer_pa = max(0.5, round(original * faktor, 2))
+        metadaten = {
+            "faktor": faktor,
+            "grund": signal.get("grund", ""),
+            "ausnahme": bool(signal.get("ausnahme", False)),
         }
+
+        # RSI-Ausnahme: Stop deterministisch auf 5% unter Kurs (falls fehlend
+        # oder zu locker) — nur anwenden, wenn der Preis verfügbar ist.
+        neuer_stop = None
+        if signal.get("ausnahme"):
+            price = _safe_float_or_none(
+                (analysts.get("technicals") or {}).get("current_price")
+            )
+            if price is not None:
+                try:
+                    stop = trade.get("stop_loss")
+                    if stop is None or float(stop) > price * 0.95:
+                        neuer_stop = round(price * 0.95, 2)
+                except (TypeError, ValueError):
+                    neuer_stop = round(price * 0.95, 2)
+
+        # Mutationen erst am Ende (alle Werte vorberechnet) — der Trade bleibt
+        # bei Fehlern im Vorfeld unverändert.
+        trade["positionsanteil"] = neuer_pa
+        if neuer_stop is not None:
+            trade["stop_loss"] = neuer_stop
+        trade["_technik_signal"] = metadaten
+        trade["_technik_signal_basis"] = original
+    except Exception:  # noqa: BLE001 — Trade-Änderung darf nie crashen
+        return trade
     return trade
 
 
@@ -1414,9 +1445,10 @@ def trader(
     result["aktion"] = _rating_to_action(raw_rating)
     # Entscheidungs-Disziplin: STARK KAUFEN/STARK VERKAUFEN dämpfen wenn überkonfident
     _dampen_stark_rating(result, raw_rating)
-    # Technik-Veto: KAUFEN unter SMA200 → HALTEN (RSI-Ausnahme: kleine Position).
-    # Bewusst am Ende — überschreibt jede vorherige Rating-/Aktions-Logik.
-    _apply_technik_veto(result, analysts)
+    # Technik-Signal (graduell): KAUFEN unter SMA200 bleibt KAUFEN, aber die
+    # Positionsgröße wird per Faktor (0.3–1.0) reduziert; RSI-Ausnahme: Faktor
+    # 0.5 + strenger Stop. Bewusst am Ende — skaliert jede vorherige Logik.
+    _apply_technik_signal(result, analysts)
     return result
 
 
@@ -1929,12 +1961,13 @@ def ensemble_trader(
 
     result = dict(basis_run)
 
-    # Technik-Veto (Safety-Net, Ensemble-Ebene): Normalerweise wendet trader()
-    # das Veto bereits pro Run an, sodass die Mehrheit gar nicht erst KAUFEN
-    # ist. Liefert die Mehrheit dennoch KAUFEN (Runs umgehen das Veto, gemockte
-    # Trades o. ä.), blockt dieses Safety-Net den finalen KAUFEN-Trade.
+    # Technik-Signal (Safety-Net, Ensemble-Ebene): Normalerweise wendet trader()
+    # das Signal bereits pro Run an, sodass die Position der Runs bereits skaliert
+    # ist. Liefert die Mehrheit dennoch KAUFEN (Runs umgehen trader(), gemockte
+    # Trades o. ä.), skaliert dieses Safety-Net die Position des finalen
+    # KAUFEN-Trades graduell — KAUFEN wird nie mehr auf HALTEN zurückgesetzt.
     if mehrheits_aktion == "KAUFEN":
-        _apply_technik_veto(result, analysts)
+        _apply_technik_signal(result, analysts)
 
     # Plausibilitäts-Check für den gewählten Trade
     if mehrheits_aktion == "KAUFEN" and not _is_plausible_kauf(result, current_price):
