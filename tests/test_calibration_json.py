@@ -23,6 +23,8 @@ from concilium.feedback import (  # noqa: E402
     _compute_kalibrierung_echt,
     _compute_kalibrierung_echt_per_action,
     _compute_stats,
+    _hitrate_direktiv_block,
+    _hitrate_direktiv_regel,
     _load_calibration_json,
     build_feedback_context,
 )
@@ -537,3 +539,159 @@ class TestFeedbackContextEchteHitRate:
             assert mock_rr.call_count == 0
 
         assert "echte Hit-Rate" in result
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6: Hit-Rate-Direktiv (prominente Verhaltensvorgabe)
+# --------------------------------------------------------------------------- #
+
+
+class TestHitrateDirektivRegel:
+    """Testet die Schwellen-Übersetzung _hitrate_direktiv_regel (0.20/0.35/0.50)."""
+
+    def test_null_hit_rate_KEIN_stark(self):
+        """Hit-Rate 0% → KEIN 'STARK KAUFEN', max 3/5 Konfidenz."""
+        regel = _hitrate_direktiv_regel("KAUFEN", 0.0)
+        assert "KAUFEN-Hit-Rate 0%" in regel
+        assert "KEIN 'STARK KAUFEN'" in regel
+        assert "max 3/5" in regel
+
+    def test_verkaufen_null_hit_rate_KEIN_stark(self):
+        """Hit-Rate 10% → KEIN 'STARK VERKAUFEN' (analog zu KAUFEN)."""
+        regel = _hitrate_direktiv_regel("VERKAUFEN", 0.10)
+        assert "VERKAUFEN-Hit-Rate 10%" in regel
+        assert "KEIN 'STARK VERKAUFEN'" in regel
+        assert "max 3/5" in regel
+
+    def test_schwelle_020_unten_und_grenze(self):
+        """0.19 → Regime 1 (KEIN STARK), 0.20 → Regime 2 (kein STARK, max 4/5)."""
+        unten = _hitrate_direktiv_regel("KAUFEN", 0.19)
+        assert "fast nie getroffen" in unten
+        assert "KEIN 'STARK KAUFEN'" in unten
+
+        grenze = _hitrate_direktiv_regel("KAUFEN", 0.20)
+        assert "überwiegend unzuverlässig" in grenze
+        assert "Kein 'STARK KAUFEN'" in grenze
+        assert "max 4/5" in grenze
+
+    def test_schwelle_035_unten_und_grenze(self):
+        """0.34 → Regime 2, 0.35 → Regime 3 ('STARK …' nur bei herausragender Bestätigung)."""
+        unten = _hitrate_direktiv_regel("KAUFEN", 0.34)
+        assert "überwiegend unzuverlässig" in unten
+        assert "Kein 'STARK KAUFEN'" in unten
+
+        grenze = _hitrate_direktiv_regel("KAUFEN", 0.35)
+        assert "unterdurchschnittlich" in grenze
+        assert "nur bei herausragender Bestätigung" in grenze
+
+    def test_schwelle_050_unten_und_grenze(self):
+        """0.49 → Regime 3, 0.50 → Regime 4 (solide)."""
+        unten = _hitrate_direktiv_regel("KAUFEN", 0.49)
+        assert "unterdurchschnittlich" in unten
+
+        grenze = _hitrate_direktiv_regel("KAUFEN", 0.50)
+        assert "solide — normale Kalibrierung" in grenze
+
+    def test_floor_anzeige_unter_schwellenrand(self):
+        """0.349 liegt im Regime 2 und wird als 34% angezeigt (floor, nicht 35%)."""
+        regel = _hitrate_direktiv_regel("KAUFEN", 0.349)
+        assert "KAUFEN-Hit-Rate 34%" in regel
+        assert "überwiegend unzuverlässig" in regel
+
+    def test_ungueltige_werte_leer(self):
+        """None/String-Müll/NaN/inf → leerer String (crasht nie)."""
+        assert _hitrate_direktiv_regel("KAUFEN", None) == ""
+        assert _hitrate_direktiv_regel("KAUFEN", "Müll") == ""
+        assert _hitrate_direktiv_regel("KAUFEN", float("nan")) == ""
+        assert _hitrate_direktiv_regel("KAUFEN", float("inf")) == ""
+
+
+class TestHitrateDirektivBlock:
+    """Testet den Direktiv-Block: nur bei echter Hit-Rate, sonst kein Rauschen."""
+
+    def test_proxy_kein_block(self):
+        """Proxy-Quelle → kein Direktiv-Block (kein Rauschen im Prompt)."""
+        block = _hitrate_direktiv_block({"KAUFEN": {"hit_rate": 0.0}}, kal_quelle="proxy")
+        assert block == ""
+
+    def test_echte_hit_rate_block_mit_regeln(self):
+        """Echte Hit-Rate → Block mit Header, Regeln und strikter Aufforderung."""
+        block = _hitrate_direktiv_block(
+            {
+                "KAUFEN": {"hit_rate": 0.0, "n": 22},
+                "VERKAUFEN": {"hit_rate": 0.40, "n": 5},
+            },
+            kal_quelle="echte_hit_rate",
+        )
+        assert block.startswith(">>> HIT-RATE-DIREKTIV (basierend auf der echten Track-Record-Historie) <<<")
+        assert "KAUFEN-Hit-Rate 0%" in block
+        assert "KEIN 'STARK KAUFEN'" in block
+        assert "VERKAUFEN-Hit-Rate 40%" in block
+        assert "Befolge diese Restriktionen strikt bei deiner Rating-/Konfidenzwahl." in block
+
+    def test_leere_oder_unvollstaendige_daten_kein_block(self):
+        """Keine per-action-Daten oder fehlende hit_rate → kein Block."""
+        assert _hitrate_direktiv_block({}, kal_quelle="echte_hit_rate") == ""
+        assert (
+            _hitrate_direktiv_block({"KAUFEN": {"hit_rate": None}}, kal_quelle="echte_hit_rate")
+            == ""
+        )
+
+
+class TestFeedbackHitrateDirektiv:
+    """End-to-End: build_feedback_context setzt den Direktiv prominent voran."""
+
+    def test_direktiv_am_anfang_bei_echter_hit_rate_null(self, tmp_path, monkeypatch):
+        """KAUFEN-Hit-Rate 0% → Direktiv-Block zuerst, mit KEIN-'STARK KAUFEN'-Regel."""
+        cal_data = _make_cal_json(
+            hit_rate_gesamt=0.0,
+            nach_aktion={
+                "KAUFEN": {"n": 22, "hit_rate": 0.0, "avg_confidence": 0.80},
+                "VERKAUFEN": {"n": 5, "hit_rate": 0.40, "avg_confidence": 0.60},
+            },
+        )
+        _write_cal_json(tmp_path, cal_data)
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
+
+        rows = [_make_row(ticker=f"T{i}", confidence="4") for i in range(5)]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        assert result.startswith(">>> HIT-RATE-DIREKTIV")
+        assert "KEIN 'STARK KAUFEN'" in result
+        assert "max 3/5" in result
+        # Direktiv steht VOR dem Track-Record-Block
+        assert result.index("HIT-RATE-DIREKTIV") < result.index("=== DEIN TRACK-RECORD")
+
+    def test_kein_direktiv_bei_proxy(self, tmp_path, monkeypatch):
+        """Ohne echte Hit-Rate (Proxy) → kein Direktiv-Block im Feedback."""
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
+
+        rows = [_make_row(ticker=f"T{i}", confidence="4", final_decision="GENEHMIGT") for i in range(5)]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        assert "HIT-RATE-DIREKTIV" not in result
+        # Bestehende Struktur bleibt erhalten
+        assert "=== DEIN TRACK-RECORD" in result
+        assert "Konfidenz-Kalibrierung (Proxy)" in result
+
+    def test_direktiv_reihenfolge_beider_aktionen(self, tmp_path, monkeypatch):
+        """KAUFEN-Regel vor VERKAUFEN-Regel, dann Track-Record-Block."""
+        cal_data = _make_cal_json(
+            hit_rate_gesamt=0.10,
+            nach_aktion={
+                "KAUFEN": {"n": 10, "hit_rate": 0.10, "avg_confidence": 0.70},
+                "VERKAUFEN": {"n": 6, "hit_rate": 0.15, "avg_confidence": 0.55},
+            },
+        )
+        _write_cal_json(tmp_path, cal_data)
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
+
+        rows = [_make_row(ticker=f"T{i}", confidence="4") for i in range(5)]
+        path = _write_journal(tmp_path, rows)
+        result = build_feedback_context(path)
+
+        assert result.index("KAUFEN-Hit-Rate 10%") < result.index("VERKAUFEN-Hit-Rate 15%")
+        assert result.index("HIT-RATE-DIREKTIV") < result.index("=== DEIN TRACK-RECORD")
+        assert "KEIN 'STARK VERKAUFEN'" in result

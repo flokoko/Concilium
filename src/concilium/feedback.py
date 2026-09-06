@@ -473,6 +473,84 @@ def _format_score(val: float | None) -> str:
     return f"{val:.2f}"
 
 
+# --------------------------------------------------------------------------- #
+# Phase 6 — Hit-Rate-Direktiv (prominente Verhaltensvorgabe aus der echten Historie)
+# --------------------------------------------------------------------------- #
+
+
+def _hitrate_direktiv_regel(aktion: str, hit_rate: Any) -> str:
+    """Übersetzt die echte Hit-Rate einer Aktion in eine Direktiv-Regel.
+
+    Schwellen: <0.20 / 0.20-<0.35 / 0.35-<0.50 / >=0.50 — als gemeinsame
+    Referenz konsistent mit der deterministischen Dämpfung
+    (``agents._should_dampen_stark``). Crasht nie (immer ein String).
+    """
+    try:
+        hr = float(hit_rate)
+        if not math.isfinite(hr):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+
+    # Anzeige: floor (nie über die nächste Schwelle hinaus runden — sonst
+    # würde z.B. 0.349 als "35%" angezeigt, obwohl die <0.35-Regel gilt).
+    pct = math.floor(hr * 100)
+
+    if hr < 0.20:
+        return (
+            f"{aktion}-Hit-Rate {pct}%: Deine {aktion}-Empfehlungen haben historisch "
+            f"fast nie getroffen. KEIN 'STARK {aktion}', nur '{aktion}' mit stark "
+            "reduzierter Konfidenz (max 3/5) und besonders kritischer Ziel-/Stop-Setzung."
+        )
+    if hr < 0.35:
+        return (
+            f"{aktion}-Hit-Rate {pct}%: überwiegend unzuverlässig. Kein "
+            f"'STARK {aktion}'; '{aktion}' nur bei sehr klarer Fundamental-These, "
+            "Konfidenz max 4/5."
+        )
+    if hr < 0.50:
+        return (
+            f"{aktion}-Hit-Rate {pct}%: unterdurchschnittlich. "
+            f"'STARK {aktion}' nur bei herausragender Bestätigung."
+        )
+    return f"{aktion}-Hit-Rate {pct}%: solide — normale Kalibrierung."
+
+
+def _hitrate_direktiv_block(
+    kalibrierung_pro_aktion: dict[str, dict[str, Any]] | None,
+    *,
+    kal_quelle: str,
+) -> str:
+    """Baut den prominenten HIT-RATE-DIREKTIV-Block für den Feedback-Kontext.
+
+    Nur bei ``kal_quelle == "echte_hit_rate"`` — bei Proxy-Fallback wird
+    absichtlich KEIN Block erzeugt (kein Rauschen im Prompt). Der Block
+    steht am ANFANG des Feedback-Blocks (vor '=== DEIN TRACK-RECORD ==='),
+    damit die Verhaltensvorgabe maximal prominent ist. Crasht nie.
+    """
+    try:
+        if kal_quelle != "echte_hit_rate" or not kalibrierung_pro_aktion:
+            return ""
+        regel_lines: list[str] = []
+        for aktion in ("KAUFEN", "VERKAUFEN"):
+            entry = kalibrierung_pro_aktion.get(aktion)
+            if not isinstance(entry, dict):
+                continue
+            regel = _hitrate_direktiv_regel(aktion, entry.get("hit_rate"))
+            if regel:
+                regel_lines.append(regel)
+        if not regel_lines:
+            return ""
+        return (
+            ">>> HIT-RATE-DIREKTIV (basierend auf der echten Track-Record-Historie) <<<\n"
+            + "\n".join(regel_lines)
+            + "\nBefolge diese Restriktionen strikt bei deiner Rating-/Konfidenzwahl."
+        )
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.debug("Hit-Rate-Direktiv konnte nicht erstellt werden: %s", exc)
+        return ""
+
+
 def build_feedback_context(
     journal_file: str | None = None,
     *,
@@ -503,6 +581,14 @@ def build_feedback_context(
             return ""
 
         stats = _compute_stats(rows, min_decisions=min_decisions)
+
+        # Phase 6: Prominenter Hit-Rate-Direktiv (nur bei echter Hit-Rate).
+        # Steht am ANFANG des Blocks — vor '=== DEIN TRACK-RECORD ===' — als
+        # scharfe, handlungsorientierte Verhaltensvorgabe für den Trader.
+        direktiv_block = _hitrate_direktiv_block(
+            stats.get("kalibrierung_pro_aktion"),
+            kal_quelle=str(stats.get("kalibrierung", {}).get("quelle", "proxy")),
+        )
 
         n = stats["n_total"]
         a = stats["actions"]
@@ -549,6 +635,10 @@ def build_feedback_context(
             f"KAUFEN-Empfehlungen final genehmigt: {kauf_pct} %",
             kalibrierung_line,
         ]
+
+        if direktiv_block:
+            lines.insert(0, direktiv_block)
+            lines.insert(1, "")  # Leerzeile zwischen Direktiv und Track-Record
 
         # --- Kalibrierung pro Aktion (nur wenn Daten vorhanden) --- #
         # Phase 1: nur echte Trades (KAUFEN/VERKAUFEN) — HALTEN ist kein Trade.

@@ -282,6 +282,89 @@ class TestShouldDampenStark:
             assert _should_dampen_stark("KAUFEN") is True
 
 
+class TestShouldDampenStarkHitrate:
+    """Phase 6: Hit-Rate-Schwelle — gemeinsame Referenz mit der Prompt-Direktive.
+
+    Bei echter Hit-Rate < 0.35 (Schwellen 0.20/0.35/0.50 aus feedback.py) ist
+    'STARK …' verboten — die deterministische Dämpfung erzwingt das auch dann,
+    wenn die Konfidenz zufällig gut kalibriert wäre.
+    """
+
+    def test_true_bei_hit_rate_unter_035_trotz_guter_kalibrierung(self, tmp_path):
+        """Hit-Rate 0.30, gap = 0.0 → True (Hit-Rate-Schwelle greift)."""
+        _write_calibration_json(
+            tmp_path,
+            hit_rates={"KAUFEN": 0.30},
+            avg_confidences={"KAUFEN": 0.30},
+            hit_rate_gesamt=0.30,
+            anzahl_entscheidungen=10,
+        )
+        with patch.dict(os.environ, {"CONCILIUM_STATE_DIR": str(tmp_path / "state")}):
+            # gap = 0.0 (nicht überkonfident), aber Hit-Rate 30% < 35% → True
+            assert _should_dampen_stark("KAUFEN") is True
+
+    def test_true_bei_hit_rate_0(self, tmp_path):
+        """KAUFEN-Hit-Rate 0% → True (Dokumentfall 'dokumentiert überkonfident')."""
+        _write_calibration_json(
+            tmp_path,
+            hit_rates={"KAUFEN": 0.0},
+            avg_confidences={"KAUFEN": 0.0},
+            hit_rate_gesamt=0.0,
+            anzahl_entscheidungen=10,
+        )
+        with patch.dict(os.environ, {"CONCILIUM_STATE_DIR": str(tmp_path / "state")}):
+            assert _should_dampen_stark("KAUFEN") is True
+
+    def test_false_bei_hit_rate_0_ohne_action(self, tmp_path):
+        """Ohne action-Parameter greift die Hit-Rate-Schwelle nicht (nur per-action)."""
+        _write_calibration_json(
+            tmp_path,
+            hit_rates={"KAUFEN": 0.0},
+            avg_confidences={"KAUFEN": 0.0},
+            hit_rate_gesamt=0.0,
+            anzahl_entscheidungen=10,
+        )
+        with patch.dict(os.environ, {"CONCILIUM_STATE_DIR": str(tmp_path / "state")}):
+            # Gesamt: gap = 0.0 → False; Hit-Rate-Check nur mit action
+            assert _should_dampen_stark() is False
+
+    def test_false_bei_hit_rate_grenze_035(self, tmp_path):
+        """Hit-Rate genau 0.35 → Schwelle nicht unterschritten → False (gap = 0)."""
+        _write_calibration_json(
+            tmp_path,
+            hit_rates={"KAUFEN": 0.35},
+            avg_confidences={"KAUFEN": 0.35},
+            hit_rate_gesamt=0.35,
+            anzahl_entscheidungen=10,
+        )
+        with patch.dict(os.environ, {"CONCILIUM_STATE_DIR": str(tmp_path / "state")}):
+            assert _should_dampen_stark("KAUFEN") is False
+
+    def test_false_bei_hit_rate_ueber_035(self, tmp_path):
+        """Hit-Rate 0.60, gap = 0.0 → False (solide Kalibrierung)."""
+        _write_calibration_json(
+            tmp_path,
+            hit_rates={"KAUFEN": 0.60},
+            avg_confidences={"KAUFEN": 0.60},
+            hit_rate_gesamt=0.60,
+            anzahl_entscheidungen=10,
+        )
+        with patch.dict(os.environ, {"CONCILIUM_STATE_DIR": str(tmp_path / "state")}):
+            assert _should_dampen_stark("KAUFEN") is False
+
+    def test_verkaufen_hit_rate_unter_035(self, tmp_path):
+        """VERKAUFEN mit Hit-Rate 0.10 → True (analog zu KAUFEN)."""
+        _write_calibration_json(
+            tmp_path,
+            hit_rates={"VERKAUFEN": 0.10},
+            avg_confidences={"VERKAUFEN": 0.10},
+            hit_rate_gesamt=0.10,
+            anzahl_entscheidungen=10,
+        )
+        with patch.dict(os.environ, {"CONCILIUM_STATE_DIR": str(tmp_path / "state")}):
+            assert _should_dampen_stark("VERKAUFEN") is True
+
+
 # --------------------------------------------------------------------------- #
 # Tests: _dampen_stark_rating
 # --------------------------------------------------------------------------- #

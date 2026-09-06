@@ -1807,6 +1807,11 @@ def _smooth_weight(hit_rate: float) -> float:
 
 _DAMPEN_MIN_DECISIONS = 5
 _DAMPEN_GAP_THRESHOLD = 0.15
+# Phase 6: Gemeinsame Schwellen-Referenz mit der Prompt-Hit-Rate-Direktive
+# (feedback.py, 0.20/0.35/0.50): Bei echter Hit-Rate < 0.35 ist 'STARK …'
+# verboten — die deterministische Dämpfung erzwingt das (hat Vorrang vor dem
+# Prompt, das nur die zusätzliche, verhaltensleitende Ebene ist).
+_DAMPEN_HITRATE_MAX = 0.35
 
 
 def _should_dampen_stark(action: str | None = None) -> bool:
@@ -1819,7 +1824,11 @@ def _should_dampen_stark(action: str | None = None) -> bool:
     Gibt ``True`` zurück, wenn die Kalibrierungs-Tendenz überkonfident ist:
     - Gesamt-Gap (Ø-Confidence - hit_rate_gesamt) > 0.15, ODER
     - Gap der betroffenen Aktion (avg_confidence - hit_rate) > 0.15
-      (nur geprüft, wenn ``action`` angegeben, z.B. "KAUFEN" oder "VERKAUFEN").
+      (nur geprüft, wenn ``action`` angegeben, z.B. "KAUFEN" oder "VERKAUFEN"),
+      ODER
+    - Echte Hit-Rate der betroffenen Aktion < 0.35 (Phase 6: gemeinsame
+      Schwellen mit der Prompt-Hit-Rate-Direktive in feedback.py —
+      0.20/0.35/0.50; bei unzuverlässiger Historie ist 'STARK …' verboten).
 
     Gibt ``False`` zurück bei fehlender/zu alter/ungültiger JSON oder
     anzahl_entscheidungen < 5. Crasht nie.
@@ -1882,6 +1891,11 @@ def _should_dampen_stark(action: str | None = None) -> bool:
                     gap = avg_conf - hit_rate
                     if gap > _DAMPEN_GAP_THRESHOLD:
                         return True
+                # Phase 6: Konsistenz mit der Prompt-Hit-Rate-Direktive —
+                # bei echter Hit-Rate < 0.35 ist 'STARK …' verboten
+                # (Schwellen 0.20/0.35/0.50 als gemeinsame Referenz).
+                if isinstance(hit_rate, (int, float)) and 0 <= hit_rate < _DAMPEN_HITRATE_MAX:
+                    return True
 
         return False
     except Exception as exc:  # noqa: BLE001 — crasht nie
