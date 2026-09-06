@@ -180,3 +180,96 @@ Klein aber sauber für langfristige Nutzung.
   mehr. Pipeline ruft resolve_pending_reflections im Normal-Modus (journal=True)
   vor build_reflection_context auf; --review (journal=False) löst nichts auf.)
 - [ ] C7: Journal-Rotation (max_entries)
+
+---
+
+# 🔍 NACHTRAG — Hedgefonds-Refactor-Audit (HEAD b50ff2e, 06.09.)
+
+**Audit-Bereich:** Die 7 neuen Commits `66dd93a…b50ff2e` (phase1-6: Technik=Timing, relatives Momentum,
+Vol-Cap, Einstiegs-Level, 2y-Backtest, Hit-Rate-Direktiv) — nicht im Original-Review (HEAD 99a41f4) enthalten.
+**Tests:** 1785 passed, 2 skipped (Baseline grün). Beide Findings per Skript reproduziert.
+
+## D1. 🔴 Technik-Signal wird NACH Trade-Revision doppelt skaliert (KAUFEN-Position schrumpft quadratisch)
+
+**Datei:** `src/concilium/pipeline.py` (Schritt 5c' → `_apply_technik_signal`, Z. 536) + `src/concilium/agents.py`
+(`_apply_technik_signal` / `_technik_signal_basis`, Z. 1300ff)
+
+**Problem:** `_apply_technik_signal` ist NUR idempotent, wenn `_technik_signal_basis` (die beim ersten Apply
+gespeicherte Original-Positionsgröße) im **selben dict** liegt. Das gilt im `trader()`-Pfad (in-place) und im
+Ensemble-Safety-Net (`result = dict(basis_run)` — Basis wird vererbt). Aber **`trade_revision()` baut ein frisches
+dict** aus dem LLM-Call auf, das die Metadaten des Original-Trades NICHT erbt. Pipeline-Schritt 5c' ruft
+`_apply_technik_signal` auf dem revidierten Trade erneut auf → die Basis fehlt → `_technik_signal_basis` fällt auf
+`positionsanteil` zurück (der bereits skalierte Wert) → es skaliert ein zweites Mal.
+
+> ⚠️ Ein Detail macht das reproduzierbar: `trade_revision` bekommt den skalierten Original-Trade (Schritt 4) als
+> Input und bestätigt die Position typischerweise unverändert („Position X bestätigt“). Der revidierte Trade trägt
+> also denselben skalierten `positionsanteil`, aber KEINE Basis — genau der Pfad, der 5c' doppelt auslöst.
+
+**Reproduktion (per Skript verifiziert, Faktor 0.3 bei Kurs 10% unter SMA200):**
+- Original-LLM-Position: `10.0`
+- trader() wendet Signal → `3.0` (Basis gespeichert = 10.0, korrekt)
+- trade_revision erzeugt frisches dict mit `positionsanteil=3.0`, KEINE Basis
+- Pipeline 5c' wendet Signal erneut → Basis fällt auf 3.0 zurück → neuer = `3.0*0.3 = 0.9` ❌
+- **Erwartet:** `3.0` (idempotent). **Tatsächlich:** `0.9` — doppelt skaliert.
+
+**Live-Wirkung:** Jeder KAUFEN-Trade unter SMA200 (genau der Fall, für den das Signal gedacht ist) wird bei aktiver
+Trade-Revision doppelt gekappt (10→3→0.9 statt 10→3). Die Position erscheint im Report als 0.9% – ein sachlich
+falscher, viel zu kleiner Wert, der ins Journal und an den PM geht.
+
+**Warum die Tests das nicht fangen:** `tests/test_technik_signal.py::TestPipelineSignalNachRevision` mockt `trader`
+(`MagicMock(return_value=_make_trade("KAUFEN"))`) — die Signal-Anwendung in Schritt 4 wird übersprungen, der
+`_technik_signal_basis`-Key fehlt im Original-Trade von vornherein. Der Test startet also bereits „ohne Basis“
+und prüft nur die einfache Skalierung 5→1.5, nicht den realen Doppel-Pass.
+
+**Fix:** In `pipeline.py` Schritt 5c' die Basis aus `_technik_signal_basis` des VOR-Revisions-Trades vor der
+Signal-Anwendung in den revidierten Trade kopieren, ODER `_apply_technik_signal` so ändern, dass es einen
+optionalen `basis_überschreibung`-Parameter bekommt (pipeline reicht `trade_original.get("_technik_signal_basis")`
+durch). Konkret vor dem `_apply_technik_signal(trade, analysts)`-Aufruf:
+```python
+if isinstance(trade, dict) and trade.get("_technik_signal_basis") is None:
+    orig_basis = (result.get("trade_original") or {}).get("_technik_signal_basis")
+    if orig_basis is not None:
+        trade["_technik_signal_basis"] = orig_basis
+_apply_technik_signal(trade, analysts)
+```
+**Risiko ungefixt:** Systematisch falsche, zu kleine Positionsgrößen für ALLE KAUFEN-Trades unter SMA200 mit
+Trade-Revision → Portfolio-Allokation deutlich untergewichtet, Track-Record-Verzerrung.
+
+## D2. 🟡 Relatives Momentum ignoriert gepinntes Datum `--date` (S&P-500-Wert aus heute)
+
+**Datei:** `src/concilium/data.py` (`collect_ticker_data` Z. 2130-2140 + `_get_sp500_momentum` Z. ~1780)
+
+**Problem:** Beim gepinnten Modus `--date YYYY-MM-DD` wird die Ticker-Historie auf `as_of` beschränkt — `momentum_6m`
+des Tickers stammt also aus dem historischen Fenster. Aber `_get_sp500_momentum()` holt den S&P-500-Wert über den
+**Tages-Cache mit `today_key` (heute)** und durchläuft `yf.Ticker("^GSPC").history(period="1y")` ab heute — das
+`as_of`-Datum wird nicht durchgereicht.
+
+**Reproduktion (per Skript-Logik verifiziert):** `collect_ticker_data("RWE.DE", as_of="2026-06-01")` liefert
+`momentum_6m` = 6M-Rendite bis 2026-06-01 (historisch), aber `sp500_momentum_6m` = S&P-6M-**jetzt**. Das relative
+Momentum (`momentum_6m - sp500_momentum_6m`) mischt also ein historisches Ticker-Signal mit einem heutigen
+Benchmark-Signal → Look-ahead-artiger Fehler im Backtest mit gepinntem Datum.
+
+**Einschränkung (vgl. Skill „Analyse-Datum pinnen"):** Dasselbe Grundproblem gilt bereits für andere
+Fundamentals/Makro-Felder (bewusst dokumentiert: „Fundamentals/Makro/News bleiben aktuell"). Aber **Momentum ist ein
+Kurs-Signal** — der ganze Sinn von `--date` bei Kursen ist, Look-ahead zu verhindern. Ein Kurs-Signal (Momentum
+Ticker) mit einem heutigen Benchmark-Kurs zu verrechnen ist ein echter Konsistenzbruch, während z. B. Fundamentaldaten
+(zwischenzeitliche Earnings) bewusst getrennt behandelt werden.
+
+**Fix:** `_get_sp500_momentum(as_of=None)` einen optionalen `as_of`-Parameter geben; bei gesetztem Datum die
+`^GSPC`-Historie auf `<= as_of` beschränken (analog zur Ticker-Historie) und den Cache-Key um `as_of` erweitern
+(vgl. bestehender `_SP500_MOMENTUM`-Key). `collect_ticker_data` leitet `as_of` durch. Ohne `--date` bleibt das
+Verhalten identisch.
+**Risiko ungefixt:** Backtests/`--date`-Analysen von Aktien mit relativem Momentum verzerrt (Benchmark aus falscher
+Zeitachse). Da das Momentum-Signal (Phase 2) neu und für Timing relevant ist, sollte es nicht durch einen
+Look-ahead-Komponenten-Preis verfälscht werden.
+
+---
+
+### ✅ Verifiziert OK (kein Bug) in der neuen Phase
+- **phase3 Vol-Cap** (`_cap_position_by_volatility`): kappt nur KAUFEN, nur wenn `positionsgröße_rechnerisch_pct`
+  vorhanden, senkt nur (hebt nie an). Sauber.
+- **phase4 `einstiegs_level`**: Schema/Journal/Report konsistent, `anyOf number/null`, keine Downstream-Crashes.
+- **phase5 500-Tage-Cap + 2y-Historie**: Fenster-Cap vor SMA-Berechnung, Look-ahead-Check bleibt korrekt.
+- **phase6 Hit-Rate-Dämpfung** in `_should_dampen_stark` (hit_rate < 0.35 → STARK verboten) + Prompt-Direktiv:
+  konsistente Schwellen, `_dampen_stark_rating` wird jetzt auch in `trade_revision` (Z. 2720) angewandt — B2 vom
+  Ur-Review ist damit gefixt.
