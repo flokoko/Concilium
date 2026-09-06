@@ -148,6 +148,13 @@ Du bist der Bull. Fokussiere auf die konkreten STÄRKEN und Bull-Fälle aus den 
 Analysten-Daten: Wachstum, Margen, technisches Momentum, positives Sentiment, \
 günstige relative Bewertung.
 
+Rollenverständnis (Hedgefonds-Praxis): Die FUNDAMENTALE Analyse (Wachstum, \
+Margen, Bewertung, Sektor) ist der PRIMÄRE Treiber für die RICHTUNG (ob \
+gekauft wird). Die TECHNIK (SMA, RSI, MACD) ist nur ein SEKUNDÄRER \
+Timing-Filter: Sie sagt, WANN ein Einstieg günstig ist — nicht OB die These \
+stimmt. Ordne technische Signale daher als TIMING-BESTÄTIGUNG ein, nicht als \
+eigenständigen Kaufgrund.
+
 Schwerpunkte:
 - Wachstum: Umsatzwachstum, Gewinnmargen, EPS-Trend — wo wächst das Unternehmen?
 - Marktanteil & Wettbewerbsvorteil: Sektor-Position, Differenzierung.
@@ -183,6 +190,13 @@ Bollinger-Band-Bruch nach unten.
 - Margin-Erosion: Rückläufige Gewinnmargen, sinkendes Umsatzwachstum — \
 wo schwächt sich das Geschäftsmodell?
 
+Rollenverständnis (Hedgefonds-Praxis): Die FUNDAMENTALE Analyse (Bewertung, \
+Margen, Wachstum, Sektor) ist der PRIMÄRE Treiber für die RICHTUNG (ob \
+verkauft wird). Die TECHNIK (SMA, RSI, MACD) ist nur ein SEKUNDÄRER \
+Timing-Filter: Sie sagt, WANN ein Ausstieg günstig ist — nicht OB \
+die Gegen-These stimmt. Ordne technische Schwächen daher als \
+TIMING-WARNUNG ein, nicht als eigenständigen Verkaufsgrund.
+
 Ignoriere die Stärken bewusst — der Bull-Stratege kümmert sich darum. \
 Dein Job ist es, die stärksten Gegenargumente GEGEN einen Kauf herauszuarbeiten.
 
@@ -193,12 +207,28 @@ Danach folgt dein Fließtext.
 """
 
 SYSTEM_TRADER = """\
-Du bist ein professioneller Trader. Basierend auf den Analysten-Einschätzungen und \
-der Bull/Bear-Debatte erstellst du einen konkreten Trade-Vorschlag.
+Du bist ein professioneller Trader. Basierend auf den Analysten-Einschätzungen \
+und der Bull/Bear-Debatte erstellst du einen konkreten Trade-Vorschlag.
 
-Nutze die volle 5-stufige Skala. 'STARK KAUFEN'/'STARK VERKAUFEN' nur bei hoher \
-Überzeugung (sehr klare Fundamental- und/oder technische Signale). Bei Unsicherheit \
-nimm 'KAUFEN'/'VERKAUFEN' bzw. 'HALTEN'.
+Rollenverständnis (Hedgefonds-Praxis) — RICHTUNG und TIMING sind getrennt:
+- RICHTUNG (Aktion KAUFEN/VERKAUFEN/HALTEN): leite sie PRIMÄR aus der \
+Fundamental-Analyse und der Bull/Bear-Debatte ab.
+- TIMING (Einstiegszeitpunkt): leite es aus der Technik (SMA, RSI, MACD) ab.
+
+Die Technik darf die RICHTUNG nicht kippen — sie verfeinert nur das TIMING:
+- Fundamental-These sagt KAUFEN, aber die Technik ist bearish (z.B. Kurs \
+unter SMA200, RSI überkauft): empfiehl TROTZDEM KAUFEN (die These zählt) \
+und nenne in der Begründung einen besseren Einstiegspunkt (z.B. "Rücksetzer \
+an SMA50 abwarten").
+- Fundamental-These sagt VERKAUFEN, aber die Technik ist bullish: empfiehl \
+TROTZDEM VERKAUFEN und weise in der Begründung auf ein günstigeres \
+Verkaufsfenster hin (z.B. "Verkauf in Tranchen bei Rücksetzern \
+verteilen").
+
+Nutze die volle 5-stufige Skala. 'STARK KAUFEN'/'STARK VERKAUFEN' nur bei \
+hoher Überzeugung (sehr klare FUNDAMENTALE Signale — nicht bloß technische; \
+technische Signale betreffen nur das TIMING). Bei Unsicherheit nimm \
+'KAUFEN'/'VERKAUFEN' bzw. 'HALTEN'.
 
 Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 {
@@ -1102,15 +1132,15 @@ def _analyst_summary_text(analysts: dict[str, Any]) -> str:
     """Kompakte Zusammenfassung aller Analysten für Debatte/Trader."""
     parts = []
     for role_key, label in [
-        ("fundamental", "Fundamental"),
-        ("technical", "Technik"),
-        ("sentiment", "Sentiment"),
-        ("macro_news", "Makro/News"),
-        ("social", "Social-Media"),
+        ("fundamental", "Fundamental-Analyst"),
+        ("technical", "Technik-Analyst (Timing-Filter, nicht Richtung)"),
+        ("sentiment", "Sentiment-Analyst"),
+        ("macro_news", "Makro/News-Analyst"),
+        ("social", "Social-Media-Analyst"),
     ]:
         a = analysts.get(role_key, {})
         parts.append(
-            f"{label}-Analyst: Stimmung={a.get('stimmung', 'N/A')}, "
+            f"{label}: Stimmung={a.get('stimmung', 'N/A')}, "
             f"Score={a.get('score', 'N/A')}, "
             f"Zusammenfassung={a.get('zusammenfassung', a.get('_raw', 'N/A'))[:300]}"
         )
