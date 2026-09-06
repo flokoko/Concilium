@@ -32,6 +32,12 @@ TRADE_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "enum": ["STARK KAUFEN", "KAUFEN", "HALTEN", "VERKAUFEN", "STARK VERKAUFEN"],
                 },
+                "einstiegs_level": {
+                    "anyOf": [
+                        {"type": "number"},
+                        {"type": "null"},
+                    ],
+                },
                 "zielkurs": {
                     "anyOf": [
                         {"type": "number"},
@@ -266,8 +272,22 @@ def _validate_against_schema(value: Any, schema: dict[str, Any]) -> list[str]:
         return [f"Value {value!r} matched none of anyOf options"]
 
     if not isinstance(value, dict):
-        if "type" in schema and schema["type"] == "object":
+        expected_type = schema.get("type")
+        if expected_type == "object":
             return [f"Expected object, got {type(value).__name__}"]
+        if expected_type is not None:
+            # Skalare Werte werden gegen den erwarteten Typ geprüft (statt
+            # stillschweigend zu akzeptieren) — sonst schlüpft z.B. ein
+            # String in ein anyOf-Feld mit number|null durch.
+            if not _check_type(value, expected_type):
+                return [f"Expected {expected_type}, got {type(value).__name__}"]
+            if expected_type in ("integer", "number"):
+                if "minimum" in schema and value < schema["minimum"]:
+                    return [f"Value {value} < minimum {schema['minimum']}"]
+                if "maximum" in schema and value > schema["maximum"]:
+                    return [f"Value {value} > maximum {schema['maximum']}"]
+            if "enum" in schema and value not in schema["enum"]:
+                return [f"Value {value!r} not in enum {schema['enum']}"]
         return []
 
     obj_schema = schema.get("properties", {})

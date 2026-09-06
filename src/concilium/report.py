@@ -150,6 +150,9 @@ def _management_summary(
         stop_loss = trade.get("stop_loss")
         if stop_loss is not None:
             trade_parts.append(f"Stop {_fmt(stop_loss)}")
+        einstiegs_level = trade.get("einstiegs_level")
+        if einstiegs_level is not None:
+            trade_parts.append(f"Einstiegs-Level (Limit-Order): {_fmt(einstiegs_level)}")
 
         lines.append(f"**Urteil:** {emoji} {entscheidung} — {', '.join(trade_parts)}")
 
@@ -984,6 +987,10 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             )
         lines.append(f"**Zielkurs:** {_fmt(trade.get('zielkurs'))}")
         lines.append(f"**Stop-Loss:** {_fmt(trade.get('stop_loss'))}")
+        if trade.get("einstiegs_level") is not None:
+            lines.append(
+                f"**Einstiegs-Level (Limit-Order):** {_fmt(trade.get('einstiegs_level'))}"
+            )
         lines.append(f"**Positionsanteil:** {trade.get('positionsanteil', 'N/A')} %")
         vol_cap = _vol_cap_hinweis(trade)
         if vol_cap:

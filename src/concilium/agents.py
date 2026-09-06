@@ -222,6 +222,15 @@ Rollenverständnis (Hedgefonds-Praxis) — RICHTUNG und TIMING sind getrennt:
 Fundamental-Analyse und der Bull/Bear-Debatte ab.
 - TIMING (Einstiegszeitpunkt): leite es aus der Technik (SMA, RSI, MACD) ab.
 
+Limit-Order-Disziplin: Gib das Feld 'einstiegs_level' an — den konkreten \
+Limit-Order-Preis (Zahl oder null), zu dem der Einstieg idealerweise \
+ausgeführt wird:
+- Bei KAUFEN/STARK KAUFEN: ein günstigerer Einstiegspunkt an einem \
+Support-Level (z.B. SMA50, Bollinger-Unterband, Rücksetzer-Level). Ist \
+der aktuelle Kurs bereits attraktiv, darf einstiegs_level dem aktuellen \
+Kurs entsprechen. Nutze die technischen Daten für das konkrete Level.
+- Bei HALTEN/VERKAUFEN/STARK VERKAUFEN: einstiegs_level = null.
+
 Die Technik darf die RICHTUNG nicht kippen — sie verfeinert nur das TIMING:
 - Fundamental-These sagt KAUFEN, aber die Technik ist bearish (z.B. Kurs \
 unter SMA200, RSI überkauft): empfiehl TROTZDEM KAUFEN (die These zählt) \
@@ -243,6 +252,7 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
   "aktion": "STARK KAUFEN" | "KAUFEN" | "HALTEN" | "VERKAUFEN" | "STARK VERKAUFEN",
   "zielkurs": "Zielkurs als Zahl oder null",
   "stop_loss": "Stop-Loss als Zahl oder null",
+  "einstiegs_level": "Limit-Order-Preis für den Einstieg als Zahl oder null (bei KAUFEN: Support-Level wie SMA50/Bollinger-Unterband/Rücksetzer oder aktueller Kurs; sonst null)",
   "positionsanteil": "Empfohlener Positionsanteil in % (z.B. 5)",
   "begründung": "2-4 Sätze Begründung auf Deutsch",
   "zeithorizont": "Kurzfristig" | "Mittelfristig" | "Langfristig"
@@ -376,6 +386,7 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
   "aktion": "STARK KAUFEN" | "KAUFEN" | "HALTEN" | "VERKAUFEN" | "STARK VERKAUFEN",
   "zielkurs": "Zielkurs als Zahl oder null",
   "stop_loss": "Stop-Loss als Zahl oder null",
+  "einstiegs_level": "Limit-Order-Preis für den Einstieg als Zahl oder null — aus dem Original-Trade übernehmen oder anpassen (bei KAUFEN: Support-Level oder aktueller Kurs; bei HALTEN/VERKAUFEN: null)",
   "positionsanteil": "Empfohlener Positionsanteil in % (z.B. 5)",
   "begründung": "2-4 Sätze Begründung auf Deutsch",
   "zeithorizont": "Kurzfristig" | "Mittelfristig" | "Langfristig"
@@ -1984,6 +1995,7 @@ def ensemble_trader(
             "rating": "HALTEN",
             "zielkurs": None,
             "stop_loss": None,
+            "einstiegs_level": None,
             "positionsanteil": 0,
             "begründung": "Ensemble: Alle Runs fehlgeschlagen.",
             "zeithorizont": "N/A",

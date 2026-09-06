@@ -32,6 +32,9 @@ JOURNAL_HEADER = [
     "rating",
     "target",
     "stop",
+    # einstiegs_level: Limit-Order-Preis für den Einstieg (Phase 4, optional —
+    # leer bei HALTEN/VERKAUFEN oder Legacy-Zeilen vor Phase 4)
+    "einstiegs_level",
     "position_pct",
     "final_decision",
     "confidence",
@@ -297,6 +300,7 @@ def append_decision(
             "rating": trade.get("rating", ""),
             "target": trade.get("zielkurs", ""),
             "stop": trade.get("stop_loss", ""),
+            "einstiegs_level": trade.get("einstiegs_level", ""),
             "position_pct": trade.get("positionsanteil", ""),
             "final_decision": final.get("entscheidung", ""),
             "confidence": final.get("confidence", ""),
