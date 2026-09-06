@@ -56,6 +56,26 @@ def _kompakte_zahl(val: Any) -> str | None:
     return repr(fval)
 
 
+def _vol_cap_hinweis(trade: dict[str, Any]) -> str | None:
+    """Hinweis-Text, wenn die Positionsgröße am Volatility-Targeting gekappt wurde.
+
+    Liest trade["_vol_cap"] (von _cap_position_by_volatility) und liefert
+    None, wenn kein Cap griff (gekappt=False, Metadaten fehlen oder Werte
+    nicht darstellbar sind) — der Hinweis erscheint nur bei echtem Kap.
+    """
+    info = trade.get("_vol_cap")
+    if not isinstance(info, dict) or not info.get("gekappt"):
+        return None
+    neu = _kompakte_zahl(info.get("rechnerisch"))
+    original = _kompakte_zahl(info.get("original"))
+    if neu is None or original is None:
+        return None
+    return (
+        f"⚠️ Positionsgröße auf rechnerisches Volatility-Targeting gekappt "
+        f"({neu} % statt {original} %)."
+    )
+
+
 def _clean_debate_text(agent: dict[str, Any]) -> str:
     """Entfernt das JSON-Preamble und Markdown-Codeblock-Wrapper aus Debatten-Texten.
 
@@ -151,6 +171,9 @@ def _management_summary(
             gewicht_parts.append(ziel_teil)
         if gewicht_parts:
             lines.append(f"**Empfohlene Gewichtung:** {' · '.join(gewicht_parts)}")
+        vol_cap = _vol_cap_hinweis(trade)
+        if vol_cap:
+            lines.append(f"> {vol_cap}")
 
         # --- Exit-Review: Verkaufsperspektive für Bestandspositionen ---
         if review_mode:
@@ -962,6 +985,9 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
         lines.append(f"**Zielkurs:** {_fmt(trade.get('zielkurs'))}")
         lines.append(f"**Stop-Loss:** {_fmt(trade.get('stop_loss'))}")
         lines.append(f"**Positionsanteil:** {trade.get('positionsanteil', 'N/A')} %")
+        vol_cap = _vol_cap_hinweis(trade)
+        if vol_cap:
+            lines.append(f"> {vol_cap}")
         lines.append(f"**Zeithorizont:** {trade.get('zeithorizont', 'N/A')}")
         lines.append(f"**Begründung:** {trade.get('begründung', 'N/A')}")
         lines.append("")

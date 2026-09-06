@@ -1420,6 +1420,57 @@ def _apply_technik_signal(trade: dict[str, Any], analysts: dict[str, Any]) -> di
     return trade
 
 
+def _cap_position_by_volatility(
+    trade: dict[str, Any],
+    risk: dict[str, Any],
+) -> dict[str, Any]:
+    """Kappt die Positionsgröße am rechnerischen Volatility-Targeting (in-place).
+
+    Risk-Parity-Praxis: Die rechnerische Positionsgröße aus dem Risikomodell
+    (``positionsgröße_rechnerisch_pct``) ist eine harte Obergrenze — der LLM
+    darf nicht mehr Position empfehlen, als das Volatility-Targeting erlaubt.
+
+    - Nur für KAUFEN/STARK KAUFEN (sonst unverändert — HALTEN/VERKAUFEN
+      wird nie angetastet).
+    - ``positionsgröße_rechnerisch_pct`` fehlt/None/ungültig → Trade
+      unverändert (kein Cap möglich, rückwärtskompatibel).
+    - ``positionsanteil`` größer als der rechnerische Wert → auf den
+      rechnerischen Wert gekappt (2 Dezimalstellen). Ist die Position
+      bereits kleiner (z. B. durch das Technik-Signal), greift kein Cap —
+      der Vol-Cap senkt nur, hebt aber nie an.
+    - Metadaten ``trade["_vol_cap"]`` = {"rechnerisch", "original",
+      "gekappt"} werden gesetzt (gekappt=False, wenn kein Cap griff).
+    - Crasht nie (try/except; bei Fehler Trade unverändert).
+    """
+    action = str(trade.get("aktion", "")).strip().upper()
+    if action not in ("KAUFEN", "STARK KAUFEN"):
+        return trade
+
+    try:
+        rechnerisch = _safe_float_or_none(
+            (risk or {}).get("positionsgröße_rechnerisch_pct")
+        )
+        if rechnerisch is None:
+            return trade
+
+        original = _safe_float_or_none(trade.get("positionsanteil"))
+        gekappt = original is not None and original > rechnerisch
+
+        # Mutationen erst am Ende (alle Werte vorberechnet) — der Trade bleibt
+        # bei Fehlern im Vorfeld unverändert.
+        metadaten = {
+            "rechnerisch": round(rechnerisch, 2),
+            "original": original,
+            "gekappt": bool(gekappt),
+        }
+        if gekappt:
+            trade["positionsanteil"] = round(rechnerisch, 2)
+        trade["_vol_cap"] = metadaten
+    except Exception:  # noqa: BLE001 — Trade-Änderung darf nie crashen
+        return trade
+    return trade
+
+
 def trader(
     analysts: dict[str, Any],
     debate_result: dict[str, Any],

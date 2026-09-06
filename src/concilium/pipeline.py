@@ -15,6 +15,7 @@ from . import config
 from .agents import (
     _apply_technik_signal,
     _build_data_text,
+    _cap_position_by_volatility,
     _extract_current_price,
     analyst_team,
     debate,
@@ -538,6 +539,23 @@ def run_pipeline(
         result["trade"] = trade
     except Exception as exc:  # noqa: BLE001 — nie crashen
         logger.warning("Technik-Signal (nach Revision) fehlgeschlagen: %s", exc)
+
+    # --- 5c''. Volatility-Targeting als harte Obergrenze ---
+    # NACH dem Technik-Signal (5c'): Das Signal skaliert die Positionsgröße
+    # zuerst (Faktor), dann wird der rechnerische Wert aus dem Risikomodell
+    # (positionsgröße_rechnerisch_pct) als harte Obergrenze angewendet —
+    # Volatility-Targeting als harte Obergrenze — der LLM darf nicht mehr
+    # Position empfehlen, als das rechnerische Risikomodell erlaubt.
+    # Der Vol-Cap senkt nur, hebt aber nie an: Hat das Technik-Signal die
+    # Position bereits unter den Cap gesenkt, greift er nicht. Ohne
+    # rechnerische Positionsgröße (keine Historie/Volatilität) greift kein
+    # Cap — Verhalten wie bisher (rückwärtskompatibel). Nur KAUFEN/
+    # STARK KAUFEN wird gekappt; HALTEN/VERKAUFEN bleiben unangetastet.
+    try:
+        _cap_position_by_volatility(trade, risk)
+        result["trade"] = trade
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("Vol-Cap (nach Technik-Signal) fehlgeschlagen: %s", exc)
 
     # --- 5b'. Kalibrierungs-gestützte Dämpfung der Ziel-Gewichtung ---
     # Wird NACH Schritt 5c (Trade-Revision) ausgeführt: Die Dämpfung basiert
