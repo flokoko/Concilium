@@ -109,26 +109,58 @@ def _parse_as_of(as_of: str | None) -> str | None:
     return parsed.strftime("%Y-%m-%d")
 
 
+def _normalize_peers(peers: list[str] | str | None) -> str:
+    """Normalisiert die Peer-Liste zu einem stabilen, sortierten String.
+
+    Reihenfolge und Duplikate dürfen den Cache-Key nicht beeinflussen —
+    `peers=['VST','NEE']` und `peers=['NEE','VST']` sind derselbe Lauf.
+    Leere/None → leerer String (kein Peers-Segment im Dateinamen).
+    Idempotent: ein bereits normalisierter String (z.B. aus dem Cache-Eintrag)
+    wird unverändert zurückgegeben.
+    """
+    if isinstance(peers, str):
+        return peers  # bereits normalisiert (aus Cache-Eintrag)
+    if not peers:
+        return ""
+    cleaned = sorted({p.strip() for p in peers if p and p.strip()})
+    if not cleaned:
+        return ""
+    return "_".join(re.sub(r"[^A-Za-z0-9._-]", "_", p) for p in cleaned)
+
+
 def _cache_file_path(
-    cache_dir: str, today_key: str, ticker: str, as_of: str | None = None
+    cache_dir: str,
+    today_key: str,
+    ticker: str,
+    as_of: str | None = None,
+    peers: list[str] | None = None,
 ) -> str:
     """Bestimmt den Dateipfad für einen Cache-Eintrag.
 
     Bei gepinntem Analysedatum (as_of) geht das Datum in den Dateinamen ein —
     gepinnte Läufe werden nie mit 'heute'-Läufen (oder anderem as_of) geteilt.
+    Auch die Peers gehen in den Dateinamen ein: Ein Lauf mit `--peers` darf
+    niemals den Cache eines Laufs ohne Peers (leere Peer-Tabelle) zurückbekommen
+    und umgekehrt.
     """
     # Ticker kann / enthalten (z.B. nicht bereinigt) → sicher machen
     safe_ticker = re.sub(r"[^A-Za-z0-9._-]", "_", ticker)
+    peers_seg = _normalize_peers(peers)
     if as_of is not None:
         safe_as_of = re.sub(r"[^A-Za-z0-9._-]", "_", as_of)
-        return os.path.join(
-            cache_dir, f"market_{today_key}_asof_{safe_as_of}_{safe_ticker}.json"
-        )
-    return os.path.join(cache_dir, f"market_{today_key}_{safe_ticker}.json")
+        base = f"market_{today_key}_asof_{safe_as_of}_{safe_ticker}"
+    else:
+        base = f"market_{today_key}_{safe_ticker}"
+    if peers_seg:
+        base = f"{base}_peers_{peers_seg}"
+    return os.path.join(cache_dir, f"{base}.json")
 
 
 def _load_cache(
-    ticker: str, today_key: str | None = None, as_of: str | None = None
+    ticker: str,
+    today_key: str | None = None,
+    as_of: str | None = None,
+    peers: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Lädt gecachte Marktdaten für einen Ticker, wenn der Cache heute ist.
 
@@ -139,6 +171,8 @@ def _load_cache(
             sind NUR gültig, wenn das as_of exakt übereinstimmt — ein Eintrag
             ohne as_of wird niemals für einen as_of-Lauf geliefert (und
             umgekehrt).
+        peers: Optionale Peer-Liste. Geht in den Cache-Key ein — ein Lauf mit
+            Peers bekommt nie den Cache eines Laufs ohne Peers (und umgekehrt).
 
     Returns:
         Das data-dict (ohne isin/wkn) oder None bei Cache-Miss/Fehler/Deaktiviert.
@@ -149,7 +183,7 @@ def _load_cache(
     if today_key is None:
         today_key = _get_today_key()
 
-    file_path = _cache_file_path(cache_dir, today_key, ticker, as_of)
+    file_path = _cache_file_path(cache_dir, today_key, ticker, as_of, peers)
     try:
         if not os.path.isfile(file_path):
             return None
@@ -160,6 +194,9 @@ def _load_cache(
             return None
         # Gültigkeit: as_of muss exakt übereinstimmen (None != gepinnt)
         if cached.get("as_of") != as_of:
+            return None
+        # Gültigkeit: peers müssen exakt übereinstimmen (normalisiert)
+        if _normalize_peers(cached.get("peers")) != _normalize_peers(peers):
             return None
         # data-dict extrahieren
         data = cached.get("data")
@@ -177,6 +214,7 @@ def _save_cache(
     data: dict[str, Any],
     today_key: str | None = None,
     as_of: str | None = None,
+    peers: list[str] | None = None,
 ) -> None:
     """Speichert Marktdaten für einen Ticker im Tages-Cache.
 
@@ -190,6 +228,8 @@ def _save_cache(
         today_key: Optionales Datum YYYY-MM-DD (für Tests).
         as_of: Optionales gepinntes Analysedatum YYYY-MM-DD — geht in den
             Cache-Key ein und wird im Eintrag gespeichert.
+        peers: Optionale Peer-Liste — geht in den Cache-Key ein und wird im
+            Eintrag gespeichert (normalisiert).
     """
     cache_dir = _get_cache_dir()
     if cache_dir is None:
@@ -203,9 +243,10 @@ def _save_cache(
         "cache_date": today_key,
         "ticker": ticker,
         "as_of": as_of,
+        "peers": _normalize_peers(peers),
         "data": cache_data,
     }
-    file_path = _cache_file_path(cache_dir, today_key, ticker, as_of)
+    file_path = _cache_file_path(cache_dir, today_key, ticker, as_of, peers)
     try:
         os.makedirs(cache_dir, exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as fh:
@@ -1765,8 +1806,10 @@ def collect_ticker_data(
 
     # --- Tages-Cache prüfen (yfinance-abhängige Daten) ---
     # as_of ist Teil des Cache-Keys: gepinnte Läufe werden niemals mit
-    # 'heute'-Läufen (oder anderem as_of) geteilt.
-    cached = _load_cache(ticker, as_of=as_of)
+    # 'heute'-Läufen (oder anderem as_of) geteilt. Auch die Peers sind Teil
+    # des Cache-Keys: ein Lauf mit `--peers` bekommt nie den Cache eines Laufs
+    # ohne Peers (leere Peer-Tabelle) und umgekehrt.
+    cached = _load_cache(ticker, as_of=as_of, peers=peers)
     if cached is not None:
         # Identifier-Metadaten wieder hinzufügen (nicht im Cache gespeichert)
         cached["isin"] = id_meta.get("isin")
@@ -2217,6 +2260,7 @@ def collect_ticker_data(
     # als Fallback bei yfinance-Fehlern). Da wir bis hier nur kommen, wenn
     # alle Daten erfolgreich geladen wurden, ist das hier sicher.
     # as_of geht in den Cache-Key ein (gepinnte Läufe werden nicht geteilt).
-    _save_cache(ticker, result, as_of=as_of)
+    # Auch die Peers gehen in den Cache-Key ein (Lauf mit/ohne Peers getrennt).
+    _save_cache(ticker, result, as_of=as_of, peers=peers)
 
     return result

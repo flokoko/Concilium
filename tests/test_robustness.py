@@ -220,6 +220,71 @@ class TestCacheLoadSave:
         assert _load_cache("AAPL", today_key="2026-08-21") is None
 
 
+class TestCachePeers:
+    """Peers sind Teil des Cache-Keys — Lauf mit/ohne Peers wird getrennt."""
+
+    def test_cache_file_path_includes_peers(self):
+        """_cache_file_path mit Peers erzeugt einen eigenen Dateinamen."""
+        no_peers = _cache_file_path("/tmp/cache", "2026-08-21", "AAPL")
+        with_peers = _cache_file_path("/tmp/cache", "2026-08-21", "AAPL", peers=["VST", "NEE"])
+        assert no_peers != with_peers
+        assert with_peers.endswith("_peers_NEE_VST.json")
+        assert no_peers.endswith("_AAPL.json")
+
+    def test_cache_file_path_peers_order_independent(self):
+        """Reihenfolge der Peers ändert den Dateinamen nicht."""
+        a = _cache_file_path("/tmp/cache", "2026-08-21", "AAPL", peers=["VST", "NEE"])
+        b = _cache_file_path("/tmp/cache", "2026-08-21", "AAPL", peers=["NEE", "VST"])
+        assert a == b
+
+    def test_cache_file_path_peers_duplicates_deduped(self):
+        """Duplikate in der Peer-Liste ändern den Dateinamen nicht."""
+        a = _cache_file_path("/tmp/cache", "2026-08-21", "AAPL", peers=["VST", "VST"])
+        b = _cache_file_path("/tmp/cache", "2026-08-21", "AAPL", peers=["VST"])
+        assert a == b
+
+    def test_cache_file_path_peers_sanitized(self):
+        """Peer-Ticker mit Sonderzeichen werden sicher gemacht."""
+        path = _cache_file_path("/tmp/cache", "2026-08-21", "AAPL", peers=["A/B"])
+        assert "/" not in path.split("/")[-1]
+        assert path.endswith(".json")
+
+    def test_save_load_roundtrip_with_peers(self, monkeypatch, tmp_path):
+        """Speichern und Laden mit Peers liefert dieselben Daten zurück."""
+        monkeypatch.setenv("CONCILIUM_CACHE_DIR", str(tmp_path))
+        today = _get_today_key()
+        data = {"ticker": "AAPL", "fundamentals": {"pe_ratio": 30.0}, "peers": [{"ticker": "VST"}]}
+
+        _save_cache("AAPL", data, today_key=today, peers=["VST", "NEE"])
+        loaded = _load_cache("AAPL", today_key=today, peers=["VST", "NEE"])
+        assert loaded is not None
+        assert loaded["fundamentals"]["pe_ratio"] == 30.0
+
+    def test_load_with_peers_does_not_hit_no_peers_cache(self, monkeypatch, tmp_path):
+        """Cache ohne Peers wird NICHT für einen Lauf mit Peers geliefert."""
+        monkeypatch.setenv("CONCILIUM_CACHE_DIR", str(tmp_path))
+        today = _get_today_key()
+        data = {"ticker": "AAPL", "fundamentals": {"pe_ratio": 30.0}, "peers": []}
+
+        _save_cache("AAPL", data, today_key=today)  # ohne Peers speichern
+        # Lauf MIT Peers → Cache-Miss (kein Treffer auf den No-Peers-Eintrag)
+        assert _load_cache("AAPL", today_key=today, peers=["VST"]) is None
+        # Lauf OHNE Peers → Treffer
+        assert _load_cache("AAPL", today_key=today) is not None
+
+    def test_load_without_peers_does_not_hit_peers_cache(self, monkeypatch, tmp_path):
+        """Cache mit Peers wird NICHT für einen Lauf ohne Peers geliefert."""
+        monkeypatch.setenv("CONCILIUM_CACHE_DIR", str(tmp_path))
+        today = _get_today_key()
+        data = {"ticker": "AAPL", "fundamentals": {"pe_ratio": 30.0}, "peers": [{"ticker": "VST"}]}
+
+        _save_cache("AAPL", data, today_key=today, peers=["VST"])
+        # Lauf OHNE Peers → Cache-Miss
+        assert _load_cache("AAPL", today_key=today) is None
+        # Lauf MIT denselben Peers → Treffer
+        assert _load_cache("AAPL", today_key=today, peers=["VST"]) is not None
+
+
 class TestCollectTickerDataCache:
     """Tests dass collect_ticker_data den Cache korrekt nutzt."""
 
