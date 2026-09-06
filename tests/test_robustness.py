@@ -347,6 +347,12 @@ class TestCollectTickerDataCache:
                         "concilium.data._fetch_polymarket", return_value=[]
                     ), patch(
                         "concilium.data._fetch_global_macro_news", return_value=[]
+                    ), patch(
+                        # Phase-2-Fetch mocken: _get_sp500_momentum nutzt einen
+                        # eigenen yf.Ticker-Aufruf (^GSPC/SPY) und soll nicht in
+                        # die yfinance-Zählung des Tickers eingehen — der Test
+                        # prüft die Cache-Semantik der Ticker-Historie.
+                        "concilium.data._get_sp500_momentum", return_value=1.5
                     ):
                         # Erster Aufruf → yfinance wird geladen
                         data1 = collect_ticker_data("TEST")

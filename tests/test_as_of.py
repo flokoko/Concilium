@@ -267,6 +267,13 @@ class TestAsOfCache:
                 stack.enter_context(
                     patch("concilium.data._fetch_macro_data", return_value={})
                 )
+                # Phase-2-Fetch mocken: _get_sp500_momentum nutzt eigenen
+                # yf.Ticker-Aufruf (soll nicht in die yfinance-Zählung des
+                # Tickers eingehen — der Test prüft die Cache-Semantik der
+                # Ticker-Historie).
+                stack.enter_context(
+                    patch("concilium.data._get_sp500_momentum", return_value=1.5)
+                )
                 return collect_ticker_data("TEST", as_of=as_of)
 
         # 1. Lauf ohne as_of → Fetch + normaler Tages-Cache-Eintrag

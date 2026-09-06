@@ -582,6 +582,9 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
     lines.append(f"| MACD | {_fmt(macd.get('macd'))} |")
     lines.append(f"| MACD Signal | {_fmt(macd.get('signal'))} |")
     lines.append(f"| MACD Histogramm | {_fmt(macd.get('histogram'))} |")
+    # Relatives Momentum (cross-sectional vs. S&P 500) — nur wenn verfügbar
+    if t.get("relatives_momentum_6m") is not None:
+        lines.append(f"| Relatives Momentum (6M vs. S&P 500) | {_fmt(t.get('relatives_momentum_6m'))} % |")
     boll = t.get("bollinger", {})
     lines.append(f"| Bollinger Ober | {_fmt(boll.get('upper'))} |")
     lines.append(f"| Bollinger Mitte | {_fmt(boll.get('middle'))} |")

@@ -1758,6 +1758,75 @@ def _get_sp500_benchmark() -> dict[str, Any]:
     return result
 
 
+def _compute_momentum_6m(close: Any) -> float | None:
+    """Berechnet die 6-Monats-Rendite (relatives Momentum) einer Close-Serie.
+
+    Momentum im AQR/Asness-Sinn: kumulative Rendite über ~126 Handelstage
+    (6 Monate). Wird als Prozentwert geliefert (z. B. 12.5 = +12,5 %).
+
+    Args:
+        close: pandas Close-Serie (kann NaN enthalten).
+
+    Returns:
+        Momentum in Prozent oder None (weniger als ~126 Datenpunkte,
+        ungültige Werte).
+    """
+    try:
+        if close is None or len(close) < 126:
+            return None
+        last = _safe_float(_last_valid(close))
+        base = _safe_float(close.iloc[-126])
+        if last is None or base is None or base == 0:
+            return None
+        return (last / base - 1.0) * 100.0
+    except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+        logger.debug("Momentum-Berechnung fehlgeschlagen: %s", exc)
+        return None
+
+
+def _get_sp500_momentum() -> float | None:
+    """Holt die 6-Monats-Rendite des S&P 500 — best effort, nie crashen.
+
+    Quelle: ^GSPC (1y-Historie), Fallback SPY (ETF). Das Ergebnis wird im
+    Tages-Cache hinterlegt (Eigener Eintrag, Ticker "_SP500_MOMENTUM"), damit
+    die S&P-500-Historie nicht pro Ticker-Lauf neu gefetcht wird.
+
+    Returns:
+        6-Monats-Rendite in Prozent oder None (kein Netz/Fehler).
+    """
+    today_key = _get_today_key()
+
+    # 1. Tages-Cache prüfen
+    cached = _load_cache("_SP500_MOMENTUM", today_key=today_key)
+    if cached is not None:
+        value = cached.get("sp500_momentum_6m")
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+
+    # 2. Netz-Abruf: ^GSPC, Fallback SPY
+    momentum = None
+    for sym in ("^GSPC", "SPY"):
+        try:
+            hist = yf.Ticker(sym).history(period="1y", auto_adjust=False)
+            momentum = _compute_momentum_6m(hist["Close"] if hist is not None and not hist.empty else None)
+            if momentum is not None:
+                break
+        except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+            logger.debug("S&P-500-Momentum %s fehlgeschlagen: %s", sym, exc)
+            momentum = None
+
+    # 3. Ergebnis (auch None als "heute nicht verfügbar") im Tages-Cache ablegen
+    try:
+        _save_cache("_SP500_MOMENTUM", {"sp500_momentum_6m": momentum}, today_key=today_key)
+    except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+        logger.debug("S&P-500-Momentum-Cache-Schreiben fehlgeschlagen: %s", exc)
+
+    return momentum
+
+
 def _fetch_peer_data(peers: list[str]) -> list[dict[str, Any]]:
     """Holt KGV/Marktkapitalisierung für Peer-Ticker — best effort, nie crashen.
 
@@ -2053,6 +2122,21 @@ def collect_ticker_data(
     current_volume = _safe_float(_last_valid(volume))
     avg_volume_30d = float(_last_valid(volume.tail(30).mean())) if len(volume) >= 30 else None
 
+    # --- Relatives Momentum (cross-sectional, AQR/Asness-Stil) ---
+    # 6-Monats-Rendite des Tickers minus 6-Monats-Rendite des S&P 500.
+    # Best effort: Fehlende Benchmark → alle drei Felder None, nie crashen.
+    momentum_6m = _compute_momentum_6m(close)
+    sp500_momentum_6m = None
+    if momentum_6m is not None:
+        try:
+            sp500_momentum_6m = _get_sp500_momentum()
+        except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+            logger.warning("S&P-500-Momentum konnte nicht abgerufen werden: %s", exc)
+            sp500_momentum_6m = None
+    relatives_momentum_6m: float | None = None
+    if momentum_6m is not None and sp500_momentum_6m is not None:
+        relatives_momentum_6m = momentum_6m - sp500_momentum_6m
+
     technicals = {
         "current_price": current_price,
         "sma50": sma50,
@@ -2062,6 +2146,10 @@ def collect_ticker_data(
         "bollinger": bollinger,
         "current_volume": current_volume,
         "avg_volume_30d": avg_volume_30d,
+        # Phase 2: Relatives Momentum (cross-sectional vs. S&P 500)
+        "momentum_6m": momentum_6m,
+        "sp500_momentum_6m": sp500_momentum_6m,
+        "relatives_momentum_6m": relatives_momentum_6m,
     }
 
     # --- Stale-OHLCV-Erkennung ---

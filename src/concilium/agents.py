@@ -59,6 +59,13 @@ SYSTEM_TECHNICAL = """\
 Du bist ein erfahrener technischer Analyst. Du analysierst Charts und Indikatoren:
 SMA50, SMA200, RSI(14), MACD, Bollinger-Bänder, Volumen.
 
+Wichtige Ergänzung — Relatives Momentum (cross-sectional): Bewerte das Momentum \
+des Tickers RELATIV zum S&P 500 (relatives_momentum_6m, in Prozentpunkten). \
+Positives relatives Momentum = relative Stärke (Ticker schlägt den Markt), \
+negatives = relative Schwäche (Ticker verliert gegen den Markt). Dieses Signal \
+ist empirisch robuster als ein einzelner SMA-Check und ergänzt die \
+SMA/RSI/MACD-Analyse — es ersetzt sie nicht.
+
 Gib an, ob der Trend aufwärts, seitwärts oder abwärts gerichtet ist und ob Überkauft-/\
 Überverkauft-Signale vorliegen.
 Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
@@ -656,6 +663,16 @@ def _build_data_text(data: dict[str, Any], role: str = "alle") -> str:
             f"  Volumen: {_fmt_num(t.get('current_volume'), ' ')}",
             f"  Ø Volumen 30T: {_fmt_num(t.get('avg_volume_30d'), ' ')}",
         ])
+        # Relatives Momentum (cross-sectional, Phase 2) — nur anzeigen, wenn
+        # verfügbar (best effort: fehlende Benchmark → kein N/A-Rauschen).
+        if t.get("relatives_momentum_6m") is not None or t.get("momentum_6m") is not None:
+            lines.extend([
+                f"  Momentum 6M: {_fmt_num(t.get('momentum_6m'))} %",
+                f"  S&P 500 Momentum 6M: {_fmt_num(t.get('sp500_momentum_6m'))} %",
+                f"  Relatives Momentum 6M: {_fmt_num(t.get('relatives_momentum_6m'))} Prozentpunkte",
+                "  (Relatives Momentum = 6M-Rendite Ticker minus 6M-Rendite S&P 500.",
+                "   Positiv = Outperformance vs. Markt, negativ = Underperformance.)",
+            ])
 
     # Makro/Zins-Daten — für alle (vollständig), fundamental (vollständig),
     # macro_news (vollständig), technik (nur Zinstrend-Kurzform), sentiment (keine)
