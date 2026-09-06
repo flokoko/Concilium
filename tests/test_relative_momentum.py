@@ -107,7 +107,7 @@ class TestCollectTickerDataMomentum:
         t.info = {"marketCap": 1e12, "trailingPE": 20.0, "currentPrice": float(close.iloc[-1])}
         t.news = []
 
-        def fake_sp500_momentum():
+        def fake_sp500_momentum(as_of=None):
             if sp500_momentum is None:
                 raise RuntimeError("Benchmark nicht verfügbar")
             return sp500_momentum
@@ -231,3 +231,127 @@ class TestGetSp500Momentum:
         with patch("concilium.data.yf.Ticker", side_effect=Exception("Network down")), \
              patch.dict(os.environ, {"CONCILIUM_CACHE_DIR": ""}):
             assert _get_sp500_momentum() is None
+
+
+class TestGetSp500MomentumAsOf:
+    """Regression (Bug D2): _get_sp500_momentum respektiert gepinntes as_of."""
+
+    def _gspc_hist(self, daily_pct: float = 0.005, n: int = 250) -> pd.DataFrame:
+        close = _make_close(start=5000.0, daily_pct=daily_pct, n=n)
+        return pd.DataFrame({"Close": close.to_numpy()}, index=close.index.tz_localize("UTC"))
+
+    @staticmethod
+    def _two_phase_close(n: int = 250, k: int = 160) -> pd.Series:
+        """Close-Serie: flach bis Index k, danach exponentiell +1 %/Tag (naiver Index).
+
+        Das Momentum über 126 Punkte hängt vom Endpunkt ab — so unterscheidet
+        sich der Wert auf der vollen Serie messbar vom Wert auf der
+        beschnittenen (bis as_of = Index k) Serie.
+        """
+        flat = [100.0] * k
+        ramp = [100.0 * (1.01 ** i) for i in range(1, n - k + 1)]
+        dates = pd.date_range("2025-01-01", periods=n, freq="B")
+        return pd.Series(flat + ramp, index=dates, name="Close")
+
+    def test_as_of_uses_only_closes_up_to_as_of(self, tmp_path):
+        """Momentum bei as_of entspricht der Berechnung auf der beschnittenen Serie.
+
+        Die gemockte ^GSPC-Historie reicht über as_of hinaus — geprüft wird,
+        dass nur Close-Werte <= as_of in die 6M-Berechnung eingehen und nicht
+        die volle (bis-heute-)Serie. as_of = Index 160: davor liegen 161
+        Punkte (berechenbar), danach 89 Punkte, die NICHT einfließen dürfen.
+        """
+        close = self._two_phase_close(n=250, k=160)
+        as_of = close.index[160].strftime("%Y-%m-%d")
+        hist = pd.DataFrame(
+            {"Close": close.to_numpy()}, index=close.index.tz_localize("UTC")
+        )
+        gspc = MagicMock()
+        gspc.history.return_value = hist
+
+        with patch("concilium.data.yf.Ticker", return_value=gspc), \
+             patch.dict(os.environ, {"CONCILIUM_CACHE_DIR": str(tmp_path)}):
+            result = _get_sp500_momentum(as_of=as_of)
+
+        expected = _compute_momentum_6m(
+            close.loc[close.index <= pd.Timestamp(as_of)]
+        )
+        assert result == pytest.approx(expected)
+        assert result != pytest.approx(_compute_momentum_6m(close))
+
+    def test_as_of_passed_through_collect_ticker_data(self):
+        """collect_ticker_data(as_of=...) reicht as_of an _get_sp500_momentum durch."""
+        close = _make_close(start=100.0, daily_pct=0.01, n=300)
+        n = len(close)
+        hist = pd.DataFrame(
+            {
+                "Open": close.values,
+                "High": close.values,
+                "Low": close.values,
+                "Close": close,
+                "Volume": [1_000_000.0] * n,
+            },
+            index=close.index,
+        )
+        t = MagicMock()
+        t.history.return_value = hist
+        t.info = {"marketCap": 1e12, "trailingPE": 20.0}
+        t.news = []
+        # Spät genug, dass >=126 Punkte <= as_of bleiben (sonst momentum_6m
+        # None und _get_sp500_momentum wird nie aufgerufen).
+        as_of = close.index[200].strftime("%Y-%m-%d")
+
+        with patch("concilium.data.yf.Ticker", return_value=t), \
+             patch("concilium.data._get_sp500_momentum", return_value=3.0) as mom_mock, \
+             patch("concilium.data._fetch_macro_data", return_value={
+                 "eurusd": None, "sp500_pe": None, "sp500_market_cap": None,
+                 "sp500_source": "none", "us_10y_yield": None,
+             }), \
+             patch("concilium.data._fetch_peer_data", return_value=[]), \
+             patch("concilium.data._fetch_google_news", return_value=[]), \
+             patch("concilium.data._fetch_stocktwits", return_value=[]), \
+             patch("concilium.data._fetch_reddit", return_value=[]), \
+             patch("concilium.data._fetch_insider_transactions", return_value=[]), \
+             patch("concilium.data._fetch_polymarket", return_value=[]), \
+             patch("concilium.data._fetch_global_macro_news", return_value=[]), \
+             patch.dict(os.environ, {"CONCILIUM_CACHE_DIR": ""}):
+            collect_ticker_data("TEST", as_of=as_of)
+
+        mom_mock.assert_called_once_with(as_of=as_of)
+
+    def test_as_of_cache_key_isolated_from_unpinned(self, tmp_path):
+        """Gepinnter Lauf teilt den Tages-Cache nicht mit 'heute'-Läufen.
+
+        Erst ein gepinnter Lauf (as_of gesetzt), dann ein un-gepinnter: Der
+        zweite darf nicht aus dem as_of-Cache bedient werden (sonst würde ein
+        falscher, bis-as_of-berechneter Benchmark-Wert in Live-Läufe gelangen)
+        — yf.Ticker muss also zweimal aufgerufen werden.
+        """
+        hist = self._gspc_hist(daily_pct=0.005, n=250)
+        as_of = hist.index[200].strftime("%Y-%m-%d")
+        gspc = MagicMock()
+        gspc.history.return_value = hist
+
+        with patch("concilium.data.yf.Ticker", return_value=gspc) as ticker_mock, \
+             patch.dict(os.environ, {"CONCILIUM_CACHE_DIR": str(tmp_path)}):
+            first = _get_sp500_momentum(as_of=as_of)
+            second = _get_sp500_momentum()
+
+        assert first is not None
+        assert second == pytest.approx(first)  # gleiche Serie → praktisch gleicher Wert
+        assert ticker_mock.call_count == 2  # kein Cache-Sharing as_of ↔ heute
+
+    def test_as_of_unpinned_cache_hits_and_still_works(self, tmp_path):
+        """Un-gepinnter Fall unverändert: erster Aufruf fetcht, zweiter kommt aus Cache."""
+        hist = self._gspc_hist(daily_pct=0.005, n=250)
+        gspc = MagicMock()
+        gspc.history.return_value = hist
+
+        with patch("concilium.data.yf.Ticker", return_value=gspc) as ticker_mock, \
+             patch.dict(os.environ, {"CONCILIUM_CACHE_DIR": str(tmp_path)}):
+            first = _get_sp500_momentum()
+            second = _get_sp500_momentum()
+
+        assert first is not None
+        assert second == first
+        assert ticker_mock.call_count == 1

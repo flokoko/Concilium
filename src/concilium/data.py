@@ -1784,20 +1784,30 @@ def _compute_momentum_6m(close: Any) -> float | None:
         return None
 
 
-def _get_sp500_momentum() -> float | None:
+def _get_sp500_momentum(as_of: str | None = None) -> float | None:
     """Holt die 6-Monats-Rendite des S&P 500 — best effort, nie crashen.
 
     Quelle: ^GSPC (1y-Historie), Fallback SPY (ETF). Das Ergebnis wird im
     Tages-Cache hinterlegt (Eigener Eintrag, Ticker "_SP500_MOMENTUM"), damit
     die S&P-500-Historie nicht pro Ticker-Lauf neu gefetcht wird.
 
+    Args:
+        as_of: Optionales gepinntes Analysedatum (YYYY-MM-DD). Wenn gesetzt,
+            wird die ^GSPC/SPY-Historie auf Daten <= as_of beschränkt
+            (analog zum Ticker-Muster in collect_ticker_data) — der
+            Benchmark-Wert für das relative Momentum entspricht dann dem
+            Stand zu as_of statt heute.
+
     Returns:
         6-Monats-Rendite in Prozent oder None (kein Netz/Fehler).
     """
     today_key = _get_today_key()
 
-    # 1. Tages-Cache prüfen
-    cached = _load_cache("_SP500_MOMENTUM", today_key=today_key)
+    # 1. Tages-Cache prüfen. Bei gepinntem Analysedatum geht as_of in den
+    # Cache-Key ein (asof-Segment im Dateinamen + exakte as_of-Prüfung in
+    # _load_cache): ein gepinnter Lauf bekommt niemals den 'heute'-Wert
+    # (oder einen anderen as_of) und umgekehrt.
+    cached = _load_cache("_SP500_MOMENTUM", today_key=today_key, as_of=as_of)
     if cached is not None:
         value = cached.get("sp500_momentum_6m")
         if value is not None:
@@ -1811,16 +1821,35 @@ def _get_sp500_momentum() -> float | None:
     for sym in ("^GSPC", "SPY"):
         try:
             hist = yf.Ticker(sym).history(period="1y", auto_adjust=False)
-            momentum = _compute_momentum_6m(hist["Close"] if hist is not None and not hist.empty else None)
+            # Gepinntes Analysedatum: Historie auf as_of beschränken
+            # (gleiches Muster wie in collect_ticker_data), damit das
+            # relative Momentum nicht ein historisches Ticker-Signal mit
+            # einem heutigen Benchmark-Signal vermischt. Leere Rest-Serie
+            # → None → normaler Fallback auf die nächste Quelle.
+            if as_of is not None and hist is not None and not hist.empty:
+                try:
+                    hist = hist.loc[hist.index <= pd.Timestamp(as_of, tz="UTC")]
+                except TypeError:
+                    # Naiver Index (ohne Zeitzone) — Vergleich mit naivem Timestamp
+                    hist = hist.loc[hist.index <= pd.Timestamp(as_of)]
+            momentum = _compute_momentum_6m(
+                hist["Close"] if hist is not None and not hist.empty else None
+            )
             if momentum is not None:
                 break
         except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
             logger.debug("S&P-500-Momentum %s fehlgeschlagen: %s", sym, exc)
             momentum = None
 
-    # 3. Ergebnis (auch None als "heute nicht verfügbar") im Tages-Cache ablegen
+    # 3. Ergebnis (auch None als "nicht verfügbar") im Tages-Cache ablegen —
+    # bei gepinntem Datum as_of-spezifisch (eigener Cache-Key).
     try:
-        _save_cache("_SP500_MOMENTUM", {"sp500_momentum_6m": momentum}, today_key=today_key)
+        _save_cache(
+            "_SP500_MOMENTUM",
+            {"sp500_momentum_6m": momentum},
+            today_key=today_key,
+            as_of=as_of,
+        )
     except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
         logger.debug("S&P-500-Momentum-Cache-Schreiben fehlgeschlagen: %s", exc)
 
@@ -2131,7 +2160,7 @@ def collect_ticker_data(
     sp500_momentum_6m = None
     if momentum_6m is not None:
         try:
-            sp500_momentum_6m = _get_sp500_momentum()
+            sp500_momentum_6m = _get_sp500_momentum(as_of=as_of)
         except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
             logger.warning("S&P-500-Momentum konnte nicht abgerufen werden: %s", exc)
             sp500_momentum_6m = None
