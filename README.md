@@ -38,7 +38,7 @@ python main.py --ticker NVDA
 # Nur Datensnapshot (ohne LLM, kein API-Aufruf)
 python main.py --ticker AAPL --no-llm
 
-# Mit Backtest-Signalproxy (SMA50/200-Crossover + RSI-Filter)
+# Mit Backtest-Signalproxy (SMA50/200-Crossover + RSI-Filter, 2-Jahres-Historie)
 python main.py --ticker MSFT --backtest
 
 # Mit Peer-Vergleich (KGV/Marktkap-Tabelle im Report)
@@ -134,7 +134,7 @@ von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
    **rollenspezifischen Datenkontext** erhalten (nur die für ihre Rolle
    relevanten Kennzahlen, kein Rauschen):
    - **Fundamental-Analyst**: Fundamentals (MarketCap, KGV, EPS, Revenue, Margen, Wachstum) + Analysten-Erwartungen + **quantitativer Multi-Faktor-Score** (deterministischer Value/Momentum/Qualität-Anker, den der LLM kritisch einordnet) + **Insider-Transaktionen** (Käufe/Verkäufe von Insidern via yfinance)
-   - **Technik-Analyst**: Technische Indikatoren (SMA50/200, RSI14, MACD, Bollinger)
+   - **Technik-Analyst**: Technische Indikatoren (SMA50/200, RSI14, MACD, Bollinger) + **relatives Momentum** (6-Monats-Rendite vs. S&P 500 als cross-sectional Signal). Die Technik wirkt als **Timing-Filter**: Sie signalisiert, WANN ein Einstieg günstig ist, bestimmt aber nicht die Richtung (die liefert die Fundamental-Analyse).
    - **Sentiment-Analyst**: News-Headlines (yfinance, Fallback auf Google-News-RSS), Positiv/Negativ/Neutral-Zählung (zeitgewichtet wenn Zeitstempel verfügbar), **mit Quellen-Kennzeichnung je Headline**
    - **Makro/News-Analyst**: Global-Makro-News (Google-News-RSS) + **Prediction Markets** (Polymarket) + Makro-Kennzahlen (Zinsen, VIX, EURUSD, Öl, S&P-Trend) — bewertet das Marktumfeld und die Relevanz der Headlines für den Ticker
    - **Social-Media-Analyst**: StockTwits + Reddit-Posts — bewertet die **Retail-Community-Stimmung** getrennt von den Nachrichten-Headlines, inkl. **Konträr-Indikator** (extreme Retail-Euphorie kann Warnsignal sein)
@@ -147,7 +147,10 @@ von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
    - **Bull**: fokussiert auf Stärken (Wachstum, Margen, Momentum, PEG, Sentiment)
    - **Bear**: fokussiert auf Risiken (Bewertung, Konzentration, Zinslast, Makro, technische Gegenanzeichen)
 
-   Beide liefern eine **Konfidenz (1-5)**, die an den Trader durchgereicht wird
+   Beide behandeln die **Technik als Timing-Filter**, nicht als eigenständigen
+   Richtungsgrund: Bull ordnet technische Signale als Timing-Bestätigung ein,
+   Bear als Timing-Warnung. Die Richtung liefert die Fundamentaldynamik. Beide
+   liefern eine **Konfidenz (1-5)**, die an den Trader durchgereicht wird
    (Nettoneigung Bull vs. Bear). Über `--debate-rounds N` (Default 1) läuft die
    Debatte als **Multi-Runden-Ping-Pong**: Ab Runde 2 bekommt jede Seite die
    Argumentation der Gegenseite aus der Vorrunde mit der Anweisung, konkret
@@ -156,22 +159,32 @@ von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
 
 3. **Trader** — schlägt eine konkrete Order vor, mit **5-stufiger Rating-Skala**:
    `STARK KAUFEN` / `KAUFEN` / `HALTEN` / `VERKAUFEN` / `STARK VERKAUFEN`
-   (plus Zielkurs, Stop-Loss, Positionsanteil). Standardmäßig läuft der Trader
-   als **Ensemble** (3 Runs mit variierender Temperatur, Mehrheitsabstimmung,
-   Plausibilitäts-Check für Ziel-/Stop-Werte). Das 5-stufige Rating wird im
-   Report und im Entscheidungs-Journal gespeichert; intern wird daraus für
-   Ensemble-Abstimmung und Track-Record eine 3-stufige Aktion abgeleitet.
+   (plus Zielkurs, Stop-Loss, Positionsanteil). Zusätzlich nennt er ein
+   **Einstiegs-Level** (`einstiegs_level`, Limit-Order-Preis): Bei KAUFEN einen
+   konkreten Support-Level (SMA50, Bollinger-Unterband, Rücksetzer) oder den
+   aktuellen Kurs, bei HALTEN/VERKAUFEN `null`. Die **Richtung** der Order leitet
+   der Trader primär aus der Fundamental-Analyse und der Bull/Bear-Debatte ab;
+   die **Technik** verfeinert nur das Timing (Einstiegszeitpunkt) und darf die
+   Richtung nicht kippen. Standardmäßig läuft der Trader als **Ensemble**
+   (3 Runs mit variierender Temperatur, Mehrheitsabstimmung, Plausibilitäts-Check
+   für Ziel-/Stop-Werte). Das 5-stufige Rating wird im Report und im
+   Entscheidungs-Journal gespeichert; intern wird daraus für Ensemble-Abstimmung
+   und Track-Record eine 3-stufige Aktion abgeleitet.
 
 4. **Risk-Manager** — bewertet Volatilität, Drawdown-Risiko und Positionsgröße.
    Ein **rechnerisches Volatility-Targeting-Modell** (Risiko-Budget 2 %, Cap 10 %)
    wird dem LLM als deterministischer Anker in den Prompt gegeben, damit die
-   LLM-Positionsgröße konsistent bleibt. Seit Phase B läuft der Risk-Manager als
-   **3-Perspektiven-Risiko-Debatte** (aggressiv / neutral / konservativ): Die drei
-   Perspektiven argumentieren parallel (Runde 1), bei `CONCILIUM_RISK_DEBATE_ROUNDS=2`
-   (Default) reagieren sie in Runde 2 konkret auf die Argumente der jeweils anderen
-   beiden, und ein finaler Synthese-Call liefert das Risk-Urteil. Die Debatten-Argumente
-   werden im Report sichtbar. Fällt eine Perspektive aus, fährt die Debatte mit den
-   übrigen fort; schlägt die Synthese fehl, greift ein sicherer Schema-Fallback.
+   LLM-Positionsgröße konsistent bleibt. Seit dem Hedgefonds-Refactor ist diese
+   rechnerische Größe eine **harte Obergrenze** (Vol-Cap): Der Trader kann nicht
+   mehr Position empfehlen, als das Volatility-Targeting erlaubt — die Position
+   wird deterministisch gekappt (Risk-Parity-Praxis). Seit Phase B läuft der
+   Risk-Manager als **3-Perspektiven-Risiko-Debatte** (aggressiv / neutral /
+   konservativ): Die drei Perspektiven argumentieren parallel (Runde 1), bei
+   `CONCILIUM_RISK_DEBATE_ROUNDS=2` (Default) reagieren sie in Runde 2 konkret
+   auf die Argumente der jeweils anderen beiden, und ein finaler Synthese-Call
+   liefert das Risk-Urteil. Die Debatten-Argumente werden im Report sichtbar.
+   Fällt eine Perspektive aus, fährt die Debatte mit den übrigen fort; schlägt
+   die Synthese fehl, greift ein sicherer Schema-Fallback.
 
 5. **Portfolio-Fit-Analyst** — bewertet die Aktie als Baustein im realen Depot
    (lädt Florians Depot aus einer Google-Sheet-Tabelle):
@@ -188,6 +201,40 @@ von der Rollenverteilung in einem Investmentfonds / Hedgefonds:
    `GENEHMIGT` / `MODIFIZIERT` (genehmigen mit Auflagen) / `ABGELEHNT`.
    Im Portfolio-Modus berücksichtigt er zusätzlich den **Gesamt-Exposure-Kontext**
    (Korrelationen und Overlap über alle analysierten Titel).
+
+## Hedgefonds-Refactor (Technik-Gewichtung nach realer Praxis)
+
+Concilium wurde um einen Hedgefonds-Refactor ergänzt, der die Gewichtung der
+Technik an die Praxis realer systematischer Fonds (Man Group/AHL, Winton,
+Citadel/Millennium, AQR, Bridgewater) anpasst. Kernpunkte in 6 Phasen:
+
+1. **Technik als Timing-Filter statt These-Filter** — Die Fundamental-Analyse
+   bestimmt die Richtung (ob kaufen/verkaufen), die Technik verfeinert nur das
+   Timing (wann einsteigen). Die Technik kann eine Kauf-These nicht mehr kippen.
+2. **Relatives Momentum-Signal** — Der Technik-Analyst erhält das 6-Monats-
+   Momentum des Tickers **relativ zum S&P 500** (`relatives_momentum_6m`) als
+   cross-sectional Signal (AQR-Praxis) statt nur einer absoluten SMA200-Linie.
+3. **Volatility-Targeting als harte Obergrenze** — Die rechnerische Positionsgröße
+   aus dem Risikomodell ist jetzt ein deterministischer **Vol-Cap**: Der Trader
+   kann nicht mehr Position empfehlen, als die historische Volatilität erlaubt
+   (Risk-Parity-Praxis).
+4. **Entry-Timing via Limit-Orders** — Der Trade nennt ein **Einstiegs-Level**
+   (`einstiegs_level`): einen konkreten Limit-Order-Preis an einem Support-Level
+   (SMA50, Bollinger-Unterband, Rücksetzer) als idealen Ausführungspunkt.
+5. **Backtest-Fenster 2 Jahre** — Die Kurs-Historie wird als `period="2y"`
+   geladen (~500 Handelstage), damit der SMA50/200-Crossover-Backtest echte
+   Signale liefert statt 0 (vorher `1y` = zu wenig Daten). Der Backtest wertet
+   maximal die letzten 500 Handelstage aus (Fenster-Cap, über Läufe vergleichbar).
+6. **Hit-Rate-Direktiv in Trader-Prompts** — Die echte Track-Record-Hit-Rate pro
+   Aktion ist jetzt ein **prominentes Verhaltens-Direktiv** am Anfang des
+   Feedback-Blocks (z. B. bei KAUFEN-Hit-Rate <20 %: „KEIN STARK KAUFEN, max 3/5
+   Konfidenz"). Konsistente Schwellen (0.20/0.35/0.50) mit der deterministischen
+   Rating-Dämpfung in `agents.py`.
+
+Zusammen ergibt das ein System, das Fundamental-Urteile zulässt, aber die
+Positionsgröße, das Einstiegs-Timing und die Konfidenz risikobewusst und
+kalibrierungsgesteuert begrenzt — statt einzelner technischer Indikatoren ein
+binäres Kauf-Veto zu geben.
 
 ## Strukturierte LLM-Outputs
 
@@ -236,7 +283,11 @@ Concilium ist explizit lernend über mehrere Mechanismen:
 - **Kontext-Feedback**: Vor jeder Analyse liest Concilium das Entscheidungs-Journal
   (`journal/decisions.csv`) und injiziert neutrale Track-Record-Statistiken
   (Aktions-Verteilung, Ø Confidence, Portfolio-Fit, KAUFEN-Genehmigungsquote, **Kalibrierungs-Tendenz**) in die Trader-/Risk-/PM-Prompts, damit die Agenten ihre
-  Kalibrierung an der eigenen Historie ausrichten.
+  Kalibrierung an der eigenen Historie ausrichten. Seit dem Hedgefonds-Refactor
+  ist zudem ein **prominentes Hit-Rate-Direktiv** am Anfang des Feedback-Blocks:
+  Die echte Trefferquote pro Aktion wird in eine explizite Verhaltensvorgabe
+  übersetzt (z. B. bei KAUFEN-Hit-Rate <20 %: „KEIN STARK KAUFEN, max 3/5
+  Konfidenz") — konsistent mit der deterministischen Rating-Dämpfung.
 - **Reflexion**: Vor jeder Analyse desselben Tickers holt Concilium den
   **realisierten Return** der letzten Entscheidung zu diesem Ticker (roh **und
   Alpha vs. regionalem Benchmark** — abgeleitet aus dem Börsen-Suffix, z. B.
