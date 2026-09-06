@@ -4,7 +4,8 @@ Bereiche:
   1. _fetch_insider_transactions — DataFrame-Parsing (yfinance-Style),
      Fehlerspalten → None, Exception → leere Liste, limit
   2. _fetch_polymarket — Parsing (outcomePrices als JSON-String + Liste),
-     403/blocked → leere Liste, limit
+     Relevanz-Filter (Titel muss Firmenname/Ticker enthalten), limit,
+     403/blocked → leere Liste
   3. _fetch_global_macro_news — Deduplizierung, limit, Query-Fehler → leere Liste
   4. collect_ticker_data-Integration — neue Keys vorhanden (gemockte Fetches)
   5. _build_data_text — Rollen-Filterung (fundamental/macro_news/alle/sentiment)
@@ -51,6 +52,8 @@ _INSIDER_DF_PARTIAL = pd.DataFrame({
     # "Insider Name", "Shares", "Price", "Value" fehlen → None
 })
 
+# Mock-Märkte: Titel enthalten den Ticker ("NVDA"), sonst filtert der
+# Relevanz-Filter (_polymarket_is_relevant) sie korrekt raus.
 _POLYMARKET_LIST = [
     {
         "question": "Will NVDA beat earnings in Q3?",
@@ -58,16 +61,16 @@ _POLYMARKET_LIST = [
         "category": "Tech",
     },
     {
-        "question": "Will the Fed cut rates in 2026?",
+        "question": "Will NVDA benefit from Fed rate cuts in 2026?",
         "outcomePrices": ["0.40", "0.60"],  # bereits Liste
         "category": "Macro",
     },
     {
-        "question": "Unparseable prices market",
+        "question": "Unparseable prices market for NVDA",
         "outcomePrices": "not-a-json",
         "category": "Other",
     },
-    {"title": "Title-fallback market", "outcomePrices": ["0.55"]},
+    {"title": "Title-fallback market for NVDA", "outcomePrices": ["0.55"]},
     {"question": "", "outcomePrices": ["0.5"]},  # leerer Titel → skip
 ]
 
@@ -226,7 +229,7 @@ class TestFetchPolymarket:
         # Unparsebare Preise → None (kein Crash)
         assert result[2]["probability"] is None
         # Titel-Fallback über "title"-Key
-        assert result[3]["title"] == "Title-fallback market"
+        assert result[3]["title"] == "Title-fallback market for NVDA"
 
     def test_data_wrapper_response(self):
         """Antwort als {"data": [...]} wird ebenfalls verarbeitet (Fallback-Endpoint)."""
@@ -285,7 +288,7 @@ class TestFetchPolymarket:
 
     def test_probability_out_of_range_ignored(self):
         """Wahrscheinlichkeit außerhalb [0, 1] → None."""
-        markets = [{"question": "Weird market", "outcomePrices": ["1.5"]}]
+        markets = [{"question": "Weird market for XYZ", "outcomePrices": ["1.5"]}]
         with patch("concilium.data.requests.get", return_value=_mock_response(markets)):
             result = _fetch_polymarket("XYZ")
         assert len(result) == 1
@@ -320,6 +323,85 @@ class TestFetchPolymarket:
         ):
             result = _fetch_polymarket("NVDA", limit=2)
         assert len(result) == 2
+
+
+class TestFetchPolymarketRelevanceFilter:
+    """Relevanz-Filter: Titel muss Firmenname oder Ticker enthalten.
+
+    Bug-Kontext: Ticker "FICO" (Fair Isaac Corp) matchte bei der Suche auch
+    den slowakischen Premier Robert Fico — irrelevante Politik-Märkte
+    landeten im Report. Firmenname-Titel: case-insensitive; Ticker-Titel:
+    case-sensitive ("Fico" ≠ "FICO").
+    """
+
+    def test_fico_mismatch_filtered_out(self):
+        """Titel ohne "Fair Isaac"/"FICO" → gefiltert → leere Liste."""
+        response = {
+            "events": [
+                {
+                    "title": "Trump world tour",
+                    "category": "Politics",
+                    "markets": [
+                        {
+                            "question": "Will Trump and Robert Fico shake hands?",
+                            "outcomePrices": ["0.80", "0.20"],
+                        },
+                    ],
+                },
+            ],
+        }
+        with patch("concilium.data._polymarket_get_json", return_value=response):
+            result = _fetch_polymarket("FICO", company_name="Fair Isaac")
+        assert result == []
+
+    def test_relevant_market_kept(self):
+        """Titel mit Firmennamen ("Fair Isaac") → behalten, Fehlmatch raus."""
+        response = [
+            {
+                "question": "Will Fair Isaac beat earnings in Q4?",
+                "outcomePrices": ["0.30", "0.70"],
+            },
+            {
+                "question": "Will Trump and Robert Fico shake hands?",
+                "outcomePrices": ["0.80", "0.20"],
+            },
+        ]
+        with patch("concilium.data._polymarket_get_json", return_value=response):
+            result = _fetch_polymarket("FICO", company_name="Fair Isaac")
+        assert len(result) == 1
+        assert result[0]["title"] == "Will Fair Isaac beat earnings in Q4?"
+        assert result[0]["probability"] == pytest.approx(0.30)
+
+    def test_ticker_in_title_kept(self):
+        """Titel mit Großbuchstaben-Ticker ("FICO") → behalten (ohne Firmenname)."""
+        response = [
+            {
+                "question": "Will FICO close above $1000?",
+                "outcomePrices": ["0.45", "0.55"],
+            },
+        ]
+        with patch("concilium.data._polymarket_get_json", return_value=response):
+            result = _fetch_polymarket("FICO")
+        assert len(result) == 1
+        assert result[0]["title"] == "Will FICO close above $1000?"
+
+    def test_company_name_used_as_primary_query(self):
+        """Mit company_name wird der Firmenname als Suchquery verwendet."""
+        calls: list[str] = []
+
+        def _fake_get_json(url):
+            calls.append(url)
+            return []  # keine Märkte → leere Liste
+
+        with patch(
+            "concilium.data._polymarket_get_json", side_effect=_fake_get_json
+        ):
+            result = _fetch_polymarket("FICO", company_name="Fair Isaac")
+        assert result == []
+        assert len(calls) == 2  # public-search + markets-Fallback
+        assert "public-search" in calls[0]
+        assert "Fair Isaac" in calls[0]
+        assert "search=Fair Isaac" in calls[1]
 
 
 # ---------------------------------------------------------------------------

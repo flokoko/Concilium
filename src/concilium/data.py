@@ -1065,18 +1065,50 @@ def _polymarket_market_item(
     }
 
 
-def _fetch_polymarket(ticker: str, limit: int = 5) -> list[dict[str, Any]]:
+def _polymarket_is_relevant(title: Any, company_name: str, ticker: str) -> bool:
+    """Prüft, ob ein Markt-Titel zum Firmennamen oder Ticker passt.
+
+    Relevanz-Filter gegen Fehlmatches: Die Suche nach "FICO" matcht auch
+    den slowakischen Premier Robert Fico. Firmenname: case-insensitive
+    (tolerant, z. B. "Will Fair Isaac beat earnings?"). Ticker:
+    case-sensitive (Großbuchstaben-Konvention), damit "Robert Fico" nicht
+    als "FICO" durchrutscht ("Fico" ≠ "FICO").
+    """
+    title_cf = str(title or "").casefold()
+    name = str(company_name or "").strip()
+    tick = str(ticker or "").strip()
+    # Firmenname nur prüfen, wenn er sich vom Ticker unterscheidet (Falls
+    # langName == Ticker, würde CI-Matching "Robert Fico" durchlassen).
+    if name and name.casefold() != tick.casefold() and name.casefold() in title_cf:
+        return True
+    if tick and tick in str(title or ""):
+        return True
+    return False
+
+
+def _fetch_polymarket(
+    ticker: str, company_name: str = "", limit: int = 5
+) -> list[dict[str, Any]]:
     """Holt ticker-relevante Prediction-Markets von Polymarket (best effort).
 
     Kaskade öffentlicher keyless-Endpoints:
-      1. ``public-search?q={ticker}`` — ticker-relevante Events (bevorzugt)
-      2. ``markets?search={ticker}`` — globale Markt-Suche (Fallback)
+      1. ``public-search?q={query}`` — relevante Events (bevorzugt)
+      2. ``markets?search={query}`` — globale Markt-Suche (Fallback)
+
+    Suchquery: primär der Firmenname (z. B. "Fair Isaac" — eindeutiger als
+    der Ticker), Fallback auf den Ticker, wenn kein Firmenname übergeben
+    wurde. Zusätzlich Relevanz-Filter: behalten werden nur Märkte, deren
+    Titel den Firmennamen ODER den Ticker enthält — Fehlmatches wie
+    "Robert Fico" bei Ticker "FICO" fliegen raus. Bleibt nach dem Filter
+    nichts übrig → leere Liste (besser als irrelevante Märkte).
 
     In gesperrten Umgebungen (403/blocked) → leere Liste (erwartetes
     Verhalten, Fallback-Kaskade greift).
 
     Args:
-        ticker: Ticker-Symbol oder Suchbegriff (z. B. "NVDA").
+        ticker: Ticker-Symbol (z. B. "NVDA").
+        company_name: Firmenname (z. B. "Fair Isaac") — eindeutigere
+            Suchquery als der Ticker. Leer → Suche nur mit Ticker.
         limit: Maximale Anzahl Märkte.
 
     Returns:
@@ -1084,11 +1116,29 @@ def _fetch_polymarket(ticker: str, limit: int = 5) -> list[dict[str, Any]]:
         float 0-1 oder None). Bei Fehler/leer → leere Liste. Crasht NIE.
     """
 
+    # Suchquery: Firmenname ist eindeutiger als der Ticker (Bug: "FICO"
+    # matchte auch den slowakischen Premier Robert Fico). Ohne Firmenname
+    # → Ticker (wie bisher, rückwärtskompatibel).
+    search_query = str(company_name or "").strip() or ticker
+
     def _collect(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return items[:limit]
+        """Relevanz-Filter (Firmenname/Ticker im Titel) + limit anwenden."""
+        relevant = [
+            item
+            for item in items
+            if _polymarket_is_relevant(item.get("title"), company_name, ticker)
+        ]
+        if len(relevant) < len(items):
+            logger.debug(
+                "Polymarket: %d/%d Kandidaten nach Relevanz-Filter entfernt (%s).",
+                len(items) - len(relevant),
+                len(items),
+                search_query,
+            )
+        return relevant[:limit]
 
     # --- 1. public-search: Events mit verschachtelten Märkten ---
-    url = _POLYMARKET_PUBLIC_SEARCH_URL.format(query=ticker, limit=limit)
+    url = _POLYMARKET_PUBLIC_SEARCH_URL.format(query=search_query, limit=limit)
     data = _polymarket_get_json(url)
     if isinstance(data, dict):
         events = data.get("events")
@@ -1110,11 +1160,19 @@ def _fetch_polymarket(ticker: str, limit: int = 5) -> list[dict[str, Any]]:
                 if len(items) >= limit:
                     break
             if items:
-                logger.info("Polymarket: %d Märkte für '%s' erhalten.", len(items), ticker)
-                return _collect(items)
+                relevant = _collect(items)
+                if relevant:
+                    logger.info(
+                        "Polymarket: %d relevante Märkte für '%s' erhalten.",
+                        len(relevant),
+                        search_query,
+                    )
+                    return relevant
+                # Nur irrelevante Kandidaten (z. B. "Robert Fico" statt FICO)
+                # → nicht zurückgeben, sondern markets-Fallback probieren.
 
     # --- 2. Fallback: globale Markt-Suche ---
-    url = f"{_POLYMARKET_MARKETS_URL}?search={ticker}&limit={limit}"
+    url = f"{_POLYMARKET_MARKETS_URL}?search={search_query}&limit={limit}"
     data = _polymarket_get_json(url)
     if data is None:
         return []
@@ -1131,11 +1189,18 @@ def _fetch_polymarket(ticker: str, limit: int = 5) -> list[dict[str, Any]]:
         if len(items) >= limit:
             break
 
-    if not items:
-        logger.info("Polymarket lieferte keine Märkte für '%s'.", ticker)
+    relevant = _collect(items)
+    if not relevant:
+        logger.info(
+            "Polymarket lieferte keine relevanten Märkte für '%s'.", search_query
+        )
     else:
-        logger.info("Polymarket: %d Märkte für '%s' erhalten.", len(items), ticker)
-    return items
+        logger.info(
+            "Polymarket: %d relevante Märkte für '%s' erhalten.",
+            len(relevant),
+            search_query,
+        )
+    return relevant
 
 
 def _fetch_insider_transactions(ticker: str, limit: int = 8) -> list[dict[str, Any]]:
@@ -2298,7 +2363,7 @@ def collect_ticker_data(
         logger.warning("Insider-Fetch fehlerhaft für '%s': %s", ticker, exc)
         insider = []
     try:
-        prediction_markets = _fetch_polymarket(ticker)
+        prediction_markets = _fetch_polymarket(ticker, company_name=long_name)
     except Exception as exc:  # noqa: BLE001 — defensive, nie crashen
         logger.warning("Polymarket-Fetch fehlerhaft für '%s': %s", ticker, exc)
         prediction_markets = []
