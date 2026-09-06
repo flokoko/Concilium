@@ -189,7 +189,9 @@ Klein aber sauber für langfristige Nutzung.
 Vol-Cap, Einstiegs-Level, 2y-Backtest, Hit-Rate-Direktiv) — nicht im Original-Review (HEAD 99a41f4) enthalten.
 **Tests:** 1785 passed, 2 skipped (Baseline grün). Beide Findings per Skript reproduziert.
 
-## D1. 🔴 Technik-Signal wird NACH Trade-Revision doppelt skaliert (KAUFEN-Position schrumpft quadratisch)
+## D1. 🔴 Technik-Signal wird NACH Trade-Revision doppelt skaliert (KAUFEN-Position schrumpft quadratisch) — **GEFIXT (Commit `a368069`)**
+
+**Status:** Reproduziert (per Skript 10→3→0.9 bestätigt). Fix via Coding-Subagent: `pipeline.py` Schritt 5c' kopiert `_technik_signal_basis` aus `result["trade_original"]` in den revidierten Trade vor dem erneuten `_apply_technik_signal`-Aufruf. Regressionstest `test_revision_bestaetigt_skalierten_trade_keine_doppel_skalierung` (doppelter Real-Pass). Selbst verifiziert: Position bleibt 3.0 (kein Doppel-Scaling).
 
 **Datei:** `src/concilium/pipeline.py` (Schritt 5c' → `_apply_technik_signal`, Z. 536) + `src/concilium/agents.py`
 (`_apply_technik_signal` / `_technik_signal_basis`, Z. 1300ff)
@@ -235,7 +237,9 @@ _apply_technik_signal(trade, analysts)
 **Risiko ungefixt:** Systematisch falsche, zu kleine Positionsgrößen für ALLE KAUFEN-Trades unter SMA200 mit
 Trade-Revision → Portfolio-Allokation deutlich untergewichtet, Track-Record-Verzerrung.
 
-## D2. 🟡 Relatives Momentum ignoriert gepinntes Datum `--date` (S&P-500-Wert aus heute)
+## D2. 🟡 Relatives Momentum ignoriert gepinntes Datum `--date` (S&P-500-Wert aus heute) — **GEFIXT (Commit `8b06124`)**
+
+**Status:** Fix via Coding-Subagent: `_get_sp500_momentum(as_of=None)` beschränkt die ^GSPC/SPY-Historie auf `<= as_of` und nutzt einen as_of-spezifischen Cache-Key; `collect_ticker_data` reicht `as_of` durch. Regressionstests `TestGetSp500MomentumAsOf` (Serien-Beschnitt, Durchreichung, Cache-Isolation). Selbst verifiziert: `_get_sp500_momentum(as_of="2026-06-01")` == 227.27 (beschränkte Serie) ≠ 192.31 (volle Serie).
 
 **Datei:** `src/concilium/data.py` (`collect_ticker_data` Z. 2130-2140 + `_get_sp500_momentum` Z. ~1780)
 
