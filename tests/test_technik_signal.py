@@ -605,7 +605,14 @@ def _make_llm() -> MagicMock:
 class TestPipelineSignalNachRevision:
     """Schritt 5c (Trade-Revision) darf das Signal nicht umgehen (skaliert nur)."""
 
-    def _run(self, tmp_path, *, revision_liefert: dict, analysts: dict | None = None):
+    def _run(
+        self,
+        tmp_path,
+        *,
+        revision_liefert: dict,
+        analysts: dict | None = None,
+        trader_liefert: dict | None = None,
+    ):
         """Gemockter Pipeline-Lauf: Trader KAUFEN unter SMA200, Revision patcht."""
         from datetime import datetime
 
@@ -630,7 +637,11 @@ class TestPipelineSignalNachRevision:
             "collect_ticker_data": MagicMock(return_value=_MOCK_DATA),
             "analyst_team": MagicMock(return_value=analysts or _MOCK_ANALYSTS),
             "debate": MagicMock(return_value=_MOCK_DEBATE),
-            "trader": MagicMock(return_value=_make_trade("KAUFEN")),
+            "trader": MagicMock(
+                return_value=(
+                    trader_liefert if trader_liefert is not None else _make_trade("KAUFEN")
+                )
+            ),
             "ensemble_trader": MagicMock(return_value=_make_trade("KAUFEN")),
             "risk_manager": MagicMock(return_value=_MOCK_RISK),
             "fetch_portfolio_positions": MagicMock(return_value=[]),
@@ -699,6 +710,46 @@ class TestPipelineSignalNachRevision:
         assert result["trade"]["positionsanteil"] == pytest.approx(4.0)  # 8 * 0.5
         assert result["trade"]["stop_loss"] == pytest.approx(91.2)
         assert result["trade"]["_technik_signal"]["ausnahme"] is True
+
+    def test_revision_bestaetigt_skalierten_trade_keine_doppel_skalierung(
+        self, tmp_path, monkeypatch
+    ):
+        """Realer Doppel-Pass: Revision bestätigt den SKALIERTEN Trade → idempotent.
+
+        Simuliert den echten Ablauf: trader() (Schritt 4) hat das Signal bereits
+        angewandt (positionsanteil skaliert, _technik_signal_basis im selben
+        dict gespeichert). trade_revision() baut — wie ein realer LLM-Call —
+        ein FRISCHES dict nur mit Schema-Keys: Es bestätigt den skalierten
+        positionsanteil, aber OHNE _technik_signal_basis. Der erneute Apply in
+        5c' darf deshalb NICHT nochmal auf den bereits skalierten Wert
+        zurückfallen und kumulativ skalieren (1.5 → 0.45).
+        """
+        monkeypatch.setenv("CONCILIUM_STATE_DIR", str(tmp_path / "state"))
+
+        # trader-Mock: Schritt 4 bereits simuliert (5.0 * 0.3 = 1.5, Basis 5.0)
+        trader_trade = {
+            "rolle": "Trader",
+            "aktion": "KAUFEN",
+            "rating": "KAUFEN",
+            "zielkurs": 110.0,
+            "stop_loss": 85.0,
+            "positionsanteil": 1.5,
+            "_technik_signal_basis": 5.0,
+            "_raw": "",
+        }
+        # Revisions-Mock: frisches Schema-Only-dict (wie realer LLM-Call) —
+        # bestätigt den skalierten Wert, OHNE _technik_signal_basis.
+        revised = _make_trade("KAUFEN")
+        revised["positionsanteil"] = 1.5
+
+        result = self._run(
+            tmp_path, revision_liefert=revised, trader_liefert=trader_trade
+        )
+
+        assert result["trade_revised"] is True
+        assert result["trade"]["aktion"] == "KAUFEN"
+        # Idempotent: 1.5 bleibt 1.5 (NICHT 1.5 * 0.3 = 0.45)
+        assert result["trade"]["positionsanteil"] == pytest.approx(1.5)
 
 
 # --------------------------------------------------------------------------- #

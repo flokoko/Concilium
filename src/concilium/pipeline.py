@@ -533,6 +533,17 @@ def run_pipeline(
     # gespeicherte Basis-Positionsgröße wird wiederverwendet, anstatt
     # kumulativ zu skalieren; HALTEN-Trades werden nie angetastet.
     try:
+        # Basis-Idempotenz: trade_revision baut ein frisches dict ohne die
+        # Metadaten des Original-Trades (nur Schema-Keys). Die beim ersten
+        # Apply gespeicherte Basis-Positionsgröße wird daher VOR dem erneuten
+        # Signal-Apply aus dem Original-Trade übernommen — sonst skaliert das
+        # Signal zweimal (quadratisch).
+        if isinstance(trade, dict) and trade.get("_technik_signal_basis") is None:
+            _orig = result.get("trade_original")
+            if isinstance(_orig, dict):
+                _b = _orig.get("_technik_signal_basis")
+                if _b is not None:
+                    trade["_technik_signal_basis"] = _b
         _apply_technik_signal(trade, analysts)
         # trade kann in-place mutiert worden sein (dict-Referenz) — sicherheitshalber
         # zurückschreiben, falls die Revision ein neues dict eingesetzt hat.
