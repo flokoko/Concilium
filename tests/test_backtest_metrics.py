@@ -128,3 +128,73 @@ class TestBacktestNewMetrics:
         result = run_backtest({"history": history})
 
         assert isinstance(result["anzahl_trades"], int)
+
+
+class TestBacktestWindowCap:
+    """Phase 5: Backtest wertet max. die letzten 500 Handelstage (~2y) aus.
+
+    Hintergrund: Die Kurs-Historie wird mit period="2y" geladen (~500 Tage).
+    Sollte das Fenster später verlängert werden (z. B. period="5y"), würde
+    sonst der auswertbare Backtest-Zeitraum (startdatum) mitwachsen und die
+    Kennzahlen wären über Läufe hinweg nicht mehr vergleichbar. Der Cap
+    hält das Fenster konstant — konsistent mit der 2y-Historie.
+    """
+
+    @staticmethod
+    def _make_osc_history(n_days: int, end_date: str = "2026-09-04") -> list[dict]:
+        """Deterministische Serie: Aufwärtstrend + Sinus-Oszillation (Periode 120 Tage).
+
+        Die Oszillation erzeugt wiederholt SMA50/SMA200-Crossovers → Signale.
+        """
+        import numpy as np
+        import pandas as pd
+
+        i = np.arange(n_days)
+        closes = 100.0 + 0.02 * i + 20.0 * np.sin(2 * np.pi * i / 120.0)
+        dates = pd.bdate_range(end=end_date, periods=n_days).strftime("%Y-%m-%d")
+        return [
+            {"date": d, "close": round(float(c), 4), "volume": 1_000_000}
+            for d, c in zip(dates, closes)
+        ]
+
+    def test_longer_history_yields_more_signals(self):
+        """Mehr Historie → mehr Signale (CEG-Bug-Fix): 500 Tage > 250 Tage.
+
+        Mit 1y (~250 Tagen) war SMA200 erst ab Tag 199 gültig — es blieb kein
+        Zeitraum für Crossovers übrig (0 Signale). Mit 2y (~500 Tagen) gibt
+        es ~300 auswertbare Tage → Crossovers werden erkannt.
+        """
+        long_hist = self._make_osc_history(500)
+        short_hist = long_hist[-250:]  # letztes 1y der gleichen Serie
+
+        r_long = run_backtest({"history": long_hist})
+        r_short = run_backtest({"history": short_hist})
+
+        assert r_long["anzahl_signale"] > r_short["anzahl_signale"]
+        assert r_short["anzahl_signale"] == 0  # exakt der alte CEG-Fehlerfall
+
+    def test_backtest_capped_at_last_500_trading_days(self):
+        """Bei >500 Tagen wird nur das letzte 500-Tage-Fenster ausgewertet.
+
+        startdatum ist dann der SMA200-Start des zugeschnittenen Fensters
+        (Position 499 im 700-Tage-Frame), nicht der SMA200-Start der vollen
+        Serie (Position 199).
+        """
+        n = 700
+        big_hist = self._make_osc_history(n)
+        uncapped_start = big_hist[199]["date"]  # SMA200-Start der vollen Serie
+        expected_capped_start = big_hist[n - 500 + 199]["date"]
+        assert uncapped_start != expected_capped_start  # Cap macht einen Unterschied
+
+        result = run_backtest({"history": big_hist})
+
+        assert result["startdatum"] == expected_capped_start
+
+    def test_cap_noop_at_500_days(self):
+        """Bei exakt 500 Tagen ändert der Cap nichts (Fenster == Historie)."""
+        hist = self._make_osc_history(500)
+        expected_start = hist[199]["date"]
+
+        result = run_backtest({"history": hist})
+
+        assert result["startdatum"] == expected_start

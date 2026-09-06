@@ -1921,8 +1921,10 @@ def collect_ticker_data(
         logger.info("Sammle Daten für %s …", ticker)
     t = yf.Ticker(ticker)
 
-    # --- Historie (~250 Tage OHLCV) ---
-    hist = t.history(period="1y", auto_adjust=False)
+    # --- Historie (~500 Tage OHLCV, 2y — Backtest braucht >=200 Tage NACH
+    # dem SMA200-Start für Crossovers; mit 1y waren 0 Signale möglich, vgl.
+    # CEG-Live-Lauf. Phase 5: Historie 1y → 2y verlängert) ---
+    hist = t.history(period="2y", auto_adjust=False)
     if hist is None or hist.empty:
         raise ValueError(
             f"Ungültiger Ticker '{ticker}': Keine Kursdaten von yfinance erhalten. "

@@ -91,6 +91,14 @@ def run_backtest(data: dict[str, Any]) -> dict[str, Any]:
         }
 
     df = pd.DataFrame(history)
+
+    # Phase 5: Fenster-Cap — konsistent mit der 2y-Historie (period="2y",
+    # ~500 Handelstage) wertet der Backtest max. die letzten 500 Handelstage
+    # aus. Fällt die Historie später länger aus (z. B. 5y), bleiben die
+    # Backtest-Ergebnisse so über Läufe hinweg vergleichbar.
+    if len(df) > 500:
+        df = df.tail(500).reset_index(drop=True)
+
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df = df.dropna(subset=["close"]).reset_index(drop=True)
 
