@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from typing import Any, NamedTuple
 
@@ -90,6 +91,11 @@ class LLMClient:
             "completion_tokens": 0,
             "total_tokens": 0,
         }
+        # Schützt total_usage/last_usage vor Race-Conditions bei parallelen
+        # LLM-Calls (analyst_team, ensemble_trader laufen via ThreadPool und
+        # teilen sich denselben LLMClient). Die +=-Updates in chat() sind
+        # read-modify-write und ohne Lock nicht atomar.
+        self._usage_lock = threading.Lock()
 
     def chat(
         self,
@@ -147,7 +153,8 @@ class LLMClient:
         if reasoning_effort:
             payload["reasoning_effort"] = reasoning_effort
 
-        self.last_usage = None
+        with self._usage_lock:
+            self.last_usage = None
 
         try:
             text, response_format_used, usage = self._send_with_retries(
@@ -182,12 +189,15 @@ class LLMClient:
                     f"LLM-Anfrage fehlgeschlagen nach {MAX_RETRIES + 1} Versuchen: {exc}"
                 ) from None
 
-        # usage erfassen (last_usage + kumulativ)
-        self.last_usage = usage
-        if usage is not None:
-            self.total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0) or 0
-            self.total_usage["completion_tokens"] += usage.get("completion_tokens", 0) or 0
-            self.total_usage["total_tokens"] += usage.get("total_tokens", 0) or 0
+        # usage erfassen (last_usage + kumulativ) — unter Lock, da chat() aus
+        # mehreren Threads (analyst_team/ensemble_trader) aufgerufen wird und
+        # die +=-Updates sonst verlorene Updates haben können.
+        with self._usage_lock:
+            self.last_usage = usage
+            if usage is not None:
+                self.total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0) or 0
+                self.total_usage["completion_tokens"] += usage.get("completion_tokens", 0) or 0
+                self.total_usage["total_tokens"] += usage.get("total_tokens", 0) or 0
 
         if as_structured and response_format is not None:
             return StructuredChatResult(text=text, response_format_used=response_format_used)
