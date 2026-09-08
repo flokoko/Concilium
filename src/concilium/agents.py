@@ -9,6 +9,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime, timedelta
@@ -2225,8 +2226,6 @@ def _compute_annualized_volatility(data: dict[str, Any]) -> float | None:
     std = variance**0.5
     if std <= 0:
         return None
-    import math
-
     annualized = std * math.sqrt(252)
     return round(annualized, 6)
 
