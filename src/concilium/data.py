@@ -1657,10 +1657,27 @@ def _fetch_fred_10y_yield() -> dict[str, Any] | None:
 def _fetch_macro_data() -> dict[str, Any]:
     """Holt Makro/Zins-Daten (10y US Treasury, S&P 500) — best effort, nie crashen.
 
+    Das Ergebnis wird pro Tag im Tages-Cache gepinnt (Pseudo-Ticker "_MACRO",
+    analog "_SP500_MOMENTUM") — 5 yfinance-Calls pro Tag statt pro Watchlist-
+    Ticker. Bewusst OHNE as_of im Cache-Key: Makro-Daten bleiben auch bei
+    gepinntem Analysedatum aktuell (dokumentierte Einschränkung).
+
     Returns:
         dict mit us_10y_yield, us_10y_yield_1m_ago, us_10y_trend,
         us_10y_source, sp500_pe, sp500_market_cap (Werte None bei Fehler).
     """
+    # 1. Tages-Cache prüfen (Pseudo-Ticker "_MACRO", kein as_of/peers —
+    # Makro bleibt aktuell, nicht gepinnt).
+    try:
+        cached = _load_cache("_MACRO", today_key=_get_today_key())
+        if cached is not None:
+            cached_macro = cached.get("macro")
+            if isinstance(cached_macro, dict):
+                logger.info("Makro-Cache-Treffer (_MACRO)")
+                return cached_macro
+    except Exception as exc:  # noqa: BLE001 — Cache-Lesen crasht nie
+        logger.debug("Makro-Cache-Lesen fehlgeschlagen: %s", exc)
+
     result: dict[str, Any] = {
         "us_10y_yield": None,
         "us_10y_yield_1m_ago": None,
@@ -1775,6 +1792,13 @@ def _fetch_macro_data() -> dict[str, Any]:
         result["oel_preis"] = cl_val
     except Exception as exc:  # noqa: BLE001 — best effort
         logger.warning("Makrodaten Ölpreis (CL=F) konnten nicht abgerufen werden: %s", exc)
+
+    # 2. Ergebnis im Tages-Cache ablegen — best effort, nie crashen.
+    # Pseudo-Ticker "_MACRO", bewusst ohne as_of/peers (Makro bleibt aktuell).
+    try:
+        _save_cache("_MACRO", {"macro": result}, today_key=_get_today_key())
+    except Exception as exc:  # noqa: BLE001 — Cache-Schreiben crasht nie
+        logger.debug("Makro-Cache-Schreiben fehlgeschlagen: %s", exc)
 
     return result
 
