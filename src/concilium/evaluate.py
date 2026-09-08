@@ -200,7 +200,13 @@ def _load_price_history(
 
     # yfinance laden
     try:
-        period_days = max(lookback_days + 60, 120)
+        # Fenster deckt auch den Evaluierungszeitraum ab: _evaluate_single
+        # bewertet bis decision_date + 90d (eval_end). lookback_days allein
+        # reicht daher nicht — bei älteren Entscheidungen fehlt sonst der
+        # Kurs am eval_end und exit_row fällt auf den letzten verfügbaren
+        # Kurs zurück (verfälschte Rendite). 2*lookback + 60 deckt
+        # decision_date bis ~lookback+60 Tage zurück ab.
+        period_days = max(lookback_days * 2 + 60, 120)
         t = yf.Ticker(ticker)
         hist = t.history(period=f"{period_days}d", auto_adjust=False)
         if hist is None or hist.empty:
