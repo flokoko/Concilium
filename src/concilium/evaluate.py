@@ -211,9 +211,9 @@ def _load_price_history(
             records.append(
                 {
                     "date": date.strftime("%Y-%m-%d"),
-                    "close": float(row["Close"]) if row.get("Close") is not None else None,
-                    "high": float(row["High"]) if row.get("High") is not None else None,
-                    "low": float(row["Low"]) if row.get("Low") is not None else None,
+                    "close": _safe_float(row["Close"]),
+                    "high": _safe_float(row["High"]),
+                    "low": _safe_float(row["Low"]),
                 }
             )
 
@@ -245,16 +245,19 @@ def _parse_timestamp(ts: str) -> datetime | None:
 
 
 def _safe_float(val: Any) -> float | None:
-    """Konvertiert einen Wert sicher zu float oder None."""
+    """Konvertiert einen Wert sicher zu float oder None (NaN/±inf → None)."""
     if val is None:
         return None
     s = str(val).strip()
     if not s:
         return None
     try:
-        return float(s)
+        f = float(s)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(f):
+        return None  # NaN/Inf (z. B. aus Kursdaten) darf nie weiterfließen
+    return f
 
 
 def _find_price_on_or_before(
@@ -322,7 +325,7 @@ def _outcome_rating_index(rendite_pct: float | None) -> int | None:
 
     Praktisch: >+2% -> 0, >0% -> 1, <=-2% -> 4, <0% -> 3, sonst -> 2.
     """
-    if rendite_pct is None:
+    if rendite_pct is None or not math.isfinite(rendite_pct):
         return None
     if rendite_pct > 2.0:
         return 0  # STARK KAUFEN
@@ -379,7 +382,7 @@ def _evaluate_single(
     if entry is None:
         entry = prices[0]  # Fallback: erster verfügbarer Kurs
     entry_price = _safe_float(entry.get("close")) if entry else None
-    if entry_price is None or entry_price <= 0:
+    if entry_price is None or not math.isfinite(entry_price) or entry_price <= 0:
         return empty
 
     # Exit-Preis: heute oder lookback_days nach Entscheidung, je nachdem was früher
@@ -391,7 +394,7 @@ def _evaluate_single(
     if exit_row is None:
         exit_row = prices[-1]  # Fallback: letzter verfügbarer Kurs
     exit_price = _safe_float(exit_row.get("close")) if exit_row else None
-    if exit_price is None:
+    if exit_price is None or not math.isfinite(exit_price):
         return empty
 
     # Rendite berechnen
@@ -402,6 +405,10 @@ def _evaluate_single(
         rendite_pct = -price_change_pct
     else:
         rendite_pct = price_change_pct
+
+    # NaN/Inf-Rendite (z. B. durch NaN-Kurse) → Zeile als leer werten
+    if not math.isfinite(rendite_pct):
+        return empty
 
     # Perioden-Kurse für Stop/Target-Check
     entry_date_str = entry.get("date", "")
@@ -417,13 +424,17 @@ def _evaluate_single(
         if action == "VERKAUFEN":
             # Verkauf: Ziel liegt unterhalb → Treffer wenn Low ≤ target
             ziel_erreicht = any(
-                p.get("low") is not None and float(p["low"]) <= target
+                p.get("low") is not None
+                and math.isfinite(float(p["low"]))
+                and float(p["low"]) <= target
                 for p in period_prices
             )
         else:
             # Kauf/Halten: Ziel liegt oberhalb → Treffer wenn High ≥ target
             ziel_erreicht = any(
-                p.get("high") is not None and float(p["high"]) >= target
+                p.get("high") is not None
+                and math.isfinite(float(p["high"]))
+                and float(p["high"]) >= target
                 for p in period_prices
             )
 
@@ -434,13 +445,17 @@ def _evaluate_single(
         if action == "VERKAUFEN":
             # Verkauf: Stop liegt oberhalb → gerissen wenn High ≥ stop
             stop_gerissen = any(
-                p.get("high") is not None and float(p["high"]) >= stop
+                p.get("high") is not None
+                and math.isfinite(float(p["high"]))
+                and float(p["high"]) >= stop
                 for p in period_prices
             )
         else:
             # Kauf/Halten: Stop liegt unterhalb → gerissen wenn Low ≤ stop
             stop_gerissen = any(
-                p.get("low") is not None and float(p["low"]) <= stop
+                p.get("low") is not None
+                and math.isfinite(float(p["low"]))
+                and float(p["low"]) <= stop
                 for p in period_prices
             )
 
@@ -833,6 +848,7 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
             e["rendite_pct"]
             for e in action_evals
             if e.get("rendite_pct") is not None
+            and math.isfinite(e["rendite_pct"])
         ]
 
         # Ø Confidence pro Aktion (normalisiert auf 0-1: conf/5)
@@ -862,6 +878,7 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
         e["rendite_pct"]
         for e in trades
         if e.get("rendite_pct") is not None
+        and math.isfinite(e["rendite_pct"])
     ]
     result["durchschnitt_rendite_gesamt"] = (
         sum(all_renditen) / len(all_renditen) if all_renditen else None
@@ -884,7 +901,7 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     # --- Konfidenz-Bänder ---
     # hoch: confidence ≥ 4, mittel: 3, niedrig: ≤ 2
     bands = {"hoch": [], "mittel": [], "niedrig": []}
-    for e in evaluations:
+    for e in trades:
         conf = e.get("confidence")
         if conf is None:
             continue
@@ -914,7 +931,7 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     result["konfidenz_baende"] = konfidenz_baende
 
     # --- Portfolio-Fit-Zusammenhang ---
-    pf_evals = [e for e in evaluations if e.get("portfolio_fit_score") is not None]
+    pf_evals = [e for e in trades if e.get("portfolio_fit_score") is not None]
     pf_hoch = [e for e in pf_evals if (e.get("portfolio_fit_score") or 0) >= 4]
     if pf_hoch:
         pf_hits = [e for e in pf_hoch if e["hit"] is True]
@@ -929,7 +946,7 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     # Nur Zeilen mit gültigem rating_distance (int, nicht None)
     rating_distances = [
         e["rating_distance"]
-        for e in evaluations
+        for e in trades
         if e.get("rating_distance") is not None
     ]
     result["durchschnitt_rating_distanz"] = (
