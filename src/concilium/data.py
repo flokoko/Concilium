@@ -11,6 +11,7 @@ dem Stand zu as_of. Fundamentals, Makro- und News-Daten bleiben aktuell
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -38,6 +39,10 @@ _FRED_10Y_URL = (
     "https://api.stlouisfed.org/fred/series/observations"
     "?series_id=DGS10&api_key={api_key}&file_type=json&sort_order=desc&limit=2"
 )
+
+# Parallele Peer-Datenabrufe (ThreadPoolExecutor) — analog _MAX_PARALLEL in
+# agents.py: deckelt Thread-Anzahl unabhängig von der Peer-Listengröße.
+_PEER_MAX_PARALLEL = 5
 
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -1924,6 +1929,12 @@ def _get_sp500_momentum(as_of: str | None = None) -> float | None:
 def _fetch_peer_data(peers: list[str]) -> list[dict[str, Any]]:
     """Holt KGV/Marktkapitalisierung für Peer-Ticker — best effort, nie crashen.
 
+    Die Abrufe laufen parallel (ThreadPoolExecutor, max. _PEER_MAX_PARALLEL);
+    die Ergebnisreihenfolge entspricht exakt der Eingabe-Reihenfolge.
+    Das Ergebnis wird pro Peer-Liste im Tages-Cache gepinnt (Pseudo-Ticker
+    "_PEERS_<sortierte-normalisierte-Ticker>") — mehrere Watchlist-Ticker mit
+    derselben Peer-Liste teilen sich so einen Satz yfinance-Calls pro Tag.
+
     Args:
         peers: Liste von Ticker-Symbolen.
 
@@ -1931,28 +1942,88 @@ def _fetch_peer_data(peers: list[str]) -> list[dict[str, Any]]:
         Liste von dicts mit ticker, pe_ratio, market_cap, name.
         Bei Fehler/leer → leere Liste.
     """
-    result: list[dict[str, Any]] = []
-    for peer_ticker in peers:
-        peer_ticker = peer_ticker.strip().upper()
-        if not peer_ticker:
-            continue
+    today_key = _get_today_key()
+
+    # Normalisierte Peer-Liste (strip + upper + re.sub, dedupliziert, sortiert)
+    try:
+        peers_norm = _normalized_peer_list(peers)
+    except Exception:  # noqa: BLE001 — best effort: Normalisierung crasht nie
+        peers_norm = []
+
+    # Eingabe-Reihenfolge: leere Einträge (z.B. "  ") werden wie bisher
+    # übersprungen; der Executor arbeitet auf den bereinigten Tickern und
+    # map() stellt die Zuordnung result[i] → i-ter bereinigter Peer sicher.
+    cleaned = [p.strip().upper() for p in peers if p and p.strip()]
+
+    # 1. Tages-Cache: Pseudo-Ticker trägt die sortierte Peer-Liste; peers=None
+    # übergeben, damit der Peers-Segment-Mechanismus nicht doppelt greift.
+    # Beim Treffer werden die Einträge auf die AKTUELLE Eingabe-Reihenfolge
+    # umsortiert (der Cache speichert die Reihenfolge des ersten Laufs) —
+    # garantiert result[i] für peers[i], auch bei Cache-Treffer.
+    pseudo_ticker = "_PEERS_" + "_".join(peers_norm) if peers_norm else None
+    if pseudo_ticker is not None and cleaned:
+        try:
+            cached = _load_cache(pseudo_ticker, today_key=today_key)
+            if cached is not None:
+                cached_peers = cached.get("peers_data")
+                if isinstance(cached_peers, list) and cached_peers:
+                    by_ticker: dict[str, dict[str, Any]] = {}
+                    for entry in cached_peers:
+                        if isinstance(entry, dict) and entry.get("ticker"):
+                            by_ticker[entry["ticker"]] = entry
+                    if by_ticker and all(t in by_ticker for t in cleaned):
+                        logger.info("Peer-Cache-Treffer für %s", pseudo_ticker)
+                        return [by_ticker[t] for t in cleaned]
+                    # Set-Mismatch (sollte via Cache-Key nicht passieren) →
+                    # Cache verwerfen und normal laden.
+        except Exception as exc:  # noqa: BLE001 — Cache-Lesen crasht nie
+            logger.debug("Peer-Cache-Lesen fehlgeschlagen: %s", exc)
+
+    # 2. Netz-Abruf, parallel pro Peer. Ein fehlgeschlagener Peer wird als
+    # Fehlereintrag (None-Werte) an seiner Position belassen — genau wie
+    # bisher bei der sequenziellen Variante.
+    def _fetch_one(peer_ticker: str) -> dict[str, Any]:
         try:
             pt = yf.Ticker(peer_ticker)
             pinfo = pt.info or {}
-            result.append({
+            return {
                 "ticker": peer_ticker,
                 "pe_ratio": _safe_float(pinfo.get("trailingPE")),
                 "market_cap": _safe_float(pinfo.get("marketCap")),
                 "name": pinfo.get("longName") or pinfo.get("shortName") or peer_ticker,
-            })
+            }
         except Exception as exc:  # noqa: BLE001 — best effort
-            logger.warning("Peer-Daten für '%s' konnten nicht abgerufen werden: %s", peer_ticker, exc)
-            result.append({
+            logger.warning(
+                "Peer-Daten für '%s' konnten nicht abgerufen werden: %s", peer_ticker, exc
+            )
+            return {
                 "ticker": peer_ticker,
                 "pe_ratio": None,
                 "market_cap": None,
                 "name": peer_ticker,
-            })
+            }
+
+    # Eingabe-Reihenfolge: leere Einträge (z.B. "  ") werden wie bisher
+    # übersprungen; der Executor arbeitet auf den bereinigten Tickern und
+    # map() stellt die Zuordnung result[i] → i-ter bereinigter Peer sicher.
+    cleaned = [p.strip().upper() for p in peers if p and p.strip()]
+    result: list[dict[str, Any]] = []
+    if cleaned:
+        try:
+            max_workers = min(len(cleaned), _PEER_MAX_PARALLEL)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                result = list(pool.map(_fetch_one, cleaned))
+        except Exception as exc:  # noqa: BLE001 — best effort: Fallback sequenziell
+            logger.warning("Paralleler Peer-Abruf fehlgeschlagen (%s) — sequenziell", exc)
+            result = [_fetch_one(p) for p in cleaned]
+
+    # 3. Ergebnis (auch leere Liste) best effort im Tages-Cache ablegen
+    if pseudo_ticker is not None:
+        try:
+            _save_cache(pseudo_ticker, {"peers_data": result}, today_key=today_key)
+        except Exception as exc:  # noqa: BLE001 — Cache-Schreiben crasht nie
+            logger.debug("Peer-Cache-Schreiben fehlgeschlagen: %s", exc)
+
     return result
 
 
