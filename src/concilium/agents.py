@@ -2199,6 +2199,172 @@ def _dampen_stark_rating(result: dict[str, Any], raw_rating: str) -> None:
         result["rating_gedämpft"] = True
 
 
+# --------------------------------------------------------------------------- #
+# PM-Genehmigungsschwelle — kalibrierungs-gestützte Herabstufung von GENEHMIGT
+# --------------------------------------------------------------------------- #
+
+# Schwelle der echten Hit-Rate, ab der die Historie als überkonfident gilt
+# (gemeinsame Referenz mit der Prompt-Hit-Rate-Direktive: 0.20/0.35/0.50).
+_PM_SCHWELLE_HITRATE = 0.5
+
+# PM-Konfidenz (1-5): unterhalb dieser Stufe genügt GENEHMIGT bei
+# überkonfidenter Historie nicht mehr — Herabstufung auf MODIFIZIERT.
+_PM_SCHWELLE_CONFIDENCE = 4
+
+
+def _load_pm_calibration() -> dict[str, Any] | None:
+    """Liest state/calibration.json für die PM-Genehmigungsschwelle.
+
+    Netzfrei (analog ``_load_ensemble_weights``): ``CONCILIUM_STATE_DIR``-
+    Übersteuerung, kein Import von feedback.py (Zirkularität vermeiden).
+    Gilt nur, wenn die Datei <7 Tage alt ist (Alters-Check über ``erstellt_am``).
+
+    Returns:
+        dict mit ``hit_rate_gesamt`` (float), ``anzahl_entscheidungen`` (int)
+        und ``nach_aktion`` (dict {aktion: {n, hit_rate, avg_confidence}}) —
+        jeweils nur, wenn vorhanden und korrekt getypt. None bei fehlender/
+        zu alter/ungültiger Datei oder ohne verwertbare Kennzahl. Crasht nie.
+    """
+    try:
+        cal_path = os.path.join(_ensemble_state_dir(), "calibration.json")
+        if not os.path.isfile(cal_path):
+            return None
+        with open(cal_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return None
+
+        # Alters-Check: erstellt_am muss vorhanden und nicht zu alt sein
+        erstellt_am = data.get("erstellt_am")
+        if not isinstance(erstellt_am, str) or not erstellt_am.strip():
+            return None
+        try:
+            erstellt_dt = datetime.fromisoformat(erstellt_am)
+        except (ValueError, TypeError):
+            return None
+        age = datetime.now() - erstellt_dt
+        if age > timedelta(days=_ENSEMBLE_CALIBRATION_MAX_AGE_DAYS):
+            logger.debug(
+                "Kalibrierungs-JSON älter als %d Tage — keine PM-Genehmigungsschwelle",
+                _ENSEMBLE_CALIBRATION_MAX_AGE_DAYS,
+            )
+            return None
+
+        result: dict[str, Any] = {}
+
+        hit_rate_gesamt = data.get("hit_rate_gesamt")
+        if isinstance(hit_rate_gesamt, (int, float)) and not isinstance(hit_rate_gesamt, bool):
+            result["hit_rate_gesamt"] = float(hit_rate_gesamt)
+
+        anzahl = data.get("anzahl_entscheidungen")
+        if isinstance(anzahl, (int, float)) and not isinstance(anzahl, bool):
+            result["anzahl_entscheidungen"] = int(anzahl)
+
+        nach_aktion = data.get("nach_aktion")
+        if isinstance(nach_aktion, dict):
+            result["nach_aktion"] = nach_aktion
+
+        # Ohne verwertbare Kennzahl gibt es keine Schwelle
+        if not result:
+            return None
+        return result
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.debug("PM-Kalibrierung konnte nicht geladen werden: %s", exc)
+        return None
+
+
+def _apply_pm_genehmigungsschwelle(
+    final: dict[str, Any],
+    trade: dict[str, Any],
+    calibration: dict[str, Any] | None,
+) -> bool:
+    """Deterministische Herabstufung GENEHMIGT → MODIFIZIERT (in-place).
+
+    Der PM genehmigt in der Journal-Historie fast alles (Ja-Sager). Bei
+    überkonfidenter Historie (niedrige echte Hit-Rate, hohe Konfidenz) braucht
+    ein GENEHMIGT mit niedriger PM-Konfidenz (< ``_PM_SCHWELLE_CONFIDENCE``)
+    eine höhere Hürde und wird automatisch auf MODIFIZIERT herabgestuft:
+
+    1. Gesamt: ``hit_rate_gesamt`` < ``_PM_SCHWELLE_HITRATE``, ODER
+    2. Aktions-spezifisch: Hit-Rate der Trade-Aktion (via ``_rating_to_action``
+       auf KAUFEN/HALTEN/VERKAUFEN normalisiert) < ``_PM_SCHWELLE_HITRATE``.
+
+    MODIFIZIERT und ABGELEHNT bleiben unverändert (nur GENEHMIGT downgraden).
+    Bei Herabstufung werden ``final["genehmigung_herabgestuft"] = True`` und
+    ``final["genehmigung_herabgestuft_grund"]`` (deutscher Begründungstext)
+    gesetzt. Fehlende Werte → keine Herabstufung. Crasht nie.
+
+    Args:
+        final: PM-Ergebnis (``portfolio_manager``-Return), wird in-place geändert.
+        trade: Trade-Vorschlag (liefert ``aktion`` für Bedingung 2).
+        calibration: Kalibrierungs-dict von ``_load_pm_calibration``
+            (None/leer = keine Herabstufung).
+
+    Returns:
+        True, wenn herabgestuft wurde, sonst False.
+    """
+    try:
+        if not isinstance(final, dict) or not isinstance(calibration, dict):
+            return False
+
+        if final.get("entscheidung") != "GENEHMIGT":
+            return False  # nur GENEHMIGT wird herabgestuft
+
+        confidence = final.get("confidence")
+        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+            return False  # fehlende/ungültige Konfidenz → keine Herabstufung
+
+        if confidence >= _PM_SCHWELLE_CONFIDENCE:
+            return False  # hohe PM-Konfidenz → GENEHMIGT bleibt
+
+        # Bedingung 1: Gesamt-Überkonfidenz
+        hit_rate_gesamt = calibration.get("hit_rate_gesamt")
+        gesamt_hit_rate: float | None = None
+        if isinstance(hit_rate_gesamt, (int, float)) and not isinstance(hit_rate_gesamt, bool):
+            hr_gesamt = float(hit_rate_gesamt)
+            if hr_gesamt < _PM_SCHWELLE_HITRATE:
+                gesamt_hit_rate = hr_gesamt
+
+        # Bedingung 2: Aktions-spezifische Überkonfidenz
+        aktions_hit_rate: float | None = None
+        aktion = ""
+        nach_aktion = calibration.get("nach_aktion")
+        if isinstance(nach_aktion, dict):
+            raw_aktion = str(trade.get("aktion", "")) if isinstance(trade, dict) else ""
+            aktion = _rating_to_action(raw_aktion)  # Unbekannt/leer → HALTEN
+            adata = nach_aktion.get(aktion)
+            if isinstance(adata, dict):
+                hr = adata.get("hit_rate")
+                if isinstance(hr, (int, float)) and not isinstance(hr, bool):
+                    hr_aktion = float(hr)
+                    if hr_aktion < _PM_SCHWELLE_HITRATE:
+                        aktions_hit_rate = hr_aktion
+
+        if gesamt_hit_rate is None and aktions_hit_rate is None:
+            return False
+
+        if gesamt_hit_rate is not None:
+            grund = (
+                "PM-Genehmigung bei überkonfidenter Historie "
+                f"(Gesamt-Hit-Rate {gesamt_hit_rate * 100:.0f}%) und niedriger "
+                f"Konfidenz ({confidence:g}/5) auf MODIFIZIERT herabgestuft."
+            )
+        else:
+            grund = (
+                "PM-Genehmigung bei überkonfidenter Historie "
+                f"(Hit-Rate {aktions_hit_rate * 100:.0f}% für {aktion}) und niedriger "
+                f"Konfidenz ({confidence:g}/5) auf MODIFIZIERT herabgestuft."
+            )
+
+        final["entscheidung"] = "MODIFIZIERT"
+        final["genehmigung_herabgestuft"] = True
+        final["genehmigung_herabgestuft_grund"] = grund
+        return True
+    except Exception as exc:  # noqa: BLE001 — crasht nie
+        logger.debug("PM-Genehmigungsschwelle fehlgeschlagen: %s", exc)
+        return False
+
+
 def ensemble_trader(
     analysts: dict[str, Any],
     debate_result: dict[str, Any],
@@ -2889,6 +3055,13 @@ def portfolio_manager(
         reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
             wird an den PM-Call durchgereicht. None/'' (Default) = kein
             reasoning_effort im Payload (bisheriges Verhalten).
+
+    Returns:
+        dict mit ``entscheidung``/``begründung``/``confidence`` (+ ``_raw``).
+        Bei frischer Kalibrierung (``state/calibration.json``, netzfrei,
+        <7 Tage) wird GENEHMIGT mit niedriger Konfidenz bei überkonfidenter
+        Historie deterministisch auf MODIFIZIERT herabgestuft
+        (``genehmigung_herabgestuft`` + ``genehmigung_herabgestuft_grund``).
     """
     trade_text = json.dumps(trade, ensure_ascii=False, indent=2, default=str)
     risk_text = json.dumps(risk, ensure_ascii=False, indent=2, default=str)
@@ -2911,13 +3084,23 @@ def portfolio_manager(
     if reflection_context:
         user_text += f"\n\n{reflection_context}"
 
-    return _call_agent(
+    result = _call_agent(
         llm, SYSTEM_PM, user_text,
         response_format=FINAL_SCHEMA,
         structured=True,
         model=model,
         reasoning_effort=reasoning_effort,
     )
+
+    # PM-Genehmigungsschwelle: deterministische Herabstufung GENEHMIGT →
+    # MODIFIZIERT bei überkonfidenter Historie (state/calibration.json,
+    # netzfrei, <7 Tage) und niedriger PM-Konfidenz. Aktions-agnostisch —
+    # gilt konsistent auch im Review-Pfad (kein Exit-Guard nötig).
+    calibration = _load_pm_calibration()
+    if calibration is not None:
+        _apply_pm_genehmigungsschwelle(result, trade, calibration)
+
+    return result
 
 
 def trade_revision(
