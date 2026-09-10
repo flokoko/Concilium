@@ -13,6 +13,7 @@ from . import config
 from .data import _parse_as_of
 from .evaluate import evaluate_journal
 from .llm import LLMClient
+from .monitor import run_monitor
 from .pipeline import run_pipeline, run_portfolio
 from .report import generate_report, generate_track_record_report
 from .review import run_review
@@ -253,11 +254,23 @@ def main(argv: list[str] | None = None) -> int:
         "Schließt sich mit --ticker/--tickers/--portfolio/--watchlist aus.",
     )
     parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help="Stop-Monitor: prüft alle Aktien-Positionen des realen Depots "
+        "(Google-Sheet) gegen die Stop-/Ziel-Kurse des jüngsten Journal-Eintrags "
+        "(journal/decisions.csv). Warnt, wenn ein Stop gerissen ist (🔴) oder "
+        "ein Ziel erreicht wurde (🟢). Führt ZUERST --evaluate + calibration.json "
+        "aus. Deterministisch (kein LLM). Kann mit --evaluate, --max-positions, "
+        "--date kombiniert werden. Schließt sich mit "
+        "--ticker/--tickers/--portfolio/--watchlist aus.",
+    )
+    parser.add_argument(
         "--max-positions",
         type=int,
         default=None,
-        help="[nur --review] Begrenzt die Anzahl der analysierten Depot-Positionen "
-        "(größte zuerst, nach depot_pct). Default: alle Aktien-Positionen.",
+        help="[nur --review/--monitor] Begrenzt die Anzahl der geprüften "
+        "Depot-Positionen (größte zuerst, nach depot_pct). Default: alle "
+        "Aktien-Positionen.",
     )
     parser.add_argument(
         "--usage",
@@ -381,6 +394,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    if args.monitor and (args.ticker or args.tickers or args.portfolio or args.watchlist):
+        print(
+            "FEHLER: --monitor kann nicht mit --ticker, --tickers, --portfolio "
+            "oder --watchlist kombiniert werden.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.usage and (args.ticker or args.tickers or args.portfolio):
         print(
             "FEHLER: --usage kann nicht mit --ticker, --tickers oder --portfolio "
@@ -416,8 +437,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # --evaluate ist eigenständig: Pipeline wird nicht ausgeführt
-    # (außer bei --watchlist, dort läuft evaluate vorn mit — siehe unten)
-    if args.evaluate is not None and not args.watchlist and not args.review:
+    # (außer bei --watchlist/--review/--monitor, dort läuft evaluate vorn mit —
+    # siehe unten)
+    if (
+        args.evaluate is not None
+        and not args.watchlist
+        and not args.review
+        and not args.monitor
+    ):
         level = logging.DEBUG if args.verbose else logging.INFO
         logging.basicConfig(
             level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -740,6 +767,129 @@ def main(argv: list[str] | None = None) -> int:
 
         return 0 if (successes > 0 or (not ergebnisse and failures == 0)) else 1
 
+    # --- Stop-Monitor-Modus (--monitor) ---
+    # Führt ZUERST evaluate_journal + _write_calibration_json aus (damit
+    # calibration.json aktuell ist — analog --review), dann run_monitor über
+    # alle Aktien-Positionen des realen Depots. Der Monitor ist deterministisch
+    # (kein LLM): Journal-Stop/Ziel vs. aktueller Kurs.
+    if args.monitor:
+        level = logging.DEBUG if args.verbose else logging.INFO
+        logging.basicConfig(
+            level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        )
+
+        # Schritt 1: evaluate_journal + calibration.json (Feedback aktuell)
+        eval_journal_path = (
+            args.evaluate if args.evaluate is not None else "journal/decisions.csv"
+        )
+        try:
+            print("--- Monitor: Track-Record-Evaluierung ---", file=sys.stderr)
+            eval_result = evaluate_journal(
+                eval_journal_path,
+                lookback_days=args.lookback,
+                llm=None,  # Monitor ist netzfrei bzgl. LLM
+            )
+            _write_calibration_json(eval_result)
+            track_report = generate_track_record_report(eval_result)
+            print(track_report)
+
+            # Track-Record-Report speichern
+            reports_dir = _reports_dir()
+            date_str = datetime.now().strftime("%Y%m%d")
+            track_filepath = os.path.join(reports_dir, f"track_record_{date_str}.md")
+            os.makedirs(reports_dir, exist_ok=True)
+            with open(track_filepath, "w", encoding="utf-8") as fh:
+                fh.write(track_report)
+            print(
+                f"\n---\nTrack-Record-Report gespeichert: {track_filepath}",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"FEHLER bei Track-Record-Evaluierung (Monitor): {exc}",
+                file=sys.stderr,
+            )
+            logging.exception("Track-Record-Fehler (Monitor)")
+            return 1
+
+        # Schritt 2: Stop-/Ziel-Check (deterministisch, kein LLM)
+        print("\n--- Monitor: Stop-/Ziel-Check ---", file=sys.stderr)
+        try:
+            monitor_result = run_monitor(
+                llm=None,
+                max_positions=args.max_positions,
+                as_of=args.date,
+            )
+        except KeyboardInterrupt:
+            print("\nABGEBROCHEN (Monitor).", file=sys.stderr)
+            return 130
+        except Exception as exc:  # noqa: BLE001 — Monitor crasht die CLI nicht hart
+            print(f"UNERWARTETER FEHLER im Monitor-Modus: {exc}", file=sys.stderr)
+            logging.exception("Unerwarteter Fehler im Monitor-Modus")
+            return 1
+
+        positionen = monitor_result.get("positionen", {})
+        failures = monitor_result.get("fehler", 0)
+        gesamt = monitor_result.get("gesamt_positionen", 0)
+
+        # Zusammenfassung auf stdout (kompakt, deutsch)
+        print("## Monitor-Zusammenfassung")
+        print()
+
+        stops_gerissen = 0
+        ziele_erreicht = 0
+        for ticker, entry in positionen.items():
+            name = entry.get("name") or ticker
+            price = entry.get("current_price")
+            stop = entry.get("stop")
+            target = entry.get("target")
+            if entry.get("stop_gerissen"):
+                stops_gerissen += 1
+                stop_str = f"{stop:.2f}" if stop is not None else "n/a"
+                if price is not None and stop is not None:
+                    pct = (price - stop) / stop * 100.0
+                    print(
+                        f"🔴 {ticker} ({name}) — STOP GERISSEN: "
+                        f"Kurs {price:.2f} < Stop {stop_str} ({pct:+.1f}%)"
+                    )
+                else:
+                    print(
+                        f"🔴 {ticker} ({name}) — STOP GERISSEN: "
+                        f"Kurs n/a < Stop {stop_str}"
+                    )
+            elif entry.get("ziel_erreicht"):
+                ziele_erreicht += 1
+                target_str = f"{target:.2f}" if target is not None else "n/a"
+                if price is not None:
+                    print(
+                        f"🟢 {ticker} ({name}) — ZIEL ERREICHT: "
+                        f"Kurs {price:.2f} ≥ Ziel {target_str}"
+                    )
+                else:
+                    print(
+                        f"🟢 {ticker} ({name}) — ZIEL ERREICHT: "
+                        f"Kurs n/a ≥ Ziel {target_str}"
+                    )
+            elif not entry.get("journal_gefunden"):
+                print(f"⚪ {ticker} ({name}) — kein Journal-Eintrag (kein Stop bekannt)")
+            else:
+                hinweis = entry.get("hinweis") or "OK"
+                price_str = f"{price:.2f}" if price is not None else "n/a"
+                print(f"✅ {ticker} ({name}) — {hinweis} (Kurs {price_str})")
+
+        if not positionen:
+            print(f"Keine Aktien-Positionen zu prüfen ({gesamt} Position(en) gesamt).")
+
+        print()
+        print(
+            f"Monitor: {len(positionen)} Positionen geprüft, "
+            f"{stops_gerissen} Stops gerissen, {ziele_erreicht} Ziele erreicht, "
+            f"{failures} Fehler."
+        )
+
+        # Exit-Code: Fehler sind Warnungen (analog Review), 0 sofern gescannt.
+        return 0
+
     # --- Pipeline-Modus: --ticker, --tickers oder --portfolio required ---
     # Mutual exclusion: --ticker, --tickers, --portfolio
     mode_count = sum(1 for x in (args.ticker, args.tickers, args.portfolio) if x)
@@ -750,8 +900,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.ticker and not args.tickers and not args.portfolio:
         parser.error(
-            "--ticker, --tickers, --portfolio, --usage oder --watchlist ist erforderlich, "
-            "wenn --evaluate nicht gesetzt ist."
+            "--ticker, --tickers, --portfolio, --usage, --watchlist oder --monitor "
+            "ist erforderlich, wenn --evaluate nicht gesetzt ist."
         )
 
     # Logging konfigurieren
