@@ -160,8 +160,15 @@ class TestTraderEinstiegsLevel:
 
     def test_level_none_wenn_nicht_geliefert(self):
         """Ohne Feld im LLM-Output bleibt einstiegs_level None (setdefault-Default)."""
+        # Phase 2 (Richtungs-Zwang): die bullish Fixture (_ANALYSTS/_DEBATE)
+        # würde HALTEN deterministisch zu KAUFEN erzwingen — dieser Test prüft
+        # den HALTEN-Pfad, daher ausgewogene Debatten-Konfidenz (gemischte
+        # Signale → kein Zwang, HALTEN bleibt).
+        debate = dict(_DEBATE)
+        debate["bull_confidence"] = 3
+        debate["bear_confidence"] = 3
         llm = _StructuredMockLLM(_TRADE_JSON_OHNE_LEVEL)
-        result = trader(_ANALYSTS, _DEBATE, llm)
+        result = trader(_ANALYSTS, debate, llm)
         assert result["einstiegs_level"] is None
         assert result["aktion"] == "HALTEN"
 

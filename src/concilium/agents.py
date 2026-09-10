@@ -247,6 +247,13 @@ hoher Überzeugung (sehr klare FUNDAMENTALE Signale — nicht bloß technische; 
 technische Signale betreffen nur das TIMING). Bei Unsicherheit nimm \
 'KAUFEN'/'VERKAUFEN' bzw. 'HALTEN'.
 
+HALTEN ist KEIN Default-Ausweg: HALTEN ist nur dann richtig, wenn du aktiv \
+begründen kannst, warum weder gekauft noch verkauft werden sollte (z. B. \
+Chance-Risiko ausgeglichen, Abwarte-Case mit konkreten Checkpunkten, These \
+noch nicht ausgereift). Bei klaren Signalen (starke Fundamental-These, \
+klare Bull/Bear-Debatte, Bewertung deutlich unter/über Fair Value) nimm \
+KAUFEN bzw. VERKAUFEN — wage Halten ist die schlechteste Entscheidung.
+
 Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 {
   "rolle": "Trader",
@@ -1562,6 +1569,82 @@ def _cap_position_by_volatility(
     return trade
 
 
+# ---------------------------------------------------------------------------
+# Phase 2: HALTEN-Default entgegenwirken — Richtungs-Zwang bei klaren Signalen
+# ---------------------------------------------------------------------------
+
+def _force_direction_on_clear_signal(
+    trade: dict[str, Any],
+    analysts: dict[str, Any],
+    debate: dict[str, Any],
+) -> dict[str, Any]:
+    """Erzwingt bei klaren Richtungssignalen KAUFEN/VERKAUFEN statt HALTEN (in-place).
+
+    HALTEN ist der bequeme Default-Ausweg des LLM bei Unsicherheit — im Journal
+    dominiert HALTEN die Entscheidungen. Diese deterministische Nachbearbeitung
+    zwingt bei EINDEUTIGEN Signalen zur Richtung:
+
+    - KAUFEN-Zwang:  Fundamental-Score >= 4 (bullisch) UND Bull-Konfidenz >
+      Bear-Konfidenz (Netto-Bull).
+    - VERKAUFEN-Zwang: Fundamental-Score <= 2 (bearisch) UND Bear-Konfidenz >
+      Bull-Konfidenz (Netto-Bear).
+    - Sonst: unverändert (HALTEN bleibt — gemischte Signale sind kein Zwang).
+
+    Der Zwang greift NUR bei HALTEN: KAUFEN/VERKAUFEN werden nie überschrieben.
+    Das Rating wird auf KAUFEN/VERKAUFEN gesetzt (nicht STARK — kein Override
+    der Rating-Stärke, die Dämpfungs-Logik bleibt konsistent).
+
+    Robustheit: crasht nie (try/except). Fehlende Werte (None, leere dicts,
+    nicht konvertierbare Scores/Konfidenzen) → kein Zwang, HALTEN bleibt.
+    """
+    try:
+        aktion = str(trade.get("aktion", "")).strip().upper()
+        if aktion != "HALTEN":
+            return trade
+
+        # Fundamental-Score (int 1-5) — fehlt/ungültig/NaN → kein klares Signal
+        fundamental = (analysts or {}).get("fundamental")
+        if not isinstance(fundamental, dict):
+            return trade
+        score = _safe_float_or_none(fundamental.get("score"))
+        if score is None:
+            return trade  # Fundamental-Score fehlt → kein Zwang (HALTEN bleibt)
+
+        # Debatten-Konfidenz: direkte Felder oder Fallback über _raw (analog trader())
+        bull_conf = (debate or {}).get("bull_confidence")
+        if bull_conf is None:
+            bull_conf = _parse_debate_confidence((debate or {}).get("bull", {}))
+        bear_conf = (debate or {}).get("bear_confidence")
+        if bear_conf is None:
+            bear_conf = _parse_debate_confidence((debate or {}).get("bear", {}))
+        bull_conf_f = _safe_float_or_none(bull_conf)
+        bear_conf_f = _safe_float_or_none(bear_conf)
+        if bull_conf_f is None or bear_conf_f is None:
+            return trade  # Konfidenz unvollständig → kein Zwang
+
+        if score >= 4 and bull_conf_f > bear_conf_f:
+            trade["aktion"] = "KAUFEN"
+            trade["rating"] = "KAUFEN"
+            trade["richtung_erzwungen"] = True
+            trade["richtung_erzwungen_grund"] = (
+                f"Richtungs-Zwang: Fundamental-Score {score:g} (bullisch) und "
+                f"Netto-Bull-Debatte (Bull {bull_conf_f:g} > Bear {bear_conf_f:g}) — "
+                "wage HALTEN ist bei klarem Signal keine begründete Entscheidung."
+            )
+        elif score <= 2 and bear_conf_f > bull_conf_f:
+            trade["aktion"] = "VERKAUFEN"
+            trade["rating"] = "VERKAUFEN"
+            trade["richtung_erzwungen"] = True
+            trade["richtung_erzwungen_grund"] = (
+                f"Richtungs-Zwang: Fundamental-Score {score:g} (bearisch) und "
+                f"Netto-Bear-Debatte (Bear {bear_conf_f:g} > Bull {bull_conf_f:g}) — "
+                "wage HALTEN ist bei klarem Signal keine begründete Entscheidung."
+            )
+    except Exception:  # noqa: BLE001 — Trade-Änderung darf nie crashen
+        return trade
+    return trade
+
+
 def trader(
     analysts: dict[str, Any],
     debate_result: dict[str, Any],
@@ -1634,10 +1717,24 @@ def trader(
     result["aktion"] = _rating_to_action(raw_rating)
     # Entscheidungs-Disziplin: STARK KAUFEN/STARK VERKAUFEN dämpfen wenn überkonfident
     _dampen_stark_rating(result, raw_rating)
+    # Phase 2 (HALTEN-Default entgegenwirken): Richtungs-Zwang bei klaren
+    # Signalen — VOR _ensure_ziel_stop, damit Ziel/Stop konsistent zur
+    # erzwungenen Aktion gesetzt werden (nur Neukauf-Pfad; trader_exit wendet
+    # den Zwang NICHT an — HALTEN ist bei einer Bestandsposition legitim).
+    _force_direction_on_clear_signal(result, analysts, debate_result)
     # Technik-Signal (graduell): KAUFEN unter SMA200 bleibt KAUFEN, aber die
     # Positionsgröße wird per Faktor (0.3–1.0) reduziert; RSI-Ausnahme: Faktor
     # 0.5 + strenger Stop. Bewusst am Ende — skaliert jede vorherige Logik.
     _apply_technik_signal(result, analysts)
+    # Ziel-/Stop-Erzwingung: deterministischer Fallback NACH dem Richtungs-Zwang
+    # — bei erzwungenem KAUFEN/VERKAUFEN müssen zielkurs/stop_loss zur neuen
+    # Aktion passen (ohne current_price kein Fallback — kein Crash).
+    current_price = _extract_current_price(analysts)
+    if current_price is not None:
+        try:
+            _ensure_ziel_stop(result, result["aktion"], float(current_price))
+        except (TypeError, ValueError):
+            pass  # current_price nicht konvertierbar — kein Fallback, kein Crash
     return result
 
 
