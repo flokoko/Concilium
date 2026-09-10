@@ -260,6 +260,85 @@ Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
 }
 """
 
+# Phase 1: Dedizierter VERKAUFEN-Pfad — Exit-Review-Prompt (journal/reviews.csv)
+# Der Exit-Trader prüft eine BESTEHENDE Depot-Position auf die explizite Frage
+# "Sollte ich diese Position verkaufen?" (statt eine Neukauf-Analyse zu liefern,
+# aus der die Exit-Frage nur implizit abgeleitet wird). Kernunterschiede zum
+# SYSTEM_TRADER: (1) Rollenverständnis Bestandsposition, (2) RICHTUNG als
+# Exit-Frage (KAUFEN = aufstocken, HALTEN = unverändert, VERKAUFEN = reduzieren),
+# (3) HALTEN ist kein Default-Ausweg, (4) Ziel-/Stop-Semantik bei VERKAUFEN
+# (zielkurs = günstigeres Verkaufsfenster, stop_loss = Stop für die Restposition,
+# einstiegs_level = null).
+SYSTEM_TRADER_EXIT = """\
+Du bist ein professioneller Trader, der eine BESTEHENDE Depot-Position auf die \
+Frage 'Sollte ich diese Position verkaufen?' prüft. Basierend auf den \
+Analysten-Einschätzungen und der Bull/Bear-Debatte erstellst du einen konkreten \
+Exit-Trade-Vorschlag für diese Bestandsposition.
+
+Rollenverständnis (Hedgefonds-Praxis) — RICHTUNG und TIMING sind getrennt:
+- RICHTUNG (Aktion KAUFEN/VERKAUFEN/HALTEN): leite sie PRIMÄR aus der \
+Fundamental-Analyse und der Bull/Bear-Debatte ab.
+- TIMING (Verkaufszeitpunkt): leite es aus der Technik (SMA, RSI, MACD) ab.
+
+EXIT-FRAGE — Die Aktion beantwortet PRIMÄR die Frage 'Sollte ich diese \
+Position verkaufen?':
+- KAUFEN/STARK KAUFEN = Position AUFSTOCKEN (die Exit-These ist widerlegt, \
+die Position bleibt und wird ggf. vergrößert).
+- HALTEN = Position UNVERÄNDERT halten (weder aufstocken noch verkaufen).
+- VERKAUFEN/STARK VERKAUFEN = Position REDUZIEREN/VERKAUFEN (Exit-These \
+bestätigt).
+
+HALTEN ist KEIN Default-Ausweg: HALTEN ist nur dann richtig, wenn du aktiv \
+begründen kannst, warum weder aufgestockt noch verkauft werden sollte (z. B. \
+Exit-These unklar, Chance-Risiko ausgeglichen, Abwarte-Case mit konkreten \
+Checkpunkten). Bei klaren Signalen (Fundamental-Deterioration, Stop-Verletzung, \
+Bewertung deutlich über Fair Value, negative These-Revision) nimm VERKAUFEN — \
+wage Halten ist die schlechteste Entscheidung.
+
+Limit-Order-Disziplin: Gib das Feld 'einstiegs_level' an:
+- Bei KAUFEN/STARK KAUFEN (Aufstocken): ein konkreter Limit-Order-Preis (Zahl \
+oder null) für den Zusatzkauf — Support-Level wie SMA50, Bollinger-Unterband \
+oder Rücksetzer-Level; ist der aktuelle Kurs attraktiv, darf er dem \
+aktuellen Kurs entsprechen.
+- Bei HALTEN/VERKAUFEN/STARK VERKAUFEN: einstiegs_level = null.
+
+Ziel-/Stop-Semantik bei der Exit-Prüfung:
+- Bei VERKAUFEN/STARK VERKAUFEN: einstiegs_level = null; 'zielkurs' = \
+günstigeres VERKAUFSFENSTER (Kurs-Level, ab dem der Ausstieg besonders \
+günstig ist — z.B. Rücksetzer-Level für den tranche-weisen Verkauf), \
+'stop_loss' = Stop-Loss für die VERBLEIBENDE Position (Kurs, bei dem auch \
+der Rest verkauft wird).
+- Bei KAUFEN/STARK KAUFEN: 'zielkurs' = klassisches Kursziel, 'stop_loss' = \
+Stop-Loss des (aufgestockten) Bestands.
+- Bei HALTEN: Werte nur angeben, wenn begründet — sonst null.
+
+Die Technik darf die RICHTUNG nicht kippen — sie verfeinert nur das TIMING:
+- Fundamental-These sagt VERKAUFEN, aber die Technik ist schwach (z.B. Kurs \
+bereits unter SMA200): nimm TROTZDEM VERKAUFEN (die These zählt) und weise \
+in der Begründung auf ein besseres Verkaufsfenster hin (z.B. "Verkauf in \
+Tranchen bei Rücksetzern verteilen").
+- Fundamental-These sagt weiterhalten, aber die Technik ist stark bearish \
+(z.B. Kurs unter SMA200 UND RSI überkauft nach Rallye): das ist ein \
+TIMING-Hinweis, kein eigenständiger Exit-Grund.
+
+Nutze die volle 5-stufige Skala. 'STARK KAUFEN'/'STARK VERKAUFEN' nur bei \
+hoher Überzeugung (sehr klare FUNDAMENTALE Signale — nicht bloß technische; \
+technische Signale betreffen nur das TIMING). Bei Unsicherheit nimm \
+'KAUFEN'/'VERKAUFEN' bzw. 'HALTEN'.
+
+Antworte AUSSCHLIESSLICH im folgenden JSON-Format:
+{
+  "rolle": "Trader",
+  "aktion": "STARK KAUFEN" | "KAUFEN" | "HALTEN" | "VERKAUFEN" | "STARK VERKAUFEN",
+  "zielkurs": "Zielkurs als Zahl oder null",
+  "stop_loss": "Stop-Loss als Zahl oder null",
+  "einstiegs_level": "Limit-Order-Preis für den Einstieg als Zahl oder null (nur bei KAUFEN/Aufstocken; sonst null)",
+  "positionsanteil": "Empfohlener Positionsanteil in % (z.B. 5)",
+  "begründung": "2-4 Sätze Begründung auf Deutsch",
+  "zeithorizont": "Kurzfristig" | "Mittelfristig" | "Langfristig"
+}
+"""
+
 # 5-stufige Rating-Skala (von bullisch zu bearisch)
 RATING_5 = ["STARK KAUFEN", "KAUFEN", "HALTEN", "VERKAUFEN", "STARK VERKAUFEN"]
 
@@ -1562,6 +1641,105 @@ def trader(
     return result
 
 
+def trader_exit(
+    analysts: dict[str, Any],
+    debate_result: dict[str, Any],
+    llm: LLMClient,
+    temperature: float = 0.3,
+    feedback_context: str = "",
+    reflection_context: str = "",
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
+    """Exit-Trader: prüft eine BESTEHENDE Position auf die VERKAUFEN-Frage.
+
+    Phase 1 (dedizierter VERKAUFEN-Pfad): Analog ``trader()``, aber mit dem
+    SYSTEM_TRADER_EXIT-Prompt — die Aktion beantwortet PRIMÄR die Exit-Frage
+    'Sollte ich diese Position verkaufen?' (KAUFEN = aufstocken, HALTEN =
+    unverändert halten, VERKAUFEN/STARK VERKAUFEN = reduzieren/verkaufen),
+    statt die Frage nur implizit aus einer Neukauf-Analyse abzuleiten.
+
+    Rückgabe-Schema ist identisch zu trader() (TRADE_SCHEMA: rolle, aktion,
+    rating, zielkurs, stop_loss, einstiegs_level, positionsanteil, begründung,
+    zeithorizont). Die bekannten Nachbearbeitungen werden analog angewendet:
+    Rating-Normalisierung (5-stufig → 3-stufig), _dampen_stark_rating
+    (Entscheidungs-Disziplin) und _ensure_ziel_stop (deterministischer
+    Ziel-/Stop-Fallback). Das Technik-Signal (_apply_technik_signal) wird
+    NICHT angewendet: Es skaliert ausschließlich die KAUFEN-Position eines
+    Neukaufs; im Exit-Modus ist 'KAUFEN' = Aufstocken einer BESTEHENDEN
+    Position und die Depot-Gewichtung kommt aus dem Depot (depot_pct) — der
+    Fallback würde hier eine erfundene Positionsgröße setzen.
+
+    Args:
+        analysts: Analysten-Ergebnisse.
+        debate_result: Bull/Bear-Debatte-Ergebnis.
+        llm: LLMClient.
+        temperature: Sampling-Temperatur für den LLM-Call (Default 0.3).
+        feedback_context: Optionaler Track-Record-Kontext-Block (leer = kein
+            Feedback), analog trader().
+        reflection_context: Optionaler Reflexions-Block (leer = keine
+            Reflexion), analog trader().
+        model: Optionales Modell-Override (Quick-Think-Split). None =
+            primäres Modell.
+        reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
+            wird an den Call durchgereicht. None/'' (Default) = kein
+            reasoning_effort im Payload (bisheriges Verhalten).
+
+    Returns:
+        dict mit dem Trade-Vorschlag (gleiche Felder wie trader()).
+    """
+    summary = _analyst_summary_text(analysts)
+    # debate_result bull/bear kann "argumente" (strukturierter Pfad) oder
+    # "_raw" (Fallback-Pfad) enthalten — beide unterstützen (analog trader()).
+    bull_text = _get_debate_argument(debate_result.get("bull", {}))
+    bear_text = _get_debate_argument(debate_result.get("bear", {}))
+
+    # Debatten-Konfidenz extrahieren und Kontext-Block bauen
+    bull_conf = debate_result.get("bull_confidence")
+    if bull_conf is None:
+        bull_conf = _parse_debate_confidence(debate_result.get("bull", {}))
+    bear_conf = debate_result.get("bear_confidence")
+    if bear_conf is None:
+        bear_conf = _parse_debate_confidence(debate_result.get("bear", {}))
+    skew_text = _debate_skew_text(bull_conf, bear_conf)
+
+    user_text = (
+        f"Analysten-Einschätzungen:\n{summary}\n\n"
+        f"Bull-Argumentation:\n{bull_text}\n\n"
+        f"Bear-Argumentation:\n{bear_text}"
+    )
+    if skew_text:
+        user_text += f"\n\n{skew_text}"
+    if feedback_context:
+        user_text += f"\n\n{feedback_context}"
+    if reflection_context:
+        user_text += f"\n\n{reflection_context}"
+    result = _call_agent(
+        llm, SYSTEM_TRADER_EXIT, user_text,
+        temperature=temperature,
+        response_format=TRADE_SCHEMA,
+        structured=True,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    # 5-stufige Rating normalisieren: rohes Rating in 'rating', 3-stufige Aktion in 'aktion'
+    raw_rating = str(result.get("aktion", "")).strip().upper()
+    result["rating"] = raw_rating
+    result["aktion"] = _rating_to_action(raw_rating)
+    # Entscheidungs-Disziplin: STARK KAUFEN/STARK VERKAUFEN dämpfen wenn überkonfident
+    _dampen_stark_rating(result, raw_rating)
+    # Ziel-/Stop-Erzwingung: deterministischer Fallback bei fehlenden/unplausiblen
+    # Werten (analog trade_revision). Ohne current_price (None) wird der
+    # Fallback übersprungen — kein Crash.
+    current_price = _extract_current_price(analysts)
+    if current_price is not None:
+        try:
+            _ensure_ziel_stop(result, result["aktion"], float(current_price))
+        except (TypeError, ValueError):
+            pass  # current_price nicht konvertierbar — kein Fallback, kein Crash
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Ensemble-Trader — mehrere Runs mit Mehrheitsabstimmung + Plausibilitäts-Check
 # ---------------------------------------------------------------------------
@@ -1934,6 +2112,7 @@ def ensemble_trader(
     reflection_context: str = "",
     model: str | None = None,
     reasoning_effort: str | None = None,
+    exit_mode: bool = False,
 ) -> dict[str, Any]:
     """Führt den Trader mehrfach aus (Ensemble) und aggregiert per Mehrheitsentscheid.
 
@@ -1953,6 +2132,11 @@ def ensemble_trader(
         reasoning_effort: Optionale Reasoning-Tiefe ('low'/'medium'/'high'),
             wird an jeden trader()-Run durchgereicht. None/'' (Default) = kein
             reasoning_effort im Payload (bisheriges Verhalten).
+        exit_mode: Phase 1 (dedizierter VERKAUFEN-Pfad): Wenn True, nutzt
+            jeder Run ``trader_exit`` (SYSTEM_TRADER_EXIT-Prompt) statt
+            ``trader`` — die Aktion beantwortet die Exit-Frage 'Sollte ich
+            diese Position verkaufen?' explizit. Default False = bisheriges
+            Verhalten (Neukauf-Analyse).
 
     Returns:
         dict mit dem gewählten Trade plus _ensemble-Metadaten:
@@ -1972,7 +2156,8 @@ def ensemble_trader(
     all_runs: list[dict[str, Any]] = []
 
     def _run_trader(temp: float) -> dict[str, Any]:
-        return trader(
+        trader_fn = trader_exit if exit_mode else trader
+        return trader_fn(
             analysts, debate_result, llm,
             temperature=temp,
             feedback_context=feedback_context,

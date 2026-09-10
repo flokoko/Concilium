@@ -722,6 +722,16 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+            # --- Phase 1: Review-Journal-Hinweis (journal/reviews.csv) -----
+            # Kurzer Hinweis auf stderr, dass die Review-Entscheidungen im
+            # separaten Journal protokolliert wurden (nur wenn mindestens
+            # eine Position analysiert wurde).
+            print(
+                "Review-Entscheidungen im Journal protokolliert: "
+                "journal/reviews.csv",
+                file=sys.stderr,
+            )
+
         if failures > 0:
             print(
                 f"\nWARNUNG: {failures} Ticker-Position(en) fehlgeschlagen.",

@@ -24,6 +24,7 @@ from .agents import (
     risk_manager,
     trade_revision,
     trader,
+    trader_exit,
 )
 from .checkpoint import clear_checkpoint, load_checkpoint, save_checkpoint
 from .data import collect_ticker_data
@@ -145,6 +146,7 @@ def run_pipeline(
     debate_rounds: int = 1,
     as_of: str | None = None,
     journal: bool = True,
+    exit_mode: bool = False,
     deep_think_model: str | None = None,
     quick_think_model: str | None = None,
     reasoning_effort: str | None = None,
@@ -208,6 +210,16 @@ def run_pipeline(
             bisheriges Verhalten). Bewusst NICHT Teil des Konfigurations-
             Fingerprints: Env-Konfiguration, kein Pipeline-Parameter wie der
             Deep-/Quick-Think-Split.
+        exit_mode: Phase 1 (dedizierter VERKAUFEN-Pfad): Wenn True, nutzt der
+            Trader-Schritt (Schritt 4) ``trader_exit`` bzw.
+            ``ensemble_trader(..., exit_mode=True)`` — der SYSTEM_TRADER_EXIT-
+            Prompt stellt die VERKAUFEN-Frage ('Sollte ich diese Position
+            verkaufen?') explizit statt sie implizit aus einer Neukauf-Analyse
+            abzuleiten. Gedacht für den Exit-Review (``--review``), der die
+            Bestands-Positionen des Depots prüft. Default False = bisheriges
+            Verhalten (Neukauf-Analyse). Bewusst NICHT Teil des Konfigurations-
+            Fingerprints: Bestehende Checkpoints (Neukauf- und Review-Läufe
+            vor Phase 1) bleiben kompatibel.
 
     Resume-Kompatibilität:
         Ein Checkpoint wird nur wiederverwendet, wenn (a) das gepinnte
@@ -436,7 +448,15 @@ def run_pipeline(
         debate_result = result["debate"]
 
     # --- 4. Trader (oder Ensemble-Trader) ---
+    # Phase 1 (exit_mode): Der Exit-Review nutzt trader_exit /
+    # ensemble_trader(exit_mode=True) — der SYSTEM_TRADER_EXIT-Prompt stellt
+    # die VERKAUFEN-Frage explizit ('Sollte ich diese Position verkaufen?')
+    # statt sie implizit aus einer Neukauf-Analyse abzuleiten.
     if not _is_completed(result, "trade"):
+        if exit_mode:
+            logger.info(
+                "Schritt 4: Exit-Trader prüft BESTEHENDE Position (Exit-Frage)"
+            )
         if ensemble:
             logger.info(
                 "Schritt 4: Ensemble-Trader (%d Runs) erstellt Trade-Vorschlag",
@@ -447,6 +467,18 @@ def run_pipeline(
                 debate_result,
                 llm,
                 runs=ensemble_runs,
+                feedback_context=feedback_context,
+                reflection_context=reflection_context,
+                model=quick_think_model,
+                reasoning_effort=reasoning_effort,
+                exit_mode=exit_mode,
+            )
+        elif exit_mode:
+            logger.info("Schritt 4: Exit-Trader erstellt Trade-Vorschlag (Single-Run)")
+            trade = trader_exit(
+                analysts,
+                debate_result,
+                llm,
                 feedback_context=feedback_context,
                 reflection_context=reflection_context,
                 model=quick_think_model,

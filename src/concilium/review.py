@@ -9,12 +9,19 @@ Ablauf:
      portfolio_fit.py — Google-Sheet mit Tages-Cache).
   2. Filter: nur type == "Aktie" (ETFs/Commodities sind Buy-and-Hold).
   3. Optional max_positions: nur die größten Positionen (nach depot_pct).
-  4. Pro Aktie: normale Pipeline (run_pipeline), aber der Report wird im
-     Review-Kontext gerendert (generate_report(..., review_mode=True)).
-     Die Pipeline läuft mit journal=False — Review-Läufe (Verkauf-
-     Fragestellung) schreiben KEINE Zeilen ins Entscheidungs-Journal
-     (journal/decisions.csv), damit die Kalibrierung/der Track-Record der
-     Neukauf-Analysen nicht verunreinigt wird.
+  4. Pro Aktie: normale Pipeline (run_pipeline, exit_mode=True), aber der
+     Report wird im Review-Kontext gerendert (generate_report(..., review_mode=True)).
+     Phase 1 (dedizierter VERKAUFEN-Pfad): exit_mode=True lässt den Trader-Schritt
+     mit dem SYSTEM_TRADER_EXIT-Prompt laufen — die VERKAUFEN-Frage
+     ("Sollte ich diese Position verkaufen?") wird explizit gestellt statt
+     nur implizit aus einer Neukauf-Analyse abgeleitet. Die Pipeline läuft mit
+     journal=False — Review-Läufe schreiben KEINE Zeilen ins Entscheidungs-
+     Journal (journal/decisions.csv), damit die Kalibrierung/der Track-Record
+     der Neukauf-Analysen nicht verunreinigt wird.
+  4b. NACH jedem erfolgreichen run_pipeline wird die Entscheidung via
+     append_review_decision in das SEPARATE Review-Journal (journal/reviews.csv)
+     geschrieben — damit Verkaufs-Empfehlungen evaluiert und kalibriert
+     werden können (analog decisions.csv für Neukauf-Analysen). Crasht nie.
   5. verkauf_empfehlung wird deterministisch abgeleitet (siehe
      derive_verkauf_empfehlung).
 
@@ -28,6 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .journal import append_review_decision
 from .llm import LLMClient
 from .pipeline import run_pipeline
 from .portfolio_fit import fetch_portfolio_positions
@@ -199,22 +207,49 @@ def run_review(
                 debate_rounds=debate_rounds,
                 peers=peers,
                 as_of=as_of,
-                # Review-Läufe (Verkauf-Fragestellung) verunreinigen nicht das
-                # Entscheidungs-Journal der Neukauf-Analysen: PM + Report laufen
-                # normal, aber append_decision wird unterdrückt.
+                # Phase 1: Exit-Prompt (SYSTEM_TRADER_EXIT) — die VERKAUFEN-Frage
+                # wird explizit gestellt (KAUFEN=Aufstocken, HALTEN=unverändert,
+                # VERKAUFEN=reduzieren/verkaufen).
+                exit_mode=True,
+                # Review-Läufe verunreinigen nicht das Entscheidungs-Journal
+                # der Neukauf-Analysen: PM + Report laufen normal, aber
+                # append_decision wird unterdrückt. Das Review-Journal
+                # (journal/reviews.csv) schreibt review.py selbst — siehe unten.
                 journal=False,
             )
             if not isinstance(result, dict):
                 raise ValueError(f"Unerwartetes Pipeline-Ergebnis für '{ticker}'")
 
+            verkauf = derive_verkauf_empfehlung(result)
             report = generate_report(result, review_mode=True)
             ergebnisse[ticker] = {
                 "result": result,
                 "report": report,
-                "verkauf_empfehlung": derive_verkauf_empfehlung(result),
+                "verkauf_empfehlung": verkauf,
                 "depot_pct": _depot_pct(pos),
                 "name": pos.get("name", ticker),
             }
+
+            # --- Phase 1: Review-Journal (journal/reviews.csv) -------------
+            # NACH jedem erfolgreichen run_pipeline: Die Review-Entscheid wird
+            # ins SEPARATE Journal geschrieben (append_review_decision crasht
+            # nie — selbst wenn es scheitert, läuft der Review weiter).
+            # verkauf_empfehlung/depot_pct/name kommen aus dem Review-Kontext
+            # (Depot-Position), nicht aus dem Pipeline-result.
+            try:
+                append_review_decision(
+                    result,
+                    verkauf_empfehlung=verkauf,
+                    depot_pct=_depot_pct(pos),
+                    name=pos.get("name", ticker),
+                )
+            except Exception as exc:  # noqa: BLE001 — nie crashen (doppelte Absicherung)
+                logger.warning(
+                    "Review-Journal-Eintrag für '%s' konnte nicht geschrieben "
+                    "werden: %s",
+                    ticker,
+                    exc,
+                )
         except KeyboardInterrupt:
             raise
         except Exception as exc:  # noqa: BLE001 — nie crashen (analog Batch-Modus)

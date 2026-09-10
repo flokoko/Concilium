@@ -62,6 +62,38 @@ JOURNAL_HEADER = [
     "lesson",
 ]
 
+# Spalten des Review-Journals (journal/reviews.csv — Phase 1: dedizierter
+# VERKAUFEN-Pfad). Analog JOURNAL_HEADER, aber mit Review-spezifischen Feldern:
+# - verkauf_empfehlung: "1"/"0" — deterministisch abgeleitete Verkaufsempfehlung
+#   (review.derive_verkauf_empfehlung). Kommt aus dem Review-Kontext, NICHT aus
+#   dem Pipeline-result.
+# - depot_pct / name: Depot-Anteil (in %) und Anzeigename der Position — ebenso
+#   aus dem Review-Kontext (Depot-Position), nicht Teil des Pipeline-results.
+# - reflection_status / resolved_at / realised_return_pct / alpha_pct / lesson:
+#   wie im Entscheidungs-Journal (C6) — neue Review-Zeilen starten "pending"
+#   (look-ahead-frei), das Resolving/Tracking erfolgt analog.
+REVIEW_HEADER = [
+    "timestamp",
+    "ticker",
+    "action",
+    "rating",
+    "target",
+    "stop",
+    "position_pct",
+    "final_decision",
+    "confidence",
+    "ensemble_confidence",
+    "portfolio_fit_score",
+    "verkauf_empfehlung",
+    "depot_pct",
+    "name",
+    "reflection_status",
+    "resolved_at",
+    "realised_return_pct",
+    "alpha_pct",
+    "lesson",
+]
+
 # Statuswerte für reflection_status (C6)
 REFLECTION_STATUS_PENDING = "pending"
 REFLECTION_STATUS_RESOLVED = "resolved"
@@ -127,13 +159,22 @@ def _release_lock(fh: Any) -> None:
         logger.debug("Konnte File-Lock nicht freigeben: %s", exc)
 
 
-def _rewrite_journal_with_header(journal_file: str, existing_fields: list[str]) -> None:
+def _rewrite_journal_with_header(
+    journal_file: str,
+    existing_fields: list[str],
+    header: list[str] | None = None,
+) -> None:
     """Schreibt eine bestehende Journal-CSV neu mit dem erweiterten Header.
 
     Liest alle Zeilen der alten Datei, fügt fehlende Spalten (z. B.
     ensemble_confidence, portfolio_fit_score, ziel_gewichtung_pct) als leere
-    Werte zu jeder Zeile hinzu und schreibt die Datei neu mit JOURNAL_HEADER.
+    Werte zu jeder Zeile hinzu und schreibt die Datei neu mit dem Ziel-Header.
+
+    ``header``: Ziel-Header der Migration. None (Default) = JOURNAL_HEADER
+    (Entscheidungs-Journal, Rückwärtskompatibilität); das Review-Journal
+    (append_review_decision) übergibt stattdessen REVIEW_HEADER.
     """
+    target_header = header if header is not None else JOURNAL_HEADER
     try:
         with open(journal_file, encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
@@ -141,14 +182,14 @@ def _rewrite_journal_with_header(journal_file: str, existing_fields: list[str]) 
         with open(journal_file, "w", newline="", encoding="utf-8") as fh:
             _acquire_lock(fh)
             try:
-                writer = csv.DictWriter(fh, fieldnames=JOURNAL_HEADER)
+                writer = csv.DictWriter(fh, fieldnames=target_header)
                 writer.writeheader()
                 for row in rows:
                     # Fehlende Spalten als leer auffüllen
-                    for field in JOURNAL_HEADER:
+                    for field in target_header:
                         if field not in row:
                             row[field] = ""
-                    writer.writerow({k: row.get(k, "") for k in JOURNAL_HEADER})
+                    writer.writerow({k: row.get(k, "") for k in target_header})
             finally:
                 _release_lock(fh)
     except Exception as exc:  # noqa: BLE001 — best effort
@@ -242,6 +283,149 @@ def _prune_resolved(journal_file: str, max_resolved: int) -> None:
                 os.remove(tmp_path)
         except Exception:  # noqa: BLE001
             pass
+
+
+def append_review_decision(
+    result: dict[str, Any],
+    *,
+    verkauf_empfehlung: bool = False,
+    depot_pct: float | int | str = "",
+    name: str = "",
+    journal_dir: str | None = None,
+    journal_file: str | None = None,
+) -> None:
+    """Schreibt einen Review-Entscheid in das Review-Journal (reviews.csv).
+
+    Phase 1 (dedizierter VERKAUFEN-Pfad): Der Exit-Review (``--review``)
+    protokolliert jede Position-Analyse in einem SEPARATEN Journal — analog
+    ``append_decision`` für die Neukauf-Analysen, aber mit Review-spezifischen
+    Feldern (REVIEW_HEADER), damit Verkaufs-Empfehlungen evaluiert und
+    kalibriert werden können.
+
+    Args:
+        result: Das Ergebnis-dict aus run_pipeline (gleiche Struktur wie bei
+            append_decision).
+        verkauf_empfehlung: Deterministisch abgeleitete Verkaufsempfehlung
+            (review.derive_verkauf_empfehlung) — "1"/"0" in der CSV.
+        depot_pct: Depot-Anteil der Position in % (aus dem Review-Kontext /
+            Depot-Position — nicht Teil des Pipeline-results).
+        name: Anzeigename der Position (aus dem Review-Kontext).
+        journal_dir: Optionaler Pfad für das Journal-Verzeichnis (für Tests).
+        journal_file: Optionaler vollständiger Pfad zur Journal-Datei (für Tests).
+
+    Default-Datei: journal/reviews.csv (analog journal/decisions.csv).
+    Crasht niemals — bei Fehler wird nur eine Warnung geloggt.
+    """
+    try:
+        # Pfad bestimmen (analog append_decision, Default reviews.csv)
+        if journal_file is None:
+            if journal_dir is None:
+                journal_dir = "journal"
+            os.makedirs(journal_dir, exist_ok=True)
+            journal_file = os.path.join(journal_dir, "reviews.csv")
+        else:
+            # Bei explizitem journal_file das übergeordnete Verzeichnis anlegen
+            parent_dir = os.path.dirname(journal_file)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+
+        # Felder extrahieren (leer lassen wenn nicht vorhanden) — analog
+        # append_decision, aber ohne Ziel-Gewichtungs-/einstiegs_level-Felder.
+        trade = result.get("trade", {}) or {}
+        final = result.get("final", {}) or {}
+        ticker = result.get("ticker", "")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Ensemble-Konfidenz aus trade._ensemble extrahieren
+        ensemble_info = trade.get("_ensemble", {}) or {}
+        ensemble_confidence = ensemble_info.get("ensemble_confidence", "")
+        if isinstance(ensemble_confidence, float):
+            ensemble_confidence = f"{ensemble_confidence:.2f}"
+
+        # Portfolio-Fit-Felder extrahieren (falls vorhanden)
+        portfolio_fit = result.get("portfolio_fit") or {}
+        portfolio_fit_score = portfolio_fit.get("portfolio_fit_score", "")
+
+        row = {
+            "timestamp": timestamp,
+            "ticker": ticker,
+            "action": trade.get("aktion", ""),
+            "rating": trade.get("rating", ""),
+            "target": trade.get("zielkurs", ""),
+            "stop": trade.get("stop_loss", ""),
+            "position_pct": trade.get("positionsanteil", ""),
+            "final_decision": final.get("entscheidung", ""),
+            "confidence": final.get("confidence", ""),
+            "ensemble_confidence": ensemble_confidence,
+            "portfolio_fit_score": portfolio_fit_score,
+            "verkauf_empfehlung": "1" if verkauf_empfehlung else "0",
+            "depot_pct": depot_pct,
+            "name": name,
+            # C6-Analogie: Neue Review-Zeilen starten "pending" — der Ausgang
+            # existiert zum Analysezeitpunkt noch nicht (kein Look-ahead).
+            "reflection_status": REFLECTION_STATUS_PENDING,
+            "resolved_at": "",
+            "realised_return_pct": "",
+            "alpha_pct": "",
+            "lesson": "",
+        }
+
+        # Datei existiert? → Header nur schreiben wenn neu
+        file_exists = os.path.isfile(journal_file)
+
+        # Bei bestehender Datei mit fehlenden Spalten: Header ergänzen
+        # (Migration auf REVIEW_HEADER).
+        if file_exists:
+            try:
+                with open(journal_file, encoding="utf-8") as fh_check:
+                    reader = csv.DictReader(fh_check)
+                    existing_fields = reader.fieldnames or []
+                # Wenn Header nicht mit REVIEW_HEADER übereinstimmt → Migration
+                if set(REVIEW_HEADER) - set(existing_fields):
+                    _rewrite_journal_with_header(
+                        journal_file, list(existing_fields), header=REVIEW_HEADER
+                    )
+            except Exception as exc:  # noqa: BLE001 — best effort
+                logger.warning("Review-Journal-Header-Check fehlgeschlagen: %s", exc)
+
+        # --- Idempotenz-Guard (analog append_decision) ---------------------
+        # Vor dem Append prüfen, ob bereits eine Zeile mit demselben
+        # (ticker, timestamp) existiert. Best effort: Kann die Datei nicht
+        # gelesen werden, schreiben wir normal (lieber ein Duplikat als ein
+        # verlorener Eintrag).
+        try:
+            if os.path.isfile(journal_file):
+                with open(journal_file, encoding="utf-8") as fh_check:
+                    for existing_row in csv.DictReader(fh_check):
+                        existing_ticker = str(existing_row.get("ticker") or "").strip().lower()
+                        existing_ts = str(existing_row.get("timestamp") or "").strip()
+                        if (
+                            existing_ticker == str(ticker).strip().lower()
+                            and existing_ts == timestamp
+                        ):
+                            logger.warning(
+                                "Review-Journal-Duplikat verhindert: Eintrag "
+                                "(ticker=%s, timestamp=%s) existiert bereits — kein Append",
+                                ticker,
+                                timestamp,
+                            )
+                            return
+        except Exception as exc:  # noqa: BLE001 — best effort, Guard nicht kritisch
+            logger.warning("Review-Journal-Idempotenz-Check fehlgeschlagen — schreibe normal: %s", exc)
+
+        with open(journal_file, "a", newline="", encoding="utf-8") as fh:
+            _acquire_lock(fh)
+            try:
+                writer = csv.DictWriter(fh, fieldnames=REVIEW_HEADER)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerow(row)
+            finally:
+                _release_lock(fh)
+
+        logger.info("Review-Entscheid ins Journal geschrieben: %s", journal_file)
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("Review-Journal-Eintrag konnte nicht geschrieben werden: %s", exc)
 
 
 def append_decision(
