@@ -1034,6 +1034,33 @@ def _polymarket_get_json(url: str) -> Any | None:
         return None
 
 
+def _polymarket_binary_outcome_prices(raw_prices: list[Any]) -> bool:
+    """True, wenn outcomePrices binär (["1","0"]/["0","1"]) sind.
+
+    Der public-search-Endpoint liefert für binäre Win/Loss-Märkte
+    Integer-Strings "0"/"1" — das ist das Auszahlungsmuster (Ja gewinnt
+    = "1", Nein = "0"), KEINE offene Wahrscheinlichkeit. Ein solches
+    Paar darf nicht als 100 %/0 % interpretiert werden.
+    """
+    if not isinstance(raw_prices, list) or len(raw_prices) < 2:
+        return False
+    return {str(p).strip() for p in raw_prices} == {"0", "1"}
+
+
+def _polymarket_probability_from_real_price(market: dict[str, Any]) -> float | None:
+    """Echter Marktpreis aus lastTradePrice/bestBid/bestAsk oder None.
+
+    Fallback für binäre outcomePrices: nur echte Floats in [0, 1] zählen
+    (z. B. 0.98 nahe am Settlement). Fehlen alle oder liegen außerhalb
+    → None (unbekannt statt fabrizierte 100 %/0 %).
+    """
+    for key in ("lastTradePrice", "bestBid", "bestAsk"):
+        value = _safe_float(market.get(key))
+        if value is not None and 0.0 <= value <= 1.0:
+            return value
+    return None
+
+
 def _polymarket_market_item(
     market: Any, default_category: Any = None
 ) -> dict[str, Any] | None:
@@ -1042,6 +1069,11 @@ def _polymarket_market_item(
     Robust gegen variantenreiche Strukturen: Titel über ``question`` oder
     ``title``, Wahrscheinlichkeit über ``outcomePrices`` (JSON-String oder
     Liste, erstes Outcome = Ja-Anteil). None bei unbrauchbarem Eintrag.
+
+    Binäre outcomePrices (["1","0"], public-search Win/Loss-Flags) sind
+    KEINE Wahrscheinlichkeit → stattdessen echten Marktpreis
+    (lastTradePrice/bestBid/bestAsk) verwenden, sonst None. Fraktionale
+    Werte (["0.0395","0.9605"], markets-Fallback) bleiben unverändert.
     """
     if not isinstance(market, dict):
         return None
@@ -1049,7 +1081,9 @@ def _polymarket_market_item(
     if not title or not str(title).strip():
         return None
 
-    # outcomePrices: JSON-String "[\"0.65\", \"0.35\"]" oder Liste
+    # outcomePrices: JSON-String "[\"0.65\", \"0.35\"]" oder Liste.
+    # Binäre Win/Loss-Paare (["1","0"]) sind keine Wahrscheinlichkeit —
+    # public-search setzt sie bei (fast) abgerechneten Binär-Märkten.
     probability: float | None = None
     raw_prices = market.get("outcomePrices")
     if isinstance(raw_prices, str):
@@ -1058,9 +1092,13 @@ def _polymarket_market_item(
         except (json.JSONDecodeError, ValueError, TypeError):
             raw_prices = None
     if isinstance(raw_prices, list) and raw_prices:
-        price = _safe_float(raw_prices[0])
-        if price is not None and 0.0 <= price <= 1.0:
-            probability = price
+        if _polymarket_binary_outcome_prices(raw_prices):
+            # Kein fabriziertes 100 %/0 %: echter Preis suchen, sonst None.
+            probability = _polymarket_probability_from_real_price(market)
+        else:
+            price = _safe_float(raw_prices[0])
+            if price is not None and 0.0 <= price <= 1.0:
+                probability = price
 
     category = market.get("category") or market.get("groupItemTitle") or default_category
     return {

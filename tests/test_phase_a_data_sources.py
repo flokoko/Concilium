@@ -249,10 +249,14 @@ class TestFetchPolymarket:
                     "title": "NVIDIA (NVDA) closes above ___?",
                     "category": "Tech",
                     "markets": [
+                        # Binäres ["1","0"] mit echtem Marktpreis → der
+                        # lastTradePrice gilt, nicht 100 % (false certainty).
                         {
                             "question": "Will NVDA close above $180?",
                             "outcomePrices": ["1", "0"],
+                            "lastTradePrice": 0.98,
                         },
+                        # Fraktionale Preise → unverändert als Wahrscheinlichkeit.
                         {
                             "question": "Will NVDA close above $185?",
                             "outcomePrices": ["0.25", "0.75"],
@@ -268,9 +272,132 @@ class TestFetchPolymarket:
             result = _fetch_polymarket("NVDA")
         assert len(result) == 2
         assert result[0]["title"] == "Will NVDA close above $180?"
-        assert result[0]["probability"] == pytest.approx(1.0)
+        # Binäre outcomePrices ["1","0"] + lastTradePrice → echter Preis
+        # als Wahrscheinlichkeit (0.98), KEIN fabriziertes 1.0.
+        assert result[0]["probability"] == pytest.approx(0.98)
         assert result[0]["category"] == "Tech"
         assert result[1]["probability"] == pytest.approx(0.25)
+
+    def test_binary_prices_with_last_trade_price_uses_real_price(self):
+        """Binär ["1","0"] + lastTradePrice → lastTradePrice als probability."""
+        public_search_response = {
+            "events": [
+                {
+                    "title": "NVIDIA (NVDA) weekly close",
+                    "category": "Tech",
+                    "markets": [
+                        {
+                            "question": "Will NVDA finish week above $155?",
+                            "outcomePrices": ["1", "0"],
+                            "lastTradePrice": 0.98,
+                        }
+                    ],
+                }
+            ]
+        }
+        with patch(
+            "concilium.data.requests.get",
+            return_value=_mock_response(public_search_response),
+        ):
+            result = _fetch_polymarket("NVDA")
+        assert len(result) == 1
+        assert result[0]["probability"] == pytest.approx(0.98)
+
+    def test_binary_prices_no_real_price_probability_none(self):
+        """Binär ["0","1"] ohne lastTradePrice/bestBid/bestAsk → probability None."""
+        public_search_response = {
+            "events": [
+                {
+                    "title": "NVIDIA (NVDA) weekly close",
+                    "category": "Tech",
+                    "markets": [
+                        {
+                            "question": "Will NVDA finish week above $155?",
+                            "outcomePrices": ["0", "1"],
+                        }
+                    ],
+                }
+            ]
+        }
+        with patch(
+            "concilium.data.requests.get",
+            return_value=_mock_response(public_search_response),
+        ):
+            result = _fetch_polymarket("NVDA")
+        assert len(result) == 1
+        assert result[0]["probability"] is None
+
+    def test_binary_prices_falls_back_to_best_bid_ask(self):
+        """Binär ["1","0"] ohne lastTradePrice → bestBid/bestAsk als Fallback."""
+        public_search_response = {
+            "events": [
+                {
+                    "title": "NVIDIA (NVDA) weekly close",
+                    "category": "Tech",
+                    "markets": [
+                        {
+                            "question": "Will NVDA finish week above $155?",
+                            "outcomePrices": ["1", "0"],
+                            "bestBid": 0.92,
+                            "bestAsk": 0.95,
+                        }
+                    ],
+                }
+            ]
+        }
+        with patch(
+            "concilium.data.requests.get",
+            return_value=_mock_response(public_search_response),
+        ):
+            result = _fetch_polymarket("NVDA")
+        assert len(result) == 1
+        assert result[0]["probability"] == pytest.approx(0.92)
+
+    def test_markets_fallback_fractional_prices_unchanged(self):
+        """markets-Fallback: fraktionale ["0.0395","0.9605"] → 0.0395."""
+        markets_response = [
+            {
+                "question": "Will NVDA close above $180?",
+                "outcomePrices": ["0.0395", "0.9605"],
+            }
+        ]
+
+        def _fake_get(url, timeout=15, headers=None):
+            # public-search liefert nichts → markets-Fallback greift.
+            if "public-search" in url:
+                return _mock_response({"events": []})
+            return _mock_response(markets_response)
+
+        with patch("concilium.data.requests.get", side_effect=_fake_get):
+            result = _fetch_polymarket("NVDA")
+        assert len(result) == 1
+        assert result[0]["probability"] == pytest.approx(0.0395)
+
+    def test_binary_prices_out_of_range_real_price_ignored(self):
+        """Binär ["1","0"], aber lastTradePrice außerhalb [0,1] → None (kein Crash)."""
+        public_search_response = {
+            "events": [
+                {
+                    "title": "NVIDIA (NVDA) weekly close",
+                    "category": "Tech",
+                    "markets": [
+                        {
+                            "question": "Will NVDA finish week above $155?",
+                            "outcomePrices": ["1", "0"],
+                            "lastTradePrice": 1.5,
+                            "bestBid": "not-a-number",
+                        }
+                    ],
+                }
+            ]
+        }
+        with patch(
+            "concilium.data.requests.get",
+            return_value=_mock_response(public_search_response),
+        ):
+            result = _fetch_polymarket("NVDA")
+        assert len(result) == 1
+        assert result[0]["probability"] is None
 
     def test_public_search_empty_falls_back_to_markets(self):
         """public-search liefert keine Events → Fallback auf markets?search=."""
