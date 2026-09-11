@@ -44,6 +44,13 @@ JOURNAL_HEADER = [
     "portfolio_fit_score",
     "ziel_gewichtung_pct",
     "ziel_gewichtung_original",
+    # invalidation (Stufe 1): Kompakter, semikolon-verbundener String der
+    # Analysten-Invalidierungs-Bedingungen ("Was würde die These widerlegen?"),
+    # aggregiert in pipeline._aggregate_invalidation. Bewusst VOR dem C6-Block:
+    # Es ist Entscheidungszeitpunkt-Daten (analog den Trade-/Fit-Feldern),
+    # während die C6-Spalten (reflection_status … lesson) Resolution-Buchhaltung
+    # sind. Leer bei Legacy-Zeilen vor Stufe 1 (Header-Migration füllt "" auf).
+    "invalidation",
     # --- Roadmap C6: Deferred Reflection (Pending-Entries, look-ahead-frei) ---
     # reflection_status: "" (Legacy-Zeile vor C6) | "pending" (Ausgang unbekannt,
     # wird beim nächsten Lauf resolved) | "resolved" (Return + Lektion persistiert)
@@ -87,6 +94,11 @@ REVIEW_HEADER = [
     "verkauf_empfehlung",
     "depot_pct",
     "name",
+    # invalidation (Stufe 1): analog JOURNAL_HEADER — semikolon-verbundene
+    # Analysten-Invalidierungen aus dem Pipeline-result (leer bei Legacy-Zeilen).
+    # Bewusst VOR dem C6-Block: invalidation ist Entscheidungszeitpunkt-Daten,
+    # die C6-Spalten (reflection_status … lesson) sind Resolution-Buchhaltung.
+    "invalidation",
     "reflection_status",
     "resolved_at",
     "realised_return_pct",
@@ -368,6 +380,9 @@ def append_review_decision(
             "realised_return_pct": "",
             "alpha_pct": "",
             "lesson": "",
+            # Stufe 1: Invalidierungs-Bedingungen der Analysten (best effort —
+            # fehlt das Feld im Result, bleibt die Spalte leer; kein Crash).
+            "invalidation": str(result.get("invalidation") or ""),
         }
 
         # Datei existiert? → Header nur schreiben wenn neu
@@ -504,6 +519,9 @@ def append_decision(
             "realised_return_pct": "",
             "alpha_pct": "",
             "lesson": "",
+            # Stufe 1: Invalidierungs-Bedingungen der Analysten (best effort —
+            # fehlt das Feld im Result, bleibt die Spalte leer; kein Crash).
+            "invalidation": str(result.get("invalidation") or ""),
         }
 
         # Datei existiert? → Header nur schreiben wenn neu

@@ -866,6 +866,37 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             )
         lines.append("")
 
+        # Invalidierungen der Analysten (Stufe 1) — nur wenn mind. ein
+        # Analyst eine Bedingung genannt hat (Legacy-Results ohne das Feld
+        # → keine Sektion, kein Crash).
+        _invalidierungen: list[tuple[str, str]] = []
+        for key, label in [
+            ("fundamental", "Fundamental"),
+            ("technical", "Technik"),
+            ("sentiment", "Sentiment"),
+            ("macro_news", "Makro/News"),
+            ("social", "Social-Media"),
+        ]:
+            a = analysts.get(key)
+            if not isinstance(a, dict):
+                continue
+            inv = str(a.get("invalidation") or "").strip()
+            if inv:
+                _invalidierungen.append((label, inv))
+        if _invalidierungen:
+            lines.append("### Invalidierungs-Bedingungen (Thesen-Falsifizierung)")
+            lines.append("")
+            lines.append(
+                "_Was würde die jeweilige Einschätzung widerlegen? Diese "
+                "Bedingungen werden im Journal protokolliert und in der "
+                "Track-Record-Evaluierung auf tatsächliche Verletzung geprüft "
+                "(„Invalidierungs-Trefferquote“)._"
+            )
+            lines.append("")
+            for label, inv in _invalidierungen:
+                lines.append(f"- **{label}:** {inv[:300]}")
+            lines.append("")
+
         # Makro/News-Einschätzung (nur wenn der 4. Analyst Daten geliefert hat)
         macro_news = analysts.get("macro_news")
         if isinstance(macro_news, dict) and (
@@ -1393,6 +1424,60 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
         lines.append(f"| n (Portfolio-Fit ≥ 4) | {pf.get('n', 0)} |")
         lines.append(f"| Hit-Rate (hohes Portfolio-Fit) | {_fmt_pct2(pf.get('hit_rate'))} |")
         lines.append("")
+
+    # --- Invalidierungs-Trefferquote (Stufe 1, STANDALONE) ---
+    # Bewusst separat von der Hit-Rate: Diese Quote misst nur, wie oft die
+    # dokumentierten Thesen-Bedingungen ("Was würde die These widerlegen?")
+    # faktisch verletzt wurden. Sie verändert NICHT die Hit-Definition.
+    inv_quote = eval_result.get("invalidation_hit_quote")
+    inv_n = eval_result.get("invalidation_n", 0)
+    inv_hits = eval_result.get("invalidation_hits", 0)
+    inv_nb = eval_result.get("invalidation_nicht_bewertbar", 0)
+    if inv_quote is not None or inv_n > 0 or inv_nb > 0:
+        lines.append("## Invalidierungs-Trefferquote")
+        lines.append("")
+        lines.append(
+            "_STANDALONE Transparenz-Metrik: misst, wie oft die beim "
+            "Entscheidungszeitpunkt dokumentierten Invalidierungs-Bedingungen "
+            "(„Was würde diese These widerlegen?“) im Bewertungszeitraum "
+            "faktisch verletzt wurden. Diese Kennzahl verändert NICHT die "
+            "Hit-Rate oder die Hit-Definition._"
+        )
+        lines.append("")
+        lines.append("| Kennzahl | Wert |")
+        lines.append("|---|---|")
+        lines.append(f"| Thesen mit Bedingung verletzt | {inv_hits} |")
+        lines.append(f"| Bewertete Thesen (n) | {inv_n} |")
+        lines.append(f"| Invalidierungs-Trefferquote | {_fmt_pct2(inv_quote)} |")
+        if inv_nb > 0:
+            lines.append(f"| Nicht bewertbar (LLM-Fehler/Antwort unlesbar) | {inv_nb} |")
+        lines.append("")
+
+        # Einzel-Details (kompakt, nur bewertete Thesen)
+        details = eval_result.get("invalidation_details") or []
+        if details:
+            lines.append("### Details")
+            lines.append("")
+            lines.append("| Ticker | Zeitpunkt | Bedingung verletzt? | Begründung |")
+            lines.append("|---|---|---|---|")
+            for d in details[:20]:
+                verdict = (
+                    "Ja"
+                    if d.get("invalidiert") is True
+                    else "Nein"
+                    if d.get("invalidiert") is False
+                    else "N/A"
+                )
+                begr = str(d.get("begruendung") or "")[:120]
+                lines.append(
+                    f"| {d.get('ticker', '?')} | {d.get('timestamp', '')[:16]} | "
+                    f"{verdict} | {begr} |"
+                )
+            shown = len(details)
+            if shown > 20:
+                lines.append("")
+                lines.append(f"_… {shown - 20} weitere Einträge gekürzt._")
+            lines.append("")
 
     # --- LLM-Zusammenfassung ---
     zusammenfassung = eval_result.get("zusammenfassung")

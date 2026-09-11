@@ -153,6 +153,11 @@ _ANALYST_BASE: dict[str, Any] = {
         },
         "score": {"type": "integer", "minimum": 1, "maximum": 5},
         "zusammenfassung": {"type": "string"},
+        # invalidation (Stufe 1): Konkrete, überprüfbare Bedingung(en), die die
+        # Einschätzung des Analysten widerlegen würde. Bewusst NICHT in
+        # "required" — ältere Modell-Antworten ohne das Feld bleiben gültig
+        # (Rückwärtskompatibilität); _call_agent füllt es per Defaults auf "".
+        "invalidation": {"type": "string"},
         "konsistenz_warnung": {
             "anyOf": [
                 {"type": "string"},

@@ -32,9 +32,146 @@ import yfinance as yf
 
 from .data import _get_cache_dir, _get_today_key
 from .journal import JOURNAL_HEADER  # noqa: F401 — re-exportiert für Test-Zugriff
-from .llm import LLMClient
+from .llm import LLMClient, StructuredChatResult
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Invalidierungs-Prüfung (Stufe 1 — STANDALONE Transparenz-Metrik)
+# --------------------------------------------------------------------------- #
+#
+# Jeder Analyst dokumentiert seit Stufe 1 im Journal-Feld ``invalidation``
+# freitextlich, WAS seine These widerlegen würde (z. B. "KGV über 25",
+# "Bruch unter SMA200"). Diese Bedingung ist menschlicher Prosa — sie
+# mechanisch zu parsen (Regex auf "KGV über X") wäre brüchig und leicht zu
+# fälschen. Deshalb: pro bewertbarer Journal-Zeile EIN LLM-Call, der mit der
+# Invalidierungs-Bedingung + dem realisierten Kurskontext boolsch beantwortet,
+# ob eine der Bedingungen verletzt wurde.
+#
+# WICHTIG (Flo): Diese Metrik ist ein STANDALONE Transparenz-Feature
+# ("Invalidierungs-Trefferquote"). Sie verändert NICHT die bestehende
+# Hit-Definition — hit/rendite/hit_rate_gesamt werden UNVERÄNDERT berechnet.
+#
+# Kosten-Gate: Der LLM-Check läuft nur für Zeilen mit
+#   (a) nicht-leerer ``invalidation``-Spalte UND
+#   (b) bewertbarem Kurs-Outcome (Preise geladen, Rendite berechnet).
+# Ohne LLM (llm=None) oder bei Fehler → deterministischer Fallback None
+# ("nicht bewertbar") — die Zeile zählt weder als Hit noch als Nicht-Hit
+# und die Quote bleibt leer. Crasht nie.
+
+_SYSTEM_INVALIDATION_CHECK = (
+    "Du bist ein strenger Fakten-Prüfer für Trading-Entscheidungen. Du bekommst "
+    "die Invalidierungs-Bedingung(en) einer Analysten-These und den "
+    "realisierten Kursverlauf. Prüfe NUR, ob mindestens eine Bedingung "
+    "laut Text verletzt wurde — bewerte NICHT, ob die These insgesamt gut war."
+)
+
+_USER_INVALIDATION_CHECK_TEMPLATE = (
+    "Invalidierungs-Bedingung(en) des Analysten:\n{invalidation}\n\n"
+    "Realisierter Kursverlauf im Bewertungszeitraum:\n{context}\n\n"
+    "Frage: Wurde mindestens eine der Invalidierungs-Bedingungen verletzt?\n"
+    "Antworte AUSSCHLIESSLICH mit JSON:\n"
+    '{{"invalidiert": true|false, "begruendung": "kurze Begründung auf Deutsch"}}'
+)
+
+
+def _invalidation_price_context(
+    eval_result: dict[str, Any],
+) -> str:
+    """Baut einen kompakten, deterministischen Kurskontext-Text für den LLM-Check.
+
+    Enthält Aktion, Ticker, Zeitraum-Rendite, Ziel-/Stop-Ausgang. Alle Werte
+    stammen aus dem bereits berechneten eval_result (keine zusätzlichen
+    yfinance-Aufrufe) — fehlende Werte werden als "n/a" dargestellt.
+    """
+    parts: list[str] = [
+        f"Ticker: {eval_result.get('ticker', 'n/a')}",
+        f"Aktion: {eval_result.get('action', 'n/a')}",
+        f"Entscheidungszeitpunkt: {eval_result.get('timestamp', 'n/a')}",
+    ]
+    rendite = eval_result.get("rendite_pct")
+    parts.append(
+        "Rendite im Bewertungszeitraum: "
+        + (f"{rendite:.2f} %" if isinstance(rendite, int | float) else "n/a")
+    )
+    ziel = eval_result.get("ziel_erreicht")
+    parts.append(
+        "Zielkurs erreicht: "
+        + ("ja" if ziel is True else "nein" if ziel is False else "n/a")
+    )
+    stop = eval_result.get("stop_gerissen")
+    parts.append(
+        "Stop gerissen: "
+        + ("ja" if stop is True else "nein" if stop is False else "n/a")
+    )
+    return "\n".join(parts)
+
+
+def _parse_invalidation_answer(text: str) -> tuple[bool, str] | None:
+    """Parst die LLM-Antwort der Invalidierungs-Prüfung (tolerant).
+
+    Erwartet JSON {"invalidiert": bool, "begruendung": str}. Akzeptiert auch
+    Booleans als String ("true"/"false"/"ja"/"nein"). Gibt (bool, begründung)
+    zurück oder None bei unlesbarer Antwort (→ Fallback, kein Crash).
+    """
+    from .agents import parse_json  # lokaler Import — vermeidet Zyklen beim Modul-Load
+
+    data = parse_json(text or "")
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("invalidiert")
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        verdict = raw
+    else:
+        s = str(raw).strip().lower()
+        if s in ("true", "ja", "yes", "1"):
+            verdict = True
+        elif s in ("false", "nein", "no", "0"):
+            verdict = False
+        else:
+            return None
+    begr = str(data.get("begruendung") or "").strip()
+    return verdict, begr
+
+
+def check_invalidation_hit(
+    invalidation: str,
+    eval_result: dict[str, Any],
+    llm: LLMClient | None,
+) -> tuple[bool, str] | None:
+    """Prüft per LLM, ob die Invalidierungs-Bedingung verletzt wurde.
+
+    Ein Call pro bewertbarer Zeile (nur wenn ``invalidation`` nicht leer und
+    ``llm`` gegeben). Deterministischer Fallback: None bei fehlendem LLM,
+    Fehler oder unlesbarer Antwort — die Zeile wird dann als "nicht
+    bewertbar" gezählt (weder Hit noch Miss).
+
+    Returns:
+        (invalidiert, begründung) oder None (Fallback / nicht bewertbar).
+    """
+    if llm is None:
+        return None
+    text = str(invalidation or "").strip()
+    if not text:
+        return None
+    try:
+        prompt = _USER_INVALIDATION_CHECK_TEMPLATE.format(
+            invalidation=text,
+            context=_invalidation_price_context(eval_result),
+        )
+        messages = [
+            {"role": "system", "content": _SYSTEM_INVALIDATION_CHECK},
+            {"role": "user", "content": prompt},
+        ]
+        answer = llm.chat(messages, temperature=0.0, max_tokens=2000)
+        answer_text = str(answer) if not isinstance(answer, StructuredChatResult) else answer.text
+        return _parse_invalidation_answer(answer_text)
+    except Exception as exc:  # noqa: BLE001 — best effort, nie crashen
+        logger.warning("Invalidierungs-Prüfung fehlgeschlagen: %s", exc)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -557,6 +694,15 @@ def _empty_result() -> dict[str, Any]:
         },
         "reliability_bins": [],
         "uebersprungen": 0,
+        # Stufe 1: Invalidierungs-Trefferquote — STANDALONE Transparenz-Metrik.
+        # invalidation_hit_quote = Anteil der bewertbaren Zeilen (mit nicht-
+        # leerer invalidation-Spalte + LLM-Check), bei denen mindestens eine
+        # Bedingung verletzt wurde. Verändert NICHT die Hit-Definition.
+        "invalidation_hit_quote": None,
+        "invalidation_n": 0,
+        "invalidation_hits": 0,
+        "invalidation_nicht_bewertbar": 0,
+        "invalidation_details": [],
     }
 
 
@@ -974,6 +1120,30 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
     # --- Reliability-Bänder (feinere Konfidenz-Intervalle) ---
     result["reliability_bins"] = _compute_reliability_bins(trades)
 
+    # --- Invalidierungs-Trefferquote (Stufe 1, STANDALONE) ---------------------
+    # Bewusst NICHT mit hit_rate_gesamt vermischt: invalidation_hit_quote misst
+    # nur, wie oft die dokumentierten Thesen-Bedingungen faktisch verletzt
+    # wurden. Zeilen ohne Bewertung (kein LLM-Check) fließen nicht ein.
+    inv_evals = [
+        e for e in evaluations if e.get("invalidation_hit") is not None
+    ]
+    inv_hits = [e for e in inv_evals if e.get("invalidation_hit") is True]
+    result["invalidation_n"] = len(inv_evals)
+    result["invalidation_hits"] = len(inv_hits)
+    result["invalidation_hit_quote"] = (
+        len(inv_hits) / len(inv_evals) if inv_evals else None
+    )
+    result["invalidation_details"] = [
+        {
+            "ticker": e.get("ticker", ""),
+            "timestamp": e.get("timestamp", ""),
+            "invalidiert": e.get("invalidation_hit"),
+            "begruendung": e.get("invalidation_reason", ""),
+            "invalidation": e.get("invalidation", ""),
+        }
+        for e in inv_evals
+    ]
+
     return result
 
 
@@ -1120,15 +1290,51 @@ def evaluate_journal(
                     continue
 
             eval_result = _evaluate_single(row, prices, lookback_days)
+            # Roh-Zeile mitführen (interner Key, Underscore-Präfix analog
+            # _data_text): die Invalidierungs-Prüfung liest daraus die
+            # invalidation-Spalte. Wird von Report/Aggregation nicht gerendert.
+            eval_result["_row"] = row
             evaluations.append(eval_result)
         except Exception as exc:  # noqa: BLE001 — jede Zeile einzeln
             uebersprungen += 1
             fehler.append(f"{row.get('timestamp', '?')} {ticker}: {exc}")
 
+    # --- Invalidierungs-Prüfung (Stufe 1, STANDALONE Transparenz-Metrik) -------
+    # Nur wenn ein LLM gegeben ist: Pro bewertbarer Zeile mit nicht-leerer
+    # invalidation-Spalte EIN LLM-Call ("Wurde eine Bedingung verletzt?").
+    # Ohne LLM (llm=None) wird der Check komplett übersprungen — alle
+    # Kennzahlen bleiben None/0 (deterministischer Fallback, kein Crash).
+    # Der Check verändert NICHT hit/rendite der Zeile (separate Felder).
+    invalidation_nicht_bewertbar = 0
+    if llm is not None:
+        for eval_result in evaluations:
+            try:
+                invalidation_text = str(
+                    (eval_result.get("_row") or {}).get("invalidation") or ""
+                ).strip()
+                if not invalidation_text:
+                    continue  # Zeile ohne These → nicht bewertbar, zählt nicht
+                check = check_invalidation_hit(
+                    invalidation_text, eval_result, llm
+                )
+                if check is None:
+                    invalidation_nicht_bewertbar += 1
+                    continue  # Fallback: unlesbare Antwort/Fehler → überspringen
+                verdict, begruendung = check
+                eval_result["invalidation_hit"] = verdict
+                eval_result["invalidation_reason"] = begruendung
+                eval_result["invalidation"] = invalidation_text
+            except Exception as exc:  # noqa: BLE001 — nie crashen
+                invalidation_nicht_bewertbar += 1
+                logger.warning(
+                    "Invalidierungs-Check für Zeile übersprungen: %s", exc
+                )
+
     # Aggregieren
     result = _aggregate(evaluations)
     result["fehler"] = fehler
     result["uebersprungen"] = uebersprungen
+    result["invalidation_nicht_bewertbar"] = invalidation_nicht_bewertbar
 
     # LLM-Zusammenfassung (falls llm gegeben)
     if llm is not None and result["anzahl_entscheidungen"] > 0:

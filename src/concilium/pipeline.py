@@ -72,6 +72,52 @@ def _is_completed(result: dict[str, Any], step: str) -> bool:
     return step in result.get("_completed_steps", [])
 
 
+# Analysten-Keys, deren invalidation-Feld aggregiert wird (Reihenfolge
+# deterministisch wie im Report).
+_INVALIDATION_ROLES: list[str] = [
+    "fundamental",
+    "technical",
+    "sentiment",
+    "macro_news",
+    "social",
+]
+
+
+def _aggregate_invalidation(analysts: Any) -> str:
+    """Aggregiert die Analysten-Invalidierungen zu einem kompakten String.
+
+    Stufe 1: Jeder Analyst liefert optional ein ``invalidation``-Feld
+    (freitextliche, überprüfbare Bedingungen). Für das Journal werden alle
+    nicht-leeren Beiträge pro Rolle geprefixt und mit "; " verbunden
+    (Format: "fundamental: ...; technical: ..."). Deterministisch und
+    nie-crashend: fehlende/leere/nicht-String-Werte werden übersprungen,
+    bei gar keinem Beitrag kommt "" zurück (Legacy-Verhalten).
+
+    Args:
+        analysts: Das analysts-dict aus analyst_team (oder beliebiger
+            Ersatzwert — z. B. MagicMock-Rückgabe in Tests; alles Nicht-dict
+            ergibt "").
+
+    Returns:
+        Kompakter String oder "" (nie None, nie ein Crash).
+    """
+    if not isinstance(analysts, dict):
+        return ""
+    parts: list[str] = []
+    for key in _INVALIDATION_ROLES:
+        a = analysts.get(key)
+        if not isinstance(a, dict):
+            continue
+        raw = a.get("invalidation")
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if not text:
+            continue
+        parts.append(f"{key}: {text}")
+    return "; ".join(parts)
+
+
 # Key unter dem der Konfigurations-Fingerprint im result-dict (und damit im
 # Checkpoint) persistiert wird. Underscore-Präfix = interner Bookkeeping-Key,
 # wird vom Journal/Report nicht ausgewertet (analog _completed_steps etc.).
@@ -434,6 +480,14 @@ def run_pipeline(
         _save_step(result, ticker, "analysts")
     else:
         analysts = result["analysts"]
+
+    # --- 2a. Invalidierungen aggregieren (Stufe 1) --------------------------
+    # Die pro-Analyst-Invalidierungs-Bedingungen werden deterministisch zu
+    # einem kompakten String verbunden und im Result persistiert — append_
+    # decision (und append_review_decision) schreiben ihn in die CSV-Spalte
+    # 'invalidation'. Nie-crashend: fehlt 'analysts' (z. B. gemockter Lauf),
+    # bleibt result["invalidation"] = "".
+    result["invalidation"] = _aggregate_invalidation(analysts)
 
     # --- 3. Debatte ---
     if not _is_completed(result, "debate"):
