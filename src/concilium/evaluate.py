@@ -651,6 +651,355 @@ def _evaluate_single(
 
 
 # --------------------------------------------------------------------------- #
+# Statistische Signifikanz: DSR / MBL (Bailey & López de Prado 2014)
+# --------------------------------------------------------------------------- #
+#
+# STANDALONE, strikt additive Metriken — reine Mathematik (nur `math`),
+# netzfrei, kein LLM-Call, deterministisch. Sie verändern NICHT
+# hit_rate_gesamt, den Brier-Score oder irgendeine bestehende Kennzahl.
+#
+#   DSR — Deflated Sharpe Ratio:
+#     Bailey, D. H. & López de Prado, M. (2014): "The Deflated Sharpe Ratio:
+#     Correcting for Selection Bias, Backtest Overfitting and Non-Normality",
+#     Journal of Portfolio Management 40(5).
+#   MBL / MinTRL — Minimale Backtest-Länge:
+#     Bailey, D. H. & López de Prado, M. (2012): "The Sharpe Ratio Efficient
+#     Frontier", Journal of Risk 15(2) — im selben PSR-Rahmen wie der
+#     DSR-Artikel von 2014.
+#
+# Implementierte Formeln (in den Docstrings zitiert und als Approximation
+# gekennzeichnet):
+#   σ(SR)    = sqrt( (1 − γ3·SR + (γ4−1)/4·SR²) / (n−1) )           [Mertens/Lo]
+#   PSR(SR*) = Φ( (SR − SR*) / σ(SR) )                              [Bailey/LdP 2012]
+#   SR0      = √V · ( (1−γ)·Φ⁻¹(1−1/N) + γ·Φ⁻¹(1−1/(N·e)) ),
+#              γ = Euler-Mascheroni ≈ 0.5772                        [Bailey/LdP 2014, Gl. 1/6]
+#   DSR      = PSR(SR0)                                             [Bailey/LdP 2014, Gl. 2]
+#   MinTRL   = 1 + z_p² · (1 − γ3·SR_p + (γ4−1)/4·SR_p²) / SR_p²    [vereinfachte publizierte Variante]
+
+DEFAULT_N_TRIALS: int = 30
+"""Konservativer Default für die Anzahl unabhängiger Trials (Versuche).
+
+Wird in compute_dsr verwendet, wenn kein konkreter Zähler übergeben wird.
+In _aggregate gilt stattdessen: n_trials = Anzahl der bewerteten
+Entscheidungen (jede Journal-Zeile ist ein "Versuch" des Systems),
+mindestens 2. Beide Konventionen sind bewusst konservativ: mehr Trials →
+höherer Schwellenwert E[max SR] → niedrigerer DSR.
+"""
+
+_MIN_TRADE_RETURNS_FUER_SIGNIFIKANZ: int = 10
+"""Mindestanzahl Trade-Renditen (KAUFEN/VERKAUFEN) für DSR/MBL.
+
+Darunter bleiben dsr/mbl None und es wird ein deutscher Hinweis
+(siginifikanz_hinweis) gesetzt — nie crashen.
+"""
+
+_EULER_MASCHERONI: float = 0.5772156649015329
+_SQRT_2PI: float = math.sqrt(2.0 * math.pi)
+_JAHRESFAKTOR_SIGNIFIKANZ: float = 252.0
+"""Annualisierungsfaktor der Trade-Return-Sharpe (Konvention wie backtest.py)."""
+
+
+def _norm_cdf(x: float) -> float:
+    """CDF der Standardnormalverteilung Φ(x) via math.erf (netzfrei, kein scipy)."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _norm_ppf(p: float) -> float | None:
+    """Inverse Standardnormale Φ⁻¹(p) — deterministische Approximation, nur `math`.
+
+    Startwert: Abramowitz & Stegun 26.2.23 (|ε| < 4.4e-4), dann vier
+    Halley-Verfeinerungsschritte gegen die exakte erf-basierte Φ. Damit ist
+    die Quantil-Approximation auf ~Maschinengenauigkeit genau — ohne scipy.
+    Nicht-finite Eingaben → None (nie crashen).
+    """
+    try:
+        p_f = float(p)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(p_f):
+        return None
+    p_clamped = min(max(p_f, 1e-15), 1.0 - 1e-15)
+    lower = p_clamped < 0.5
+    q = p_clamped if lower else 1.0 - p_clamped
+    t = math.sqrt(math.log(1.0 / (q * q)))
+    x = t - (2.515517 + 0.802853 * t) / (1.0 + 1.432788 * t + 0.189269 * t * t)
+    x = -x if lower else x
+    for _ in range(4):
+        fehler = _norm_cdf(x) - p_clamped
+        dichte = math.exp(-0.5 * x * x) / _SQRT_2PI
+        denom = 2.0 * dichte + x * fehler
+        if abs(denom) < 1e-300:
+            break
+        x -= 2.0 * fehler / denom
+    return x
+
+
+def _sharpe_var_term(sharpe: float, skew: float, kurt: float) -> float | None:
+    """Varianz-Term der PSR/DSR-Formel: 1 − γ3·SR + (γ4−1)/4·SR².
+
+    γ3 = Schiefe, γ4 = Kurtosis (raw; Normalverteilung = 3).
+    Nicht-positive oder nicht-finite Werte → None.
+    """
+    var_term = 1.0 - skew * sharpe + ((kurt - 1.0) / 4.0) * sharpe * sharpe
+    if not math.isfinite(var_term) or var_term <= 0.0:
+        return None
+    return var_term
+
+
+def _probst(
+    sharpe: float | None,
+    n: int | None,
+    skew: float = 0.0,
+    kurt: float = 3.0,
+    sharpe_benchmark: float = 0.0,
+) -> float | None:
+    """Probabilistic Sharpe Ratio PSR(SR*): P[wahre Strategie-Schärfe > SR*].
+
+    Formel (Bailey & López de Prado 2012, "The Sharpe Ratio Efficient
+    Frontier", Journal of Risk 15(2); referenziert in Bailey & López de
+    Prado 2014, "The Deflated Sharpe Ratio", Journal of Portfolio Management
+    40(5), Gl. 2 mit SR* = 0):
+
+        PSR(SR*) = Φ( (SR − SR*) · sqrt(n−1)
+                      / sqrt(1 − γ3·SR + (γ4−1)/4·SR²) )
+
+    mit SR = Sharpe pro Rendite-Beobachtung (hier: pro Trade), n = Anzahl
+    Renditen, γ3 = Schiefe, γ4 = Kurtosis (raw, Normalfall 3).
+    Φ ist die CDF der Standardnormalverteilung (via math.erf, netzfrei).
+
+    Args:
+        sharpe: Beobachteter Sharpe pro Beobachtung (NICHT annualisiert).
+        n: Anzahl Rendite-Beobachtungen (n >= 2 nötig).
+        skew: Schiefe der Renditen (Default 0 = normal).
+        kurt: Kurtosis der Renditen, raw (Default 3 = normal).
+        sharpe_benchmark: Schwellenwert SR* (0 für PSR; E[max SR] für DSR).
+
+    Returns:
+        PSR in (0, 1) oder None bei degenerate Eingaben (n < 2, None,
+        nicht-finite Werte, Varianz-Term ≤ 0). Crasht nie.
+    """
+    try:
+        if sharpe is None or n is None:
+            return None
+        n_i = int(n)
+        if n_i < 2:
+            return None
+        sr = float(sharpe)
+        g3 = float(skew) if skew is not None else 0.0
+        g4 = float(kurt) if kurt is not None else 3.0
+        sr0 = float(sharpe_benchmark) if sharpe_benchmark is not None else 0.0
+        if not (math.isfinite(sr) and math.isfinite(g3)
+                and math.isfinite(g4) and math.isfinite(sr0)):
+            return None
+        var_term = _sharpe_var_term(sr, g3, g4)
+        if var_term is None:
+            return None
+        sigma = math.sqrt(var_term / (n_i - 1))
+        return _norm_cdf((sr - sr0) / sigma)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def compute_dsr(
+    sharpe: float | None,
+    n_obs: int | None,
+    skew: float = 0.0,
+    kurt: float = 3.0,
+    n_trials: int = DEFAULT_N_TRIALS,
+    var_trials: float | None = None,
+) -> float | None:
+    """Deflated Sharpe Ratio (DSR) nach Bailey & López de Prado (2014).
+
+    Antwortet die Frage: Wie wahrscheinlich ist es, dass die wahre
+    Strategie-Schärfe > 0 ist, WENN man berücksichtigt, dass das Ergebnis
+    aus N unabhängigen Trials ("Suchaufwand") ausgewählt wurde?
+
+    Implementierte Approximation der Papier-Formeln (Bailey, D. H. & López
+    de Prado, M. (2014): "The Deflated Sharpe Ratio: Correcting for
+    Selection Bias, Backtest Overfitting and Non-Normality", Journal of
+    Portfolio Management 40(5); siehe auch davidhbailey.com/dhbpapers/
+    deflated-sharpe.pdf, Gl. 1/2/6):
+
+        σ(SR)  = sqrt( (1 − γ3·SR + (γ4−1)/4·SR²) / (n−1) )
+        SR0    = sqrt(V) · ( (1−γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e)) )
+        DSR    = Φ( (SR − SR0) / σ(SR) )
+
+    mit γ ≈ 0.5772 (Euler-Mascheroni), e = Eulersche Zahl, N = Anzahl
+    unabhängiger Trials, n = Anzahl Renditen, γ3/γ4 = Schiefe/Kurtosis der
+    Renditen. SR0 ist der erwartete Maximal-Sharpe über N Trials unter der
+    Nullhypothese (kein Können) — für großes N approximiert der
+    Euler-Mascheroni-Term √(2·ln N)·√V, also genau die in der Literatur
+    zitierte "expected best Sharpe from N independent trials"-Form.
+
+    Achtung (Approximationen, bewusst dokumentiert):
+      * V (Varianz der SR-Schätzungen über die Trials) liegt hier typischer-
+        weise nicht empirisch vor. Default (var_trials=None): V wird
+        KONSERVATIV durch die Sampling-Varianz des beobachteten SR-Schätzers
+        genähert, V = σ(SR)² = (1 − γ3·SR + (γ4−1)/4·SR²)/(n−1). Das
+        entspricht dem "unter der Null"-Fall und liefert den aus der Aufgabe
+        bekannten √(2·ln(N)/n)-artigen Term. Mit var_trials kann die
+        empirische Trial-Varianz (gleiche Einheit wie SR!) eingesetzt werden.
+      * Die Trials werden als unabhängig angenommen (Papier, Appendix 3
+        behandelt Korrelationen — hier ohne empirische Trial-Verteilung
+        nicht verfügbar).
+      * SR wird in PER-BEOBACHTUNG-Einheiten erwartet (hier: pro Trade). Der
+        DSR-Test ist skaleninvariant, ein Annualisierungsfaktor kürzt sich.
+
+    Args:
+        sharpe: Sharpe pro Rendite-Beobachtung (per Trade, nicht annualisiert).
+        n_obs: Anzahl Rendite-Beobachtungen (Trades).
+        skew: Schiefe der Renditen (Default 0).
+        kurt: Kurtosis der Renditen, raw (Default 3 = normal).
+        n_trials: Anzahl unabhängiger Trials (Default DEFAULT_N_TRIALS = 30;
+            in _aggregate: Anzahl bewerteter Entscheidungen, min. 2).
+        var_trials: Optionale Varianz der Trial-SRs (gleiche Einheit wie
+            sharpe). None → konservativer Proxy σ(SR)².
+
+    Returns:
+        DSR in (0, 1) oder None bei degenerate Eingaben (nie crashen).
+    """
+    try:
+        if sharpe is None or n_obs is None:
+            return None
+        n_i = int(n_obs)
+        if n_i < 2:
+            return None
+        sr = float(sharpe)
+        g3 = float(skew) if skew is not None else 0.0
+        g4 = float(kurt) if kurt is not None else 3.0
+        if not (math.isfinite(sr) and math.isfinite(g3) and math.isfinite(g4)):
+            return None
+        var_term = _sharpe_var_term(sr, g3, g4)
+        if var_term is None:
+            return None
+        sigma2 = var_term / (n_i - 1)  # Sampling-Varianz des SR-Schätzers
+
+        if var_trials is not None:
+            v = float(var_trials)
+            if not math.isfinite(v) or v <= 0.0:
+                return None
+        else:
+            v = sigma2  # konservativer Proxy (dokumentiert oben)
+
+        n_trials_i = int(n_trials) if n_trials is not None else DEFAULT_N_TRIALS
+        if n_trials_i < 2:
+            n_trials_i = 2  # Φ⁻¹(1−1/N) für N=1 → Grenzfall, bewusst geklemmt
+
+        z1 = _norm_ppf(1.0 - 1.0 / n_trials_i)
+        z2 = _norm_ppf(1.0 - 1.0 / (n_trials_i * math.e))
+        if z1 is None or z2 is None:
+            return None
+        sr0 = math.sqrt(v) * (
+            (1.0 - _EULER_MASCHERONI) * z1 + _EULER_MASCHERONI * z2
+        )
+        if not math.isfinite(sr0):
+            return None
+        return _probst(sr, n_i, g3, g4, sharpe_benchmark=sr0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def compute_mbl(
+    sharpe: float | None,
+    annualization: float = 252.0,
+    pval: float = 0.05,
+    skew: float = 0.0,
+    kurt: float = 3.0,
+) -> float | None:
+    """Minimale Backtest-Länge (MBL / MinTRL) nach Bailey & López de Prado.
+
+    Mindestanzahl Rendite-Beobachtungen (Perioden; hier: Trades), damit ein
+    gemessener Sharpe signifikant von 0 unterscheidbar ist (einseitig,
+    Default p < 0.05).
+
+    Implementierte Formel — vereinfachte, publizierte Variante aus dem
+    PSR-Rahmen (Bailey & López de Prado 2012, "The Sharpe Ratio Efficient
+    Frontier", Journal of Risk 15(2); Bailey & López de Prado 2014, "The
+    Deflated Sharpe Ratio", Journal of Portfolio Management 40(5)):
+
+        MinTRL = 1 + z_p² · (1 − γ3·SR_p + (γ4−1)/4·SR_p²) / SR_p²
+
+    Herleitung: PSR(0) ≥ 1 − p ⇔ (SR_p − 0)·sqrt(T−1)/sqrt(1 − γ3·SR_p +
+    (γ4−1)/4·SR_p²) ≥ z_p ⇒ T ≥ 1 + z_p²·(1 − γ3·SR_p + (γ4−1)/4·SR_p²)/SR_p².
+    Normalfall (γ3 = 0, γ4 = 3): MinTRL = 1 + z_p²/SR_p².
+    Der Moment-Term wird auf dem PERIODEN-Sharpe SR_p ausgewertet
+    (so ist die Formel im Papier hergeleitet).
+
+    Args:
+        sharpe: ANNUALISIERTER Sharpe (Konvention wie im Backtest-Modul:
+            Ø/std · sqrt(annualization)). Wird intern auf die Perioden-
+            einheit zurückgerechnet (SR_p = sharpe / sqrt(annualization));
+            für Trade-Renditen ist eine "Periode" ein Trade.
+        annualization: Perioden pro Jahr (Default 252.0). None → 252.
+        pval: Einseitiges Signifikanzniveau γ (Default 0.05).
+        skew: Schiefe der Renditen (Default 0).
+        kurt: Kurtosis der Renditen, raw (Default 3 = normal).
+
+    Returns:
+        Mindestanzahl Beobachtungen (float, ≥ 1) oder None, wenn der Sharpe
+        fehlt, ≤ 0 ist (dann nie "signifikant > 0") oder die Eingaben
+        degenieren. Crasht nie.
+    """
+    try:
+        if sharpe is None:
+            return None
+        if pval is None or not (0.0 < float(pval) < 1.0):
+            return None
+        ann = 252 if annualization is None else float(annualization)
+        if not math.isfinite(ann) or ann <= 0.0:
+            return None
+        sr_ann = float(sharpe)
+        if not math.isfinite(sr_ann) or sr_ann <= 0.0:
+            return None
+        g3 = float(skew) if skew is not None else 0.0
+        g4 = float(kurt) if kurt is not None else 3.0
+        if not (math.isfinite(g3) and math.isfinite(g4)):
+            return None
+        z = _norm_ppf(1.0 - float(pval))
+        if z is None:
+            return None
+        sr_p = sr_ann / math.sqrt(ann)
+        adj = _sharpe_var_term(sr_p, g3, g4)
+        if adj is None:
+            return None
+        return 1.0 + z * z * adj / (sr_p * sr_p)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _moments_skew_kurt(
+    renditen: list[float],
+) -> tuple[float | None, float | None]:
+    """Schiefe (γ3) und Kurtosis (γ4, raw) einer Rendite-Liste.
+
+    Fisher-Pearson g1/g2 (konsistente, "bias-behaftete" Stichprobenmomente,
+    analog scipy.stats.skew/kurtosis mit bias=True):
+        g1 = m3 / m2^1.5
+        g2 = m4 / m2² − 3   (exzessive Kurtosis)
+        γ4 (raw) = g2 + 3
+    Deterministisch, nur math. Bei < 3 Punkten oder Varianz ≤ 0 → (None, None).
+    """
+    try:
+        werte = [float(r) for r in renditen if r is not None]
+        n = len(werte)
+        if n < 3:
+            return (None, None)
+        mittel = sum(werte) / n
+        m2 = sum((v - mittel) ** 2 for v in werte) / n
+        if m2 <= 0.0 or not math.isfinite(m2):
+            return (None, None)
+        m3 = sum((v - mittel) ** 3 for v in werte) / n
+        m4 = sum((v - mittel) ** 4 for v in werte) / n
+        g1 = m3 / (m2 ** 1.5)
+        g2 = m4 / (m2 * m2) - 3.0
+        skew = g1 if math.isfinite(g1) else None
+        kurt = (g2 + 3.0) if math.isfinite(g2) else None
+        return (skew, kurt)
+    except (TypeError, ValueError, OverflowError):
+        return (None, None)
+
+
+# --------------------------------------------------------------------------- #
 # Aggregation
 # --------------------------------------------------------------------------- #
 
@@ -703,6 +1052,18 @@ def _empty_result() -> dict[str, Any]:
         "invalidation_hits": 0,
         "invalidation_nicht_bewertbar": 0,
         "invalidation_details": [],
+        # Statistische Signifikanz (DSR/MBL, Bailey & López de Prado 2014).
+        # Strikt additive, deterministische Metriken — verändern KEINE
+        # bestehende Kennzahl. Im Leerfall alles None ("zu wenige Trades").
+        "dsr": None,  # Deflated Sharpe Ratio in (0, 1) | None
+        "dsr_ps": None,  # unaufgeblasener PSR (SR > 0) zur Referenz | None
+        "mbl": None,  # Minimale Backtest-Länge (Trades) | None
+        "siginifikanz_hinweis": "",  # deutscher Hinweis bei zu wenigen Trades
+        "signifikanz_details": {  # Transparenz (Eingaben der Formeln)
+            "n_trials": 0,
+            "sharpe_trades_annualisiert": None,
+            "n_trade_renditen": 0,
+        },
     }
 
 
@@ -1144,7 +1505,103 @@ def _aggregate(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
         for e in inv_evals
     ]
 
+    # --- Statistische Signifikanz (DSR/MBL, Bailey & López de Prado 2014) ---
+    # STANDALONE, strikt additiv, deterministisch und NETZFREI (reine
+    # math-Formeln, kein LLM-Call, kein Netz). Bewusst VOR dem LLM-Summary-
+    # Block (in evaluate_journal) berechnet — die Metriken hängen an den
+    # Trade-Renditen, nicht am LLM. Basis: Renditen der echten Trades
+    # (KAUFEN/VERKAUFEN) — konsistent mit hit_rate_gesamt/Brier-Filterung.
+    # Bei zu wenigen Punkten → None + deutscher Hinweis (nie crashen).
+    result["siginifikanz_hinweis"] = _compute_signifikanz(trades, result)
+
     return result
+
+
+def _compute_signifikanz(
+    trades: list[dict[str, Any]],
+    result: dict[str, Any],
+) -> str:
+    """Berechnet DSR/MBL aus den Trade-Renditen und schreibt sie ins result.
+
+    Hilfsfunktion für _aggregate (verändert NUR die neuen Keys):
+      * result["dsr"]      — Deflated Sharpe Ratio (Bailey & LdP 2014), (0,1)|None
+      * result["dsr_ps"]   — unaufgeblasener PSR (P[SR > 0]) zur Referenz, (0,1)|None
+      * result["mbl"]      — Minimale Backtest-Länge (Anzahl Trades), float|None
+      * result["signifikanz_details"] — n_trials, annualisierter Trade-Sharpe, n
+
+    Konservativer n_trials-Default (dokumentiert!): Anzahl der bewerteten
+    Entscheidungen (anzahl_entscheidungen) — jede Journal-Zeile ist ein
+    "Versuch" des Systems; mindestens 2 (Φ⁻¹(1−1/N) braucht N ≥ 2).
+
+    Bei < 10 Trade-Renditen: dsr/dsr_ps/mbl = None und deutscher Hinweis
+    ("⚠️ zu wenige Trades für Signifikanz") als Rückgabewert.
+    """
+    try:
+        renditen = [
+            float(e["rendite_pct"])
+            for e in trades
+            if e.get("rendite_pct") is not None
+            and math.isfinite(e["rendite_pct"])
+        ]
+        n_renditen = len(renditen)
+        details = result.setdefault(
+            "signifikanz_details",
+            {"n_trials": 0, "sharpe_trades_annualisiert": None, "n_trade_renditen": 0},
+        )
+        details["n_trade_renditen"] = n_renditen
+        details["n_trials"] = max(int(result.get("anzahl_entscheidungen") or 0), 2)
+
+        if n_renditen < _MIN_TRADE_RETURNS_FUER_SIGNIFIKANZ:
+            return (
+                "⚠️ zu wenige Trades für Signifikanz: DSR/MBL brauchen "
+                f"mindestens {_MIN_TRADE_RETURNS_FUER_SIGNIFIKANZ} "
+                f"Trade-Renditen (KAUFEN/VERKAUFEN); vorhanden: {n_renditen}."
+            )
+
+        mittel = sum(renditen) / n_renditen
+        varianz = sum((r - mittel) ** 2 for r in renditen) / (n_renditen - 1)
+        if varianz <= 0.0 or not math.isfinite(varianz):
+            return (
+                "⚠️ Trade-Renditen ohne Streuung — Sharpe/DSR/MBL nicht "
+                "berechenbar."
+            )
+        std = math.sqrt(varianz)
+        # Konvention wie backtest.py: Ø/std · sqrt(252) (annualisiert).
+        sharpe_ann = mittel / std * math.sqrt(_JAHRESFAKTOR_SIGNIFIKANZ)
+        # Per-Trade-Einheiten für die PSR/DSR-Formeln (n = Trade-Anzahl).
+        sharpe_per_trade = sharpe_ann / math.sqrt(_JAHRESFAKTOR_SIGNIFIKANZ)
+
+        details["sharpe_trades_annualisiert"] = sharpe_ann
+        skew, kurt = _moments_skew_kurt(renditen)
+
+        # DSR (deflationiert) + unaufgeblasener PSR zur Referenz.
+        result["dsr"] = compute_dsr(
+            sharpe=sharpe_per_trade,
+            n_obs=n_renditen,
+            skew=skew if skew is not None else 0.0,
+            kurt=kurt if kurt is not None else 3.0,
+            n_trials=details["n_trials"],
+        )
+        result["dsr_ps"] = _probst(
+            sharpe=sharpe_per_trade,
+            n=n_renditen,
+            skew=skew if skew is not None else 0.0,
+            kurt=kurt if kurt is not None else 3.0,
+            sharpe_benchmark=0.0,
+        )
+
+        # MBL: Mindestanzahl Trades für p < 0.05 (annualisierter Sharpe).
+        result["mbl"] = compute_mbl(
+            sharpe=sharpe_ann,
+            annualization=_JAHRESFAKTOR_SIGNIFIKANZ,
+            pval=0.05,
+            skew=skew if skew is not None else 0.0,
+            kurt=kurt if kurt is not None else 3.0,
+        )
+        return ""
+    except Exception as exc:  # noqa: BLE001 — Signifikanz darf nie crashen
+        logger.warning("Signifikanz-Berechnung (DSR/MBL) fehlgeschlagen: %s", exc)
+        return "⚠️ Signifikanz-Metriken (DSR/MBL) konnten nicht berechnet werden."
 
 
 # --------------------------------------------------------------------------- #

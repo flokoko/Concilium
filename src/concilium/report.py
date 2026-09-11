@@ -1414,6 +1414,61 @@ def generate_track_record_report(eval_result: dict[str, Any]) -> str:
                 )
             lines.append("")
 
+    # --- Statistische Signifikanz (DSR / MBL) -------------------------------
+    # Strikt additive Sektion nach der Konfidenz-Kalibrierung: misst, ob die
+    # gemessene Sharpe/Hit-Qualität bei n Trades statistisch belastbar ist
+    # (Bailey & López de Prado 2014). Verändert KEINE anderen Kennzahlen.
+    dsr = eval_result.get("dsr")
+    dsr_ps = eval_result.get("dsr_ps")
+    mbl = eval_result.get("mbl")
+    hinweis = eval_result.get("siginifikanz_hinweis") or ""
+    sig_details = eval_result.get("signifikanz_details") or {}
+    n_trials = sig_details.get("n_trials", 0)
+    sharpe_ann = sig_details.get("sharpe_trades_annualisiert")
+
+    def _dsr_bewertung(wert: float | None) -> str:
+        if wert is None:
+            return "N/A"
+        if wert >= 0.95:
+            return "hoch"
+        if wert >= 0.90:
+            return "mittel"
+        return "niedrig"
+
+    lines.append("## Statistische Signifikanz (DSR / MBL)")
+    lines.append("")
+    lines.append(
+        "_DSR (Deflated Sharpe Ratio, Bailey & López de Prado 2014): "
+        "Wahrscheinlichkeit, dass die tatsächliche Strategie-Schärfe > 0 ist "
+        "(Inflations-/Multiple-Test-korrigiert; korrigiert für die Anzahl der "
+        "Versuche, Nicht-Normalität und Stichprobenlänge). MBL (Mindest-"
+        "Backtest-Länge): Mindestanzahl Trades, damit der gemessene Sharpe "
+        "signifikant von 0 unterscheidbar ist (p < 0.05). Netzfreie, "
+        "deterministische Formeln; strikt additiv zu allen anderen Kennzahlen._"
+    )
+    lines.append("")
+    lines.append("| Kennzahl | Wert |")
+    lines.append("|---|---|")
+    if dsr is not None:
+        lines.append(f"| DSR (P[Strategie-Schärfe > 0], multiple-test-korrigiert) | {_fmt_pct2(dsr)} ({_dsr_bewertung(dsr)}) |")
+    if dsr_ps is not None:
+        lines.append(
+            f"| PSR (unaufgeblasen: P[Sharpe > 0] ohne Trial-Korrektur) | {_fmt_pct2(dsr_ps)} |"
+        )
+    if mbl is not None:
+        lines.append(
+            f"| MBL (Mindest-Trades für p < 0.05) | {_fmt_num(mbl, ' Trades')} |"
+        )
+    if n_trials > 0:
+        lines.append(f"| Versuche (n_trials, konservativ) | {n_trials} |")
+    if sharpe_ann is not None:
+        lines.append(
+            f"| Sharpe (Trade-Renditen, annualisiert) | {_fmt_num(sharpe_ann)} |"
+        )
+    if dsr is None and mbl is None:
+        lines.append(f"| Signifikanz | {hinweis or 'zu wenige Trades für Signifikanz'} |")
+    lines.append("")
+
     # --- Portfolio-Fit ---
     pf = eval_result.get("portfolio_fit_hoch")
     if pf is not None:
