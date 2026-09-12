@@ -12,6 +12,12 @@ Typ-Koerzion analog TradingAgents' ``_coerce``: Env-Var-Strings werden auf
 den Typ des Default-Werts koerziert (bool/int/float/str). Bei ungültigem
 Wert (z. B. Tippfehler ``CONCILIUM_CACHE_DIR=treu``) gibt es eine LAUTE
 ValueError-Meldung statt stillschweigendem Fallback auf den Default.
+
+Konfig-Variablen (Auswahl):
+- CONCILIUM_MAX_POSITION_PCT: harte Obergrenze für die Ziel-Gewichtung
+  (ziel_gewichtung_pct, % des Portfolios), float, Default 15.0. Wird vom
+  Final-Guard (_apply_final_position_guard, pipeline.py) NACH dem
+  Portfolio-Manager angewendet — nicht durch LLM übersteuerbar.
 """
 
 from __future__ import annotations
@@ -279,6 +285,40 @@ def journal_max_resolved() -> int:
     if raw is None:
         return 0
     return cast(int, _coerce(raw, 0, key="CONCILIUM_JOURNAL_MAX_RESOLVED"))
+
+
+# ---------------------------------------------------------------------------
+# Final-Guard (Punkt 4): harte Obergrenze für die Ziel-Gewichtung
+# ---------------------------------------------------------------------------
+
+
+def max_position_pct() -> float:
+    """Harte Obergrenze für portfolio_fit.ziel_gewichtung_pct (% des Portfolios).
+
+    Der Final-Guard (_apply_final_position_guard in pipeline.py) kappt die
+    LLM-empfohlene Ziel-Gewichtung NACH dem Portfolio-Manager deterministisch
+    an diesem Maximum — hart, nicht durch LLM übersteuerbar (auch ein
+    PM-MODIFIZIERT-Re-Weighting kann den Wert nicht über das Maximum heben).
+
+    Priorität: CONCILIUM_MAX_POSITION_PCT-Env > 15.0 (Default).
+    Typ-koerziert (float) via _coerce — bei Tippfehler LAUTE ValueError
+    mit Env-Variablen-Namen (gleiche Koerzion wie in _env, nur ohne den
+    dortigen str()-Wrap, damit der Rückgabetyp float bleibt).
+    Werte <= 0 sind unzulässig (ein Obergrenze von 0 oder negativ hätte
+    keine sinnvolle Semantik) → ebenfalls laute ValueError.
+    """
+    raw = os.environ.get("CONCILIUM_MAX_POSITION_PCT")
+    if raw is None:
+        return 15.0
+    value = cast(
+        float, _coerce(raw, 15.0, key="CONCILIUM_MAX_POSITION_PCT")
+    )
+    if not value > 0:  # NaN-safe: auch float("nan") > 0 ist False
+        raise ValueError(
+            "Invalid value for CONCILIUM_MAX_POSITION_PCT: expected a float > 0, "
+            f"got {raw!r}"
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------

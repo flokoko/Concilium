@@ -1121,6 +1121,23 @@ LLM-Textgenerierung und Heuristiken und dienen nur Demonstrationszwecken.")
             lines.append(ziel_zeile)
             lines.append(f"**Konzentrationsrisiko:** {portfolio_fit.get('konzentrationsrisiko_bewertung', 'N/A')}")
             lines.append(f"**Sektor-/Branchen-Overlap:** {portfolio_fit.get('sektor_overlap_bewertung', 'N/A')}")
+            # Final-Guard (Punkt 4): Hinweis nur wenn der Guard wirklich
+            # gekappt hat (gekappt=True) — analog _vol_cap_hinweis.
+            final_guard = portfolio_fit.get("_final_guard")
+            if (
+                isinstance(final_guard, dict)
+                and final_guard.get("gekappt")
+            ):
+                max_pct = _kompakte_zahl(final_guard.get("max_pct"))
+                fg_original = _kompakte_zahl(final_guard.get("original"))
+                if max_pct is not None:
+                    original_teil = (
+                        f"; original {fg_original}" if fg_original else ""
+                    )
+                    lines.append(
+                        f"**Final-Guard:** Ziel-Gewichtung auf max. {max_pct} % "
+                        f"begrenzt (hart, nicht durch LLM übersteuerbar{original_teil})"
+                    )
             lines.append(f"**Begründung:** {portfolio_fit.get('begründung', 'N/A')}")
             # Währungsrisiko-Score (nur wenn vorhanden, d.h. bei Fremdwährungs-Tickern)
             waehrungs_score = portfolio_fit.get("waehrungsrisiko_score")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any
 
 # Referenz auf das feedback-Modul (für die Rückwärtskompatibilitäts-Prüfung in
@@ -70,6 +71,105 @@ def _mark_completed(result: dict[str, Any], step: str) -> None:
 def _is_completed(result: dict[str, Any], step: str) -> bool:
     """Gibt True zurück, wenn step in _completed_steps enthalten ist."""
     return step in result.get("_completed_steps", [])
+
+
+# ---------------------------------------------------------------------------
+# Final-Guard (Punkt 4): harte Obergrenze für die Ziel-Gewichtung
+# ---------------------------------------------------------------------------
+
+
+def _apply_final_position_guard(
+    portfolio_fit: dict[str, Any] | None,
+    trade: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Kappt die Ziel-Gewichtung am harten Maximum (in-place) — Final-Guard (P4).
+
+    Letzter deterministischer Sizing-Schritt NACH dem Portfolio-Manager:
+    Kein LLM-Output (auch kein PM-MODIFIZIERT-Re-Weighting) darf
+    ``portfolio_fit["ziel_gewichtung_pct"]`` über ``config.max_position_pct()``
+    (CONCILIUM_MAX_POSITION_PCT, Default 15.0 %) heben.
+
+    Verhalten:
+    - Clamp nur bei endlichem, numerischem ``ziel_gewichtung_pct > 0``;
+      der Cap senkt NUR (nie anheben) — Werte <= Max bleiben unverändert.
+    - Metadaten ``portfolio_fit["_final_guard"]`` = {"max_pct", "original",
+      "gekappt"} (gekappt=False, wenn kein Cap griff). provenance-Feld
+      ``ziel_gewichtung_original`` (Dämpfung) wird NICHT angetastet.
+    - Konsistenz-Hinweis: Bei KAUFEN/STARK KAUFEN wird
+      ``trade["_final_guard_consistency"]`` (bool) gesetzt — finale
+      Ziel-Gewichtung <= hartes Maximum. Reine Metadaten (per-trade
+      ``positionsanteil`` und Portfolio-Ziel-Gewichtung bleiben
+      unterschiedliche Konzepte — kein Zwangs-Match).
+    - Resume-Idempotenz: Der Cap senkt nur — ein bereits gekappter Wert
+      wird gegen denselben Max-Wert nicht verschoben; ein bereits
+      gespeichertes ``original`` bleibt erhalten (kein Provenance-Verlust).
+      Ein NACHträgliches Anheben (z. B. PM-Re-Weight im Portfolio-Modus)
+      wird beim erneuten Apply erneut gekappt.
+    - Crasht nie (try/except; bei Fehlern portfolio_fit unverändert).
+    """
+    try:
+        if not isinstance(portfolio_fit, dict):
+            return portfolio_fit
+
+        max_pct = config.max_position_pct()
+
+        ziel_raw = portfolio_fit.get("ziel_gewichtung_pct")
+        ziel_num: float | None = None
+        if isinstance(ziel_raw, int | float) and not isinstance(ziel_raw, bool):
+            ziel_f = float(ziel_raw)
+            if math.isfinite(ziel_f):  # NaN/±Inf → kein Clamp möglich
+                ziel_num = ziel_f
+
+        # Bereits vorhandene Guard-Metadaten (Resume): original + gekappt
+        # bewahren, damit keine Provenance verloren geht.
+        existing = portfolio_fit.get("_final_guard")
+        existing = existing if isinstance(existing, dict) else {}
+
+        original = existing.get("original")
+        if ziel_num is None:
+            # Nicht-numerisches Ziel: kein Clamp möglich (nur Metadaten).
+            if original is None:
+                original = ziel_raw if ziel_raw is not None else existing.get("original")
+            portfolio_fit["_final_guard"] = {
+                "max_pct": max_pct,
+                "original": original,
+                "gekappt": False,
+            }
+            return portfolio_fit
+
+        ziel_f = ziel_num
+        if original is None:
+            original = ziel_f
+
+        gekappt = bool(ziel_f > max_pct) or bool(existing.get("gekappt"))
+        if ziel_f > max_pct:
+            portfolio_fit["ziel_gewichtung_pct"] = max_pct
+
+        portfolio_fit["_final_guard"] = {
+            "max_pct": max_pct,
+            "original": original,
+            "gekappt": gekappt,
+        }
+
+        # Konsistenz-Hinweis (nur Metadaten, kein Zwangs-Match mit
+        # positionsanteil): finale Ziel-Gewichtung <= hartes Maximum?
+        if isinstance(trade, dict):
+            aktion = str(trade.get("aktion", "")).strip().upper()
+            if aktion in ("KAUFEN", "STARK KAUFEN"):
+                final_ziel = portfolio_fit.get("ziel_gewichtung_pct")
+                final_ziel_num: float | None = None
+                if isinstance(final_ziel, int | float) and not isinstance(
+                    final_ziel, bool
+                ):
+                    fz = float(final_ziel)
+                    if math.isfinite(fz):
+                        final_ziel_num = fz
+                trade["_final_guard_consistency"] = bool(
+                    final_ziel_num is not None and final_ziel_num <= max_pct
+                )
+    except Exception:  # noqa: BLE001 — Guard darf nie crashen
+        return portfolio_fit
+    return portfolio_fit
 
 
 # Analysten-Keys, deren invalidation-Feld aggregiert wird (Reihenfolge
@@ -719,6 +819,23 @@ def run_pipeline(
         )
         result["final"] = final
         _save_step(result, ticker, "final")
+
+    # --- Final-Guard (Punkt 4): harte Obergrenze für die Ziel-Gewichtung ---
+    # Bewusst NACH dem Portfolio-Manager (Schritt 6): Der PM kann in
+    # MODIFIZIERT-Auflagen die Ziel-Gewichtung anpassen — der Guard ist die
+    # LETZTE deterministische Instanz und kappt jeden LLM-Wert (auch ein
+    # PM-Re-Weighting) am harten Maximum (CONCILIUM_MAX_POSITION_PCT,
+    # Default 15.0 %). Auch im skip_final-Modus (Portfolio-Phase 1) läuft
+    # er gegen den vorhandenen portfolio_fit — bei erneutem Apply (Phase 2
+    # / Resume) senkt der Cap nur und schreibt keine Provenance um, also
+    # idempotent. Crasht nie (bei Fehlern unverändert weiter).
+    try:
+        pf_guard = result.get("portfolio_fit")
+        if isinstance(pf_guard, dict):
+            _apply_final_position_guard(pf_guard, result.get("trade"))
+            result["portfolio_fit"] = pf_guard
+    except Exception as exc:  # noqa: BLE001 — nie crashen
+        logger.warning("Final-Guard fehlgeschlagen: %s", exc)
 
     # --- Feature 4: Entscheidungs-Journal ---
     # Nur im LLM-Modus (llm nicht None), wenn final existiert, NICHT
