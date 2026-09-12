@@ -1036,6 +1036,22 @@ def run_portfolio(
                 result["portfolio_context"] = portfolio_analysis
                 result["_final_pending"] = False
 
+                # Final-Guard NACH dem PM auch im Portfolio-Modus: Ein
+                # PM-MODIFIZIERT-Re-Weighting (hochgesetzte Ziel-Gewichtung)
+                # wird erneut am harten Maximum gekappt. Der Guard ist
+                # re-idempotent gegen nachträgliches Anheben (Docstring oben),
+                # senkt nur, crasht nie.
+                try:
+                    _apply_final_position_guard(
+                        result.get("portfolio_fit"), result.get("trade")
+                    )
+                except Exception as exc:  # noqa: BLE001 — nie crashen
+                    logger.warning(
+                        "Final-Guard im Portfolio-Modus für '%s' fehlgeschlagen: %s",
+                        ticker,
+                        exc,
+                    )
+
                 # Journal EINMAL schreiben — mit dem final MIT Portfolio-Kontext
                 try:
                     append_decision(result)
